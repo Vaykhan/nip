@@ -19,6 +19,9 @@ import { initThrowable } from '../runtime/errors.js';
 import { closureClass } from '../runtime/native-classes.js';
 import { lazyFn } from '../runtime/boot.js';
 import { def, deref, pnamesOf } from './core.js';
+import { internalMethodSig } from '../runtime/inheritance.js';
+import { CLASS_ARGINFO } from '../runtime/arginfo.js';
+import { parsePHP } from '../parser.js';
 
 const IS_STATIC = 16, IS_PUBLIC = 1, IS_PROTECTED = 2, IS_PRIVATE = 4, IS_ABSTRACT = 64, IS_FINAL = 32;
 const IS_READONLY = 128, IS_READONLY_CLASS = 65536, IS_EXPLICIT_ABSTRACT = 64;
@@ -166,7 +169,27 @@ const ATTR_OPS = {
 };
 
 // ---------------------------------------------------------------- functions and methods
-function reflParams(fn) {
+// PHP's arginfo for methods of internal classes (NIP's implementations of them may declare
+// other parameter names and types), or null
+function internalArgs(fr) {
+  if (!fr || fr.k !== 'method' || !isInternalFn(fr.fn)) return null;
+  const m = fr.m;
+  if (m.reflSig === undefined) m.reflSig = internalMethodSig(m.cls, lc(m.name));
+  const sig = m.reflSig;
+  if (sig && !sig.reflParams) {
+    sig.reflParams = sig.params.map((p) => ({ name: p.name, byRef: p.byRef, variadic: p.variadic, type: p.type, promote: null, native: true, optional: p.optional, rawDef: p.def }));
+    sig.required = 0;
+    sig.params.forEach((p, i) => { if (!p.optional && !p.variadic) sig.required = i + 1; });
+  }
+  return sig;
+}
+// an arginfo default value ("null", "[]", "SORT_REGULAR", ...) evaluated
+function rawDefault(raw) {
+  try { return cExpr(parsePHP('<?php ' + raw + ';', PRELUDE_FILE)[0].e)(new Frame(null, null, null, null)); } catch (e) { return undefined; }
+}
+function reflParams(fn, fr) {
+  const ai = internalArgs(fr);
+  if (ai) return ai.reflParams;
   if (fn.native === undefined) return fn.params;
   if (!fn.reflParams) {
     const names = fn.pnames || pnamesOf(fn.native);
@@ -197,7 +220,9 @@ function nativeDefaults(jsfn) {
     return undefined;
   });
 }
-function requiredCount(fn) {
+function requiredCount(fn, fr) {
+  const ai = internalArgs(fr);
+  if (ai) return ai.required;
   if (fn.native !== undefined) return fn.min;
   const ps = fn.params;
   for (let i = ps.length - 1; i >= 0; i--) if (!ps[i].def && !ps[i].variadic) return i + 1;
@@ -251,7 +276,7 @@ const FN_OPS = {
   isInternal: (r) => isInternalFn(r.fn),
   isUserDefined: (r) => !isInternalFn(r.fn),
   isGenerator: (r) => !!r.fn.isGen,
-  isVariadic: (r) => reflParams(r.fn).some((p) => p.variadic),
+  isVariadic: (r) => reflParams(r.fn, r).some((p) => p.variadic),
   isStatic: (r) => (r.k === 'method' ? !!r.m.static : !!(r.fn.decl && r.fn.decl.static)),
   getClosureThis: (r) => (r.closure ? r.closure.thisObj || null : null),
   getClosureScopeClass: (r) => (r.closure && r.closure.scope ? classObj(r.closure.scope) : null),
@@ -270,15 +295,15 @@ const FN_OPS = {
   getName: (r) => (r.k === 'method' ? r.m.name : fnName(r.fn)),
   getNamespaceName: (r) => { const n = FN_OPS.getName(r); const i = n.lastIndexOf('\\'); return r.k === 'method' || i < 0 ? '' : n.slice(0, i); },
   getShortName: (r) => { const n = FN_OPS.getName(r); return r.k === 'method' ? n : n.slice(n.lastIndexOf('\\') + 1); },
-  getNumberOfParameters: (r) => reflParams(r.fn).length,
-  getNumberOfRequiredParameters: (r) => requiredCount(r.fn),
-  getParameters: (r) => list(reflParams(r.fn).map((p, i) => mk('ReflectionParameter', { k: 'param', fr: r, i }, { name: p.name }))),
+  getNumberOfParameters: (r) => reflParams(r.fn, r).length,
+  getNumberOfRequiredParameters: (r) => requiredCount(r.fn, r),
+  getParameters: (r) => list(reflParams(r.fn, r).map((p, i) => mk('ReflectionParameter', { k: 'param', fr: r, i }, { name: p.name }))),
   getStaticVariables: (r) => staticVars(r),
   returnsReference: (r) => !!r.fn.byRef,
-  hasReturnType: (r) => !!r.fn.ret,
-  getReturnType: (r) => typeObj(r.fn.ret),
-  hasTentativeReturnType: () => false,
-  getTentativeReturnType: () => null,
+  hasReturnType: (r) => { const ai = internalArgs(r); return ai ? !!ai.ret && !ai.tentative : !!r.fn.ret; },
+  getReturnType: (r) => { const ai = internalArgs(r); return ai ? (ai.tentative ? null : typeObj(ai.ret)) : typeObj(r.fn.ret); },
+  hasTentativeReturnType: (r) => { const ai = internalArgs(r); return !!ai && !!ai.ret && ai.tentative; },
+  getTentativeReturnType: (r) => { const ai = internalArgs(r); return ai && ai.tentative ? typeObj(ai.ret) : null; },
   getAttributes: (r, name, flags) => attrList(r.fn.decl && r.fn.decl.attrs, r.k === 'method' ? ATTR_TARGET.method : ATTR_TARGET.function, fnScope(r), name, flags, 'ReflectionFunctionAbstract'),
   __toString: (r) => fnToString(r),
 };
@@ -322,10 +347,11 @@ function methodModifiers(m) {
 }
 
 // ---------------------------------------------------------------- parameters
-const reflParam = (r) => reflParams(r.fr.fn)[r.i];
+const reflParam = (r) => reflParams(r.fr.fn, r.fr)[r.i];
 function paramDefaultAvailable(r) {
   const p = reflParam(r);
   if (p.variadic) return false;
+  if (p.rawDef !== undefined) return p.rawDef !== null;
   return p.native ? p.nativeDef !== undefined : !!p.defNode;
 }
 const PARAM_OPS = {
@@ -352,21 +378,25 @@ const PARAM_OPS = {
   isCallable: (r) => { deprecated('Method ReflectionParameter::isCallable() is deprecated'); const t = reflParam(r).type; return !!t && t.alts.length === 1 && t.alts[0] === 'callable'; },
   allowsNull: (r) => { const t = reflParam(r).type; return !t || t.nullable || t.alts.includes('mixed'); },
   getPosition: (r) => r.i,
-  isOptional: (r) => r.i >= requiredCount(r.fr.fn),
+  isOptional: (r) => r.i >= requiredCount(r.fr.fn, r.fr),
   isDefaultValueAvailable: (r) => paramDefaultAvailable(r),
   getDefaultValue(r) {
     if (!paramDefaultAvailable(r)) reflErr('Internal error: Failed to retrieve the default value');
     const p = reflParam(r);
+    if (p.rawDef !== undefined) return rawDefault(p.rawDef);
     if (p.native) return p.nativeDef;
     return p.def(scopeFrame(fnScope(r.fr), r.fr.fn));
   },
   isDefaultValueConstant(r) {
     if (!paramDefaultAvailable(r)) reflErr('Internal error: Failed to retrieve the default value');
+    const raw = reflParam(r).rawDef;
+    if (raw) return /^\\?[A-Za-z_][\w\\]*(::[A-Za-z_]\w*)?$/.test(raw) && !['null', 'true', 'false'].includes(lc(raw));
     const d = reflParam(r).defNode;
     return !!d && (d.k === 'Const' || d.k === 'CConst');
   },
   getDefaultValueConstantName(r) {
     if (!paramDefaultAvailable(r)) reflErr('Internal error: Failed to retrieve the default value');
+    if (reflParam(r).rawDef) return PARAM_OPS.isDefaultValueConstant(r) ? reflParam(r).rawDef.replace(/^\\/, '') : null;
     const d = reflParam(r).defNode;
     if (!d) return null;
     if (d.k === 'Const') return d.fb && !rt.consts.has(d.name) ? d.fb : d.name;
@@ -627,6 +657,8 @@ const CLASS_OPS = {
 CLASS_OPS.isIterateable = CLASS_OPS.isIterable;
 // the extension an internal class belongs to (approximated from its name)
 function classExtension(cls) {
+  const ai = CLASS_ARGINFO[cls.lname];
+  if (ai) return ai[2];
   const n = cls.name;
   if (/^Reflect|^(Attribute|ReturnTypeWillChange|AllowDynamicProperties|SensitiveParameter(Value)?|Override)$/.test(n)) return /^Reflect/.test(n) ? 'Reflection' : 'Core';
   if (/^Date/.test(n)) return 'date';
@@ -761,28 +793,29 @@ function constDisplay(v) {
 }
 function paramToString(r) {
   const p = reflParam(r);
-  const opt = r.i >= requiredCount(r.fr.fn);
+  const opt = r.i >= requiredCount(r.fr.fn, r.fr);
   let s = `Parameter #${r.i} [ <${opt ? 'optional' : 'required'}> `;
   if (p.type) s += typeStr(p.type, null, true) + ' ';
   s += (p.byRef ? '&' : '') + (p.variadic ? '...' : '') + '$' + p.name;
-  if (opt && !p.variadic && paramDefaultAvailable(r)) s += ' = ' + (p.defNode ? exprSource(p.defNode, fnScope(r.fr)) : exportValue(p.nativeDef));
+  if (opt && !p.variadic && paramDefaultAvailable(r)) s += ' = ' + (p.rawDef ? p.rawDef : p.defNode ? exprSource(p.defNode, fnScope(r.fr)) : exportValue(p.nativeDef));
   return s + ' ]';
 }
 function fnToString(r) {
   const fn = r.fn, internal = isInternalFn(fn);
   const kind = r.k === 'method' ? 'Method' : r.closure && fn.isClosure ? 'Closure' : 'Function';
-  let s = `${kind} [ <${internal ? 'internal' : 'user'}${r.k === 'method' && r.m.cls !== r.via ? `, inherits ${r.m.cls.name}` : ''}${r.k === 'method' && lc(r.m.name) === '__construct' ? ', ctor' : ''}> `;
+  let s = `${kind} [ <${internal ? (r.k === 'method' ? 'internal:' + classExtension(r.m.cls) : 'internal') : 'user'}${r.k === 'method' && r.m.cls !== r.via ? `, inherits ${r.m.cls.name}` : ''}${r.k === 'method' && lc(r.m.name) === '__construct' ? ', ctor' : ''}> `;
   if (r.k === 'method') s += [r.m.abstract ? 'abstract' : '', r.m.final ? 'final' : '', r.m.static ? 'static' : '', r.m.vis].filter(Boolean).join(' ') + ' method ';
   else s += 'function ';
   s += FN_OPS.getName(r) + ' ] {\n';
   if (!internal) s += `  @@ ${fn.file} ${fn.line} - ${fn.decl.endLine || fn.line}\n`;
-  const ps = reflParams(fn);
+  const ps = reflParams(fn, r);
   if (ps.length) {
     s += `\n  - Parameters [${ps.length}] {\n`;
     ps.forEach((p, i) => { s += '    ' + paramToString({ k: 'param', fr: r, i }) + '\n'; });
     s += '  }\n';
   }
-  if (fn.ret) s += `  - Return [ ${typeStr(fn.ret, null, true)} ]\n`;
+  const ai = internalArgs(r);
+  if (ai ? ai.ret : fn.ret) s += `  - ${ai && ai.tentative ? 'Tentative return' : 'Return'} [ ${typeStr(ai ? ai.ret : fn.ret, null, true)} ]\n`;
   return s + '}\n';
 }
 function propToString(r) {
@@ -914,7 +947,7 @@ def('__refl_init', (self, kind, a, b = null) => {
         if (!fn) reflErr(`Function ${n}() does not exist`);
         fr = { k: 'fn', fn, closure: null };
       }
-      const ps = reflParams(fr.fn);
+      const ps = reflParams(fr.fn, fr);
       let i;
       if (typeof b === 'number') { i = b; if (i < 0 || i >= ps.length) reflErr('The parameter specified by its offset could not be found'); }
       else { i = ps.findIndex((p) => p.name === toStr(b)); if (i < 0) reflErr('The parameter specified by its name could not be found'); }

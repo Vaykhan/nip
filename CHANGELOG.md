@@ -8,21 +8,47 @@ changes to the embedding API.
 ## [Unreleased]
 
 ### Added
+- Reflection: `ReflectionClass`, `ReflectionObject`, `ReflectionMethod`, `ReflectionFunction`,
+  `ReflectionProperty`, `ReflectionParameter`, `ReflectionClassConstant`, `ReflectionEnum`
+  (and its case classes), `ReflectionNamedType`/`ReflectionUnionType`/`ReflectionIntersectionType`,
+  `ReflectionAttribute`, `ReflectionExtension` and doc comments.
+- Attributes: parsed everywhere PHP allows them, validated (targets, repetition) and exposed
+  through Reflection. Engine attributes `#[\Attribute]`, `#[\Override]`,
+  `#[\AllowDynamicProperties]`, `#[\SensitiveParameter]` and `#[\ReturnTypeWillChange]`.
+- Fibers (`Fiber`, `FiberError`): suspension from nested function and method calls,
+  `throw()`, `getReturn()`, and `finally` blocks of unfinished fibers running on destruction.
+- `goto`, including jumps into `if`/`else`/`try` blocks and inside `switch`.
+- `declare(ticks=N)`, `register_tick_function()`, `unregister_tick_function()`.
+- The PHP 8.2 "Creation of dynamic property" deprecation.
 - `disable_functions` ini setting.
-- Compile-time checks PHP performs on a whole file before running it, starting with misuse
-  of `[]` ("Cannot use [] for reading/unsetting", "Cannot append to $GLOBALS") and invalid
-  destructuring ("Cannot use empty list", mixing keyed and unkeyed entries, spread in
-  assignments).
+- Compile-time checks PHP performs on a whole file before running it: misuse of `[]`
+  ("Cannot use [] for reading/unsetting", "Cannot append to $GLOBALS"), invalid
+  destructuring, `goto` rules, duplicate and conflicting modifiers, interface and enum rules,
+  `readonly` and promoted property rules, invalid type declarations, `self`/`parent`/`static`
+  outside a class, `void`/`never` returns, writes to `$this`, constant expression rules,
+  writes to temporary values, and more.
+- Inheritance checks done when a class is linked: method signature compatibility
+  (contravariant parameters, covariant return types, "Declaration of ... must be compatible
+  with ..."), deprecations for tentative return types of internal methods, static/abstract/
+  visibility changes, and property and class constant redeclaration rules.
+- Classes are declared at compile time only when PHP would (no interfaces or traits, parent
+  already declared); other classes exist from the moment their declaration runs.
+- Reflection reports PHP's real parameter names, types, defaults and (tentative) return types
+  for methods of internal classes (`src/runtime/arginfo.js`, generated from PHP).
+- `ArrayObject::ARRAY_AS_PROPS` and `ArrayIterator::ARRAY_AS_PROPS`.
 - Development: unit tests (`node:test`), ESLint, a mutation fuzzer with a reproducer
   minimizer (`scripts/fuzz.js`), php-src baselines that CI enforces
   (`tests/phpt/baseline/`), and a release workflow.
 
 ### Fixed
+- `Closure`, `Generator`, `WeakReference` and `Fiber` objects refuse dynamic properties.
 - Internal errors found by fuzzing: by-reference destructuring of objects and strings,
   string offsets beyond 2^53, output-buffer callbacks throwing during shutdown.
 - Included files and `eval()` code reused across `run()` calls kept the previous run's
   functions (and their static variables) at call sites.
 - Included files that changed between `run()` calls were not recompiled.
+- Errors raised inside functions implemented in the PHP prelude now report the caller's file
+  and line, and prelude frames no longer appear in stack traces.
 - Boolean string offsets now warn "String offset cast occurred", as in PHP.
 
 ### Changed

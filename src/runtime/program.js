@@ -9,9 +9,10 @@ import { RETURN } from '../compiler/common.js';
 import { checkProgram } from '../compiler/checks.js';
 import { cStmts } from '../compiler/stmt.js';
 import { rt } from './state.js';
-import { makeException, throwError, warn } from './errors.js';
+import { makeException, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { declareFunction, NativeFrame } from './functions.js';
-import { declareClass } from './classes.js';
+import { classExists, declareClass } from './classes.js';
+import { UNRESOLVED } from './inheritance.js';
 
 export function compileSource(src, file) {
   let ast;
@@ -36,7 +37,24 @@ export function hoistDecls(ast, f) {
   };
   scan(ast);
   for (const s of fns) { declareFunction(s.fn); s.hoisted = true; }
-  // declare classes whose dependencies are available, repeat until fixpoint
+  if (classes.length && classes[0].file === PRELUDE_FILE) { hoistPrelude(classes, f); return; }
+  // PHP declares a class at compile time ("early binding") only when it uses no traits, implements
+  // no interfaces, and its parent is already declared; the others are declared when execution
+  // reaches them
+  const saved = rt.hoisting;
+  rt.hoisting = true;
+  try {
+    for (const c of classes) {
+      if (c.declared || c.kind === 'enum' || c.traits.length || c.interfaces.length) continue;
+      if (c.parent && !classExists(c.parent, false)) continue;
+      if (rt.classes.has(c.name.toLowerCase())) continue;
+      try { declareClass(c, f); } catch (e) { if (e !== UNRESOLVED) throw e; }
+    }
+  } finally { rt.hoisting = saved; }
+}
+// the prelude may use classes before declaring them: declare classes whose dependencies are
+// available, repeat until fixpoint
+function hoistPrelude(classes, f) {
   let progress = true;
   const pending = classes.filter((c) => !c.declared);
   while (progress && pending.length) {

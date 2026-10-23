@@ -63,13 +63,14 @@ export function bootNativeClasses() {
   });
   nativeClass('__PHP_Incomplete_Class').allowDynamic = true;
   bootFibers();
-  nativeClass('WeakReference', {
+  const weakRef = nativeClass('WeakReference', {
     final: true,
     methods: {
       'static create': (self, args) => { const o = new PHPObject(rt.classes.get('weakreference')); o.target = argv0(args, 0); return o; },
       get: (self) => self.target || null,
     },
   });
+  for (const c of [closureClass, generatorClass, weakRef, rt.classes.get('fiber')]) c.noDynamic = true;
 }
 function closureBind(cl, newThis, newScope) {
   if (!(cl instanceof PHPObject) || cl.cls !== closureClass) throwError('TypeError', 'Closure::bind(): Argument #1 ($closure) must be of type Closure');

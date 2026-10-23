@@ -7,3 +7,5 @@ ext/date/tests/008.phpt
 ext/date/tests/gmdate_basic.phpt
 ext/date/tests/gmmktime_variation7.phpt
 ext/date/tests/localtime_basic.phpt
+ext/date/tests/mktime_basic1.phpt
+ext/date/tests/time_basic.phpt

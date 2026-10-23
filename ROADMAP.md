@@ -31,7 +31,7 @@ logic in JS applications, teaching, and developer tooling.
 
 ---
 
-## Phase 0: Foundation ✅ in progress
+## Phase 0: Foundation ✅ done
 
 Make the project safe to change quickly.
 
@@ -40,38 +40,47 @@ Make the project safe to change quickly.
 - [x] Deterministic test suite with stored expected output (no PHP needed to run it).
 - [x] CI on Node 22/24, plus a differential job against php 8.3 and a weekly php-src run.
 - [x] Architecture and contribution docs.
-- [ ] **Baseline ratchet:** store per-suite php-src pass counts in the repo; CI fails on any drop.
-- [ ] Unit tests (`node:test`) for the lexer, the parser and value operations (conversions,
+- [x] **Baseline ratchet:** store per-suite php-src pass counts in the repo; CI fails on any drop.
+- [x] Unit tests (`node:test`) for the lexer, the parser and value operations (conversions,
       comparison, int overflow), which are hard to cover from PHP scripts.
-- [ ] ESLint (dev dependency) with a small rule set: no unused variables, no accidental globals,
+- [x] ESLint (dev dependency) with a small rule set: no unused variables, no accidental globals,
       no shadowed imports.
-- [ ] Parser fuzzing: random and mutated PHP inputs must produce a PHP `ParseError` or run.
+- [x] Parser fuzzing: random and mutated PHP inputs must produce a PHP `ParseError` or run.
       They must never cause an internal JS exception.
-- [ ] Release process: semver, CHANGELOG, `npm publish`, GitHub release with `nip.cjs` attached.
+- [x] Release process: semver, CHANGELOG, `npm publish`, GitHub release with `nip.cjs` attached.
 
 **Exit criteria:** CI green on every PR; php-src baselines enforced; first npm release (0.2.0).
+The release workflow is ready; publishing 0.2.0 needs an `NPM_TOKEN` secret and a `v0.2.0` tag.
 
 ## Phase 1: Language completeness (PHP 8.3 parity)
 
 Everything a modern framework relies on in the language itself.
 
-- [ ] **Reflection**: `ReflectionClass`, `ReflectionMethod`, `ReflectionProperty`,
+- [x] **Reflection**: `ReflectionClass`, `ReflectionMethod`, `ReflectionProperty`,
       `ReflectionFunction`, `ReflectionParameter`, `ReflectionNamedType`/union types,
       `ReflectionEnum`, `ReflectionAttribute`. This is the biggest blocker for Laravel/Symfony
       (dependency injection containers, routing, serializers).
-- [ ] **Attributes** at runtime (`#[...]` exposed through Reflection, plus the engine attributes
+      Done, written in PHP (`src/prelude/reflection.php`) on top of `src/lib/reflection.js`.
+      Follow-up: builtin functions have no arginfo yet, so their parameters and return types
+      are untyped in Reflection; `__toString()` output is only partly identical.
+- [x] **Attributes** at runtime (`#[...]` exposed through Reflection, plus the engine attributes
       `#[\Override]`, `#[\SensitiveParameter]`, `#[\AllowDynamicProperties]`).
-- [ ] `goto`.
-- [ ] **Fibers.** They need stackful coroutines, which closures over the JS stack can't provide.
-      Plan: compile a second, generator-mode version of each function on demand and use it for
-      code running inside a Fiber (`yield*` delegation through calls). Prototype first and
-      measure the cost.
-- [ ] Compile-time checks PHP does for invalid code: duplicate modifiers, method signature
-      compatibility (LSP), abstract instantiation, invalid `readonly` use, constant expression
-      rules.
-- [ ] `declare(ticks)`, `register_tick_function`.
+- [x] `goto`.
+- [x] **Fibers.** They need stackful coroutines, which closures over the JS stack can't provide.
+      Each function that may suspend gets a second, generator-mode version compiled on demand,
+      used for code running inside a Fiber (`yield*` delegation through calls). Code in that
+      mode runs about 4× slower than normal code; code outside fibers is unaffected.
+      Follow-up: suspending from callbacks called by builtins (`array_map`, `usort`, ...) or
+      from inside a generator is not supported yet; it throws a `FiberError` saying so.
+- [x] Compile-time checks PHP does for invalid code: duplicate modifiers, method signature
+      compatibility (LSP), invalid `readonly` use, interface/enum rules, `goto` rules, invalid
+      type declarations, constant expression rules (`src/compiler/checks.js`,
+      `src/runtime/inheritance.js`).
+- [x] `declare(ticks)`, `register_tick_function`.
 - [ ] Object handle reuse, so `#N` in `var_dump` and `spl_object_id()` match PHP after objects
-      are freed.
+      are freed. Blocked on exact liveness: the cycle collector's roots don't include values
+      held only in JS temporaries, so reusing a handle could give two live objects the same
+      `spl_object_id()`. Needs reference counting for objects (or roots for temporaries) first.
 - [ ] **Own regex engine.** A backtracking matcher that implements PCRE2 semantics on byte
       strings: recursion `(?R)`, conditionals, `\K`, possessive quantifiers, atomic groups,
       `(?J)`, callouts, exact offsets. Translating to JS `RegExp` can't cover these, and real
@@ -188,10 +197,10 @@ published compatibility matrix.
 
 Phases overlap. This order unlocks the most value earliest:
 
-1. Finish Phase 0 (baseline ratchet, unit tests, lint, first release).
-2. Reflection and attributes, since every framework is blocked on them.
+1. ~~Finish Phase 0 (baseline ratchet, unit tests, lint, first release).~~
+2. ~~Reflection and attributes, since every framework is blocked on them.~~
 3. The sync bridge, which unblocks networking and databases.
 4. SAPI layer, `nip serve` and PDO SQLite: the first real web apps run.
 5. Compiled variables and cheaper calls, the largest performance gap.
 6. The regex engine and XML support, for library compatibility.
-7. Fibers, PHP 8.4/8.5 features, FastCGI, sandboxing, portable core.
+7. PHP 8.4/8.5 features, FastCGI, sandboxing, portable core.

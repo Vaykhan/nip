@@ -11,6 +11,12 @@ import { typeStr } from '../runtime/functions.js';
 // or passed as an argument whose by-ref-ness is only known at run time.
 // ASSIGN: the target itself is assigned ($x = ..., foreach targets, list() items)
 const READ = 0, WRITE = 1, UNSET = 2, ARG = 3, ASSIGN = 4;
+// zend_is_variable_or_call: what can be written through ($a[0] = 1, f()->x = 1); anything else is
+// a temporary value
+const VAR_OR_CALL = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'Call', 'MCall', 'NullsafeMCall', 'SCall']);
+const CONST_EXPR_NODES = new Set(['Lit', 'Bin', 'And', 'Or', 'Xor', 'Not', 'BitNot', 'Neg', 'Plus', 'Ternary', 'Index', 'Arr',
+  'Const', 'CConst', 'ClassName', 'Name', 'MagicClass', 'MagicMethod', 'Coalesce', 'New', 'Prop']);
+const isTemp = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && !VAR_OR_CALL.has(n.k);
 
 export function checkProgram(ast) {
   const seen = new WeakSet();
@@ -36,8 +42,9 @@ export function checkProgram(ast) {
         checkAttrs(n.attrs, T_CLASS);
         for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD); methods.add(m.fn); }
         for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
-        for (const c of n.consts) checkAttrs(c.attrs, T_CLASS_CONSTANT);
-        for (const c of n.cases) checkAttrs(c.attrs, T_CLASS_CONSTANT);
+        for (const c of n.consts) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
+        for (const c of n.cases) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
+        for (const p of n.props) checkConstExpr(p.def, false);
         const outer = curClass;
         curClass = n;
         try { for (const key in n) if (key !== 'l') visit(n[key], READ); } finally { curClass = outer; }
@@ -49,6 +56,7 @@ export function checkProgram(ast) {
           if (ctx === READ) fail('Cannot use [] for reading', n);
           if (ctx === UNSET) fail('Cannot use [] for unsetting', n);
         }
+        if (ctx !== READ && ctx !== ARG && isTemp(n.o)) fail('Cannot use temporary expression in write context', n);
         visit(n.o, ctx === READ ? READ : ctx === UNSET ? UNSET : WRITE);
         visit(n.i, READ);
         return;
@@ -59,6 +67,7 @@ export function checkProgram(ast) {
         return;
       case 'Prop':
         if (n.nullsafe && ctx !== READ && ctx !== ARG) fail("Can't use nullsafe operator in write context", n);
+        if (ctx !== READ && ctx !== ARG && isTemp(n.o)) fail('Cannot use temporary expression in write context', n);
         visit(n.o, ctx === READ ? READ : WRITE);
         if (typeof n.name === 'object') visit(n.name, READ);
         return;
@@ -76,12 +85,18 @@ export function checkProgram(ast) {
         if (!items.length) fail('Cannot use empty list', n);
         if (items.some((it) => it.spread)) fail('Spread operator is not supported in assignments', n);
         if (items.some((it) => it.key) && items.some((it) => !it.key)) fail('Cannot mix keyed and unkeyed array entries in assignments', n);
+        for (const it of items) {
+          let t = it.v;
+          while (t && (t.k === 'Index' || t.k === 'Prop')) t = t.o;
+          if (it.v && it.v.k !== 'Arr' && it.v.k !== 'List' && isTemp(t)) fail('Assignments can only happen to writable values', n);
+        }
         for (const it of items) { visit(it.key, READ); visit(it.v, it.byRef ? WRITE : ASSIGN); }
         return;
       }
       case 'Call': visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) : null, n); return;
       case 'MCall': case 'NullsafeMCall': visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
       case 'SCall': case 'New': visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
+      case 'ConstDecl': for (const it of n.items) checkConstExpr(it.e, true); break;
       case 'Global':
         for (const x of n.names) if (x === 'this') fail('Cannot use $this as global variable', n);
         break;
@@ -139,8 +154,9 @@ export function checkProgram(ast) {
       if (!a) return;
       const e = a.e !== undefined ? a.e : a;
       if (a.spread || a.name) { visit(e, ARG); return; }
-      const byRef = !fn || (fn.refs && fn.refs[i]) || (fn.refRest !== null && i >= fn.refRest);
-      visit(e, byRef ? ARG : READ);
+      // a builtin's by-reference parameter is a write; for other functions it's known at run time
+      if (!fn) visit(e, ARG);
+      else visit(e, (fn.refs && fn.refs[i]) || (fn.refRest !== null && i >= fn.refRest) ? WRITE : READ);
     });
   }
 
@@ -237,6 +253,10 @@ export function checkProgram(ast) {
     if (!attrs) return;
     const seen = new Set();
     for (const a of attrs) {
+      for (const arg of a.args || []) {
+        if (arg && arg.spread) fail('Cannot use unpacking in attribute argument list', a);
+        checkConstExpr(arg && arg.e !== undefined ? arg.e : arg, true);
+      }
       const ln = (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase();
       const known = ENGINE_ATTRS[ln];
       if (!known) continue;
@@ -262,6 +282,39 @@ export function checkProgram(ast) {
       else for (const x of a.inter) checkClassRef(x, n, ctx);
     }
   }
+  // zend_compile_const_expr: what may appear in constant expressions (constants, property and
+  // parameter defaults, attribute arguments); `new` only where the value is computed at run time
+  function checkConstExpr(e, allowNew) {
+    if (!e || typeof e !== 'object') return;
+    if (Array.isArray(e)) { for (const x of e) checkConstExpr(x, allowNew); return; }
+    if (!CONST_EXPR_NODES.has(e.k)) fail('Constant expression contains invalid operations', e);
+    switch (e.k) {
+      case 'Lit': return;
+      case 'CConst':
+        if (typeof e.cls !== 'string') fail('Dynamic class names are not allowed in compile-time class constant references', e);
+        if (e.cls.toLowerCase() === 'static') fail('"static::" is not allowed in compile-time constants', e);
+        if (typeof e.name !== 'string') fail('Dynamic class constant fetch is not allowed in compile-time constants', e);
+        return;
+      case 'ClassName':
+        if (typeof e.cls !== 'string') fail('(expression)::class cannot be used in constant expressions', e);
+        if (e.cls.toLowerCase() === 'static') fail('static::class cannot be used for compile-time class name resolution', e);
+        return;
+      case 'New':
+        if (!allowNew) fail('New expressions are not supported in this context', e);
+        if (e.cls && e.cls.k === 'ClassDecl') fail('Cannot use anonymous class in constant expression', e);
+        if (typeof e.cls !== 'string') fail('Cannot use dynamic class name in constant expression', e);
+        if (e.cls.toLowerCase() === 'static') fail('"static" is not allowed in compile-time constants', e);
+        for (const a of e.args || []) {
+          if (a && a.spread) fail('Argument unpacking in constant expressions is not supported', e);
+          checkConstExpr(a && a.e !== undefined ? a.e : a, allowNew);
+        }
+        return;
+      case 'Arr':
+        for (const it of e.items) if (it) { checkConstExpr(it.key, allowNew); checkConstExpr(it.v, allowNew); }
+        return;
+    }
+    for (const key in e) if (key !== 'l' && e[key] && typeof e[key] === 'object') checkConstExpr(e[key], allowNew);
+  }
   function within(kind, fn) { path.push({ kind }); try { fn(); } finally { path.pop(); } }
   function visitFunction(fn) {
     const outer = scope, outerPath = path, outerCtx = fnCtx;
@@ -281,7 +334,7 @@ export function checkProgram(ast) {
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
     for (const u of fn.uses || []) if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
     if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
-    for (const p of fn.params) checkAttrs(p.attrs, T_PARAMETER);
+    for (const p of fn.params) { checkAttrs(p.attrs, T_PARAMETER); checkConstExpr(p.def, true); }
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
     checkGotos(scope, !fn.params.length && !fn.isGen ? fn.body : null);
     scope = outer; path = outerPath; fnCtx = outerCtx;

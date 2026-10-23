@@ -12,6 +12,7 @@ import { callValue } from './callables.js';
 import { gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
 import { lazyClass, lazyClassSrc } from './boot.js';
+import { checkDelayed, checkInheritance } from './inheritance.js';
 
 export class PHPClass {
   constructor(name) {
@@ -76,6 +77,9 @@ export function lookupClass(name, quiet) {
   if (quiet) return null;
   throwError('Error', `Class "${n}" not found`);
 }
+// class lookup for inheritance checks: no autoloading until the class is registered
+const resolveForCheck = (n) => classExists(n, false);
+const autoloadForCheck = (n) => classExists(n, true);
 export function classExists(name, autoload) {
   const ln = (name[0] === '\\' ? name.slice(1) : name).toLowerCase();
   if (rt.classes.has(ln)) return rt.classes.get(ln);
@@ -163,6 +167,8 @@ export function declareClass(decl, f) {
     // promoted ctor params
     const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
     if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
+    if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
+    checkInheritance(cls, decl, resolveForCheck);
     // abstract check
     if (!cls.abstract && !cls.isInterface && !cls.isTrait) {
       const abs = [...cls.methods.values()].filter((m) => m.abstract);
@@ -174,7 +180,6 @@ export function declareClass(decl, f) {
       for (const [k, m] of rest) own.set(k, m);
       cls.methods = own;
     }
-    if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
     cls.allowDynamic = (!!cls.parent && cls.parent.allowDynamic) || hasAttr(decl.attrs, 'allowdynamicproperties'); // inherited
     cls.noDynamic = cls.readonly;
     for (const m of cls.methods.values()) {
@@ -185,7 +190,9 @@ export function declareClass(decl, f) {
       }
     }
     cls.hasDestructor = cls.methods.has('__destruct');
+    cls.nipHooks = cls.methods.has('__nipget');
     if (!decl.anon) { rt.classes.set(lname, cls); decl.declared = true; }
+    checkDelayed(cls, autoloadForCheck);
   } finally { rt.line = savedLine; rt.file = savedFile; }
   return cls;
 }
@@ -243,11 +250,15 @@ function addMethod(cls, decl, m, owner, alias) {
   const ex = cls.methods.get(lname);
   if (ex && ex.final && ex.cls !== owner && !ex.abstract) throw new FatalSig(`Cannot override final method ${ex.cls.name}::${ex.name}()`, m.l || decl.l, decl.file);
   if (ex && !m.abstract && ex.abstract === false && m.abstract) return;
-  if (m.abstract && ex && !ex.abstract) return; // keep concrete implementation (e.g. from trait/parent)
+  if (m.abstract && ex && !ex.abstract) {
+    if (!m.origin && ex.cls !== owner && ex.vis !== 'private' && decl.file !== PRELUDE_FILE) throw new FatalSig(`Cannot make non abstract method ${displayName(ex.cls)}::${ex.name}() abstract in class ${displayName(cls)}`, decl.l, decl.file);
+    return; // keep concrete implementation (e.g. from trait/parent)
+  }
   const fn = compileFunction(decl, { method: true, cls: owner });
   fn.name = name;
   if (lname === '__tostring' && !fn.ret) fn.ret = { alts: ['string'], nullable: false };
   const method = { name, fn, cls: owner, vis: m.vis, static: m.static, abstract: m.abstract || !decl.body, final: m.final, proto: ex && ex.vis !== 'private' && (lname !== '__construct' || ex.abstract) ? (ex.proto || ex.cls) : null };
+  if (m.origin) method.origin = m.origin; // the trait the method was copied from
   if (decl.body === null && !cls.isInterface && !m.abstract) method.abstract = true;
   cls.methods.set(lname, method);
   if (m.vis === 'private') { if (!cls.privMethods) cls.privMethods = new Map(); cls.privMethods.set(lname, method); }
@@ -268,15 +279,16 @@ function useTraits(cls, tu, f) {
     for (const [ln, m] of t.methods) {
       if (excluded.has(ln) && excluded.get(ln).has(t.lname)) continue;
       const ownDefined = cls.decl.methods.some((om) => om.fn.name.toLowerCase() === ln);
+      if (ownDefined && m.abstract) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(m);
       if (!ownDefined) {
         let vis = m.vis;
         for (const r of tu.rules) if (r.kind === 'as' && !r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname) && r.vis) vis = r.vis;
         const ex = cls.methods.get(ln);
-        if (!(m.abstract && ex && !ex.abstract)) addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final: m.final }, cls);
+        if (!(m.abstract && ex && !ex.abstract)) addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final: m.final, origin: m.origin || t }, cls);
       }
       for (const r of tu.rules) {
         if (r.kind === 'as' && r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname)) {
-          addMethod(cls, m.fn.decl, { vis: r.vis || m.vis, static: m.static, abstract: m.abstract, final: m.final }, cls, r.alias);
+          addMethod(cls, m.fn.decl, { vis: r.vis || m.vis, static: m.static, abstract: m.abstract, final: m.final, origin: m.origin || t }, cls, r.alias);
         }
       }
     }
@@ -445,7 +457,7 @@ export function readProp(obj, name, f) {
   }
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
-  if (obj.cls.nativeGet) { const r = obj.cls.nativeGet(obj, name); if (r !== undefined) return r; }
+  if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipget', [name]); if (r !== undefined) return r; }
   const r = magicGet(obj, name);
   if (r !== undefined) return r;
   if (info && info.type) throwError('Error', `Typed property ${info.cls.name}::$${name} must not be accessed before initialization`);
@@ -463,7 +475,7 @@ export function readPropQuiet(obj, name, f, issetOnly) {
   }
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
-  if (obj.cls.nativeGet) { const r = obj.cls.nativeGet(obj, name); if (r !== undefined) return r; }
+  if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipisset', [name]); if (r !== undefined) return r === null ? undefined : r; }
   return magicIsset(obj, name, issetOnly);
 }
 export function magicIsset(obj, name, issetOnly) {
@@ -493,6 +505,7 @@ export function writeProp(obj, name, v, f) {
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
   } else if (!obj.props.has(name)) {
+    if (obj.cls.nipHooks && nipHook(obj, '__nipset', [name, v]) !== undefined) return;
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
     newDynamicProp(obj, name);
@@ -500,6 +513,14 @@ export function writeProp(obj, name, v, f) {
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
   if (slot instanceof PHPObject && slot !== v && slot.cls.hasDestructor) gcCheck(slot);
+}
+// Prelude classes can handle accesses to undefined properties before the magic methods do
+// (ArrayObject::ARRAY_AS_PROPS): __nipGet/__nipIsset/__nipSet/__nipUnset return [true, value]
+// when they handled the access.
+function nipHook(obj, mname, args) {
+  const m = obj.cls.methods.get(mname);
+  const r = callFunction(m.fn, args, obj, m.cls, obj.cls, null);
+  return r instanceof PHPArray && r.get(0) === true ? r.get(1) : undefined;
 }
 function magicSet(obj, name, v) {
   const m = obj.cls.methods.get('__set');
@@ -587,6 +608,7 @@ export function unsetProp(obj, name, f) {
     key = info.key;
   }
   if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); gcCheck(old instanceof Ref ? old.v : old); return; }
+  if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
   if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } }
 }

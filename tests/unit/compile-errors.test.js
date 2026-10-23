@@ -32,6 +32,23 @@ const CASES = [
   ['#[Attribute] function f() {}', 'Attribute "Attribute" cannot target function (allowed targets: class)'],
   ['#[Attribute] #[Attribute] class A {}', 'Attribute "Attribute" must not be repeated'],
   ['class C { #[Override] public $p; }', 'Attribute "Override" cannot target property (allowed targets: method)'],
+  ['(new stdClass)->a = 1;', 'Cannot use temporary expression in write context'],
+  ['echo 1; function f() { unset([1][0]); }', 'Cannot use temporary expression in write context'],
+  ['foreach ([1] as FOO[0]);', 'Cannot use temporary expression in write context'],
+  ['[(clone $x)->a] = [1];', 'Assignments can only happen to writable values'],
+  ['class A { public $p = $x; }', 'Constant expression contains invalid operations'],
+  ['class A { const X = new stdClass; }', 'New expressions are not supported in this context'],
+  ['function f($a = static::X) {}', '"static::" is not allowed in compile-time constants'],
+  ['function f($a = new class {}) {}', 'Cannot use anonymous class in constant expression'],
+  ['#[A(...[1])] function f() {}', 'Cannot use unpacking in attribute argument list'],
+  // inheritance (checked when the class is linked, before the script runs when it's early bound)
+  ['echo 1; class A { function f(int $a) {} } class B extends A { function f(string $a) {} }', 'Declaration of B::f(string $a) must be compatible with A::f(int $a)'],
+  ['class A { function f($a, $b = [1], ...$c) {} } class B extends A { function f($a) {} }', 'Declaration of B::f($a) must be compatible with A::f($a, $b = [...], ...$c)'],
+  ['class A { function f(): static {} } class B extends A { function f(): B {} }', 'Declaration of B::f(): B must be compatible with A::f(): static'],
+  ['class A { function f() {} } class B extends A { static function f() {} }', 'Cannot make non static method A::f() static in class B'],
+  ['class A { function f() {} } abstract class B extends A { abstract function f(); }', 'Cannot make non abstract method A::f() abstract in class B'],
+  ['class A { protected function f() {} } class B extends A { private function f() {} }', 'Access level to B::f() must be protected (as in class A) or weaker'],
+  ['class B implements Countable { function count(string $x): int {} }', 'Declaration of B::count(string $x): int must be compatible with Countable::count(): int'],
 ];
 
 for (const [code, msg] of CASES) {
@@ -49,6 +66,12 @@ const VALID = [
   'goto a; if (0) { a: } goto b; try { b: } catch (Exception $e) {} while (0) { goto c; c: }',
   '$f = function (self $x): static {}; class A { function m() { return fn(self $s) => parent::class ?? 1; } } trait T { function t(parent $p) {} }',
   'class P { function m() {} } class C extends P { #[\\Override] function m() {} } interface I { function i(); } class D implements I { #[\\Override] function i() {} }',
+  'class A { function f(int $a): iterable {} } class B extends A { function f(int|string $a = 1, ...$more): array {} }',
+  'class A { function f(): self {} function g(): ?A {} } class B extends A { function f(): static {} function g(): never {} }',
+  'class A { private function f(int $a) {} function __construct(int $a) {} } class B extends A { function f(string $a) {} function __construct(string $a) {} }',
+  'const C = new stdClass; class A { const X = [1, 2][0] + PHP_INT_SIZE; public $p = self::X ?? -1; } function f($a = new A(x: 1), $b = __LINE__) {} #[Attr(new A, [1])] function g() {}',
+  'function f(&$r) {} function g() { return new stdClass; } f((new stdClass)->a); g()->a = 1; g()->b[] = 2; isset((new stdClass)->c);',
+  'class B implements IteratorAggregate { #[\\ReturnTypeWillChange] function getIterator() {} }',
 ];
 for (const code of VALID) {
   test(`compiles: ${code}`, () => {
