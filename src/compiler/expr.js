@@ -20,7 +20,7 @@ import {
   callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
 } from '../runtime/functions.js';
 import {
-  callableToClosure, findMethod, invokeCallable, makeClosure, methodClosure, resolveCallable
+  callableToClosure, findMethod, makeClosure, methodClosure, resolveCallable
 } from '../runtime/callables.js';
 import {
   canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
@@ -30,6 +30,23 @@ import { doEval, doInclude } from '../runtime/program.js';
 import { deref } from '../lib/core.js';
 import { closureClass } from '../runtime/native-classes.js';
 import { lazyFn } from '../runtime/boot.js';
+
+// Fibers: while a fiber-mode body is compiled (compiler/generator.js), calls to user functions
+// (and to Fiber::suspend()) return a PendingCall, which the generator code runs with yield* so
+// the callee can suspend. Builtins are still called directly.
+export class PendingCall {
+  constructor(fn, args, thisObj, cls, sc, closure) { this.fn = fn; this.args = args; this.thisObj = thisObj; this.cls = cls; this.sc = sc; this.closure = closure; }
+}
+let deferCalls = false;
+export function compileDeferred(compile) {
+  const prev = deferCalls;
+  deferCalls = true;
+  try { return compile(); } finally { deferCalls = prev; }
+}
+function deferredCall(fn, args, thisObj, cls, sc, closure) {
+  if (fn.native !== undefined && !fn.suspends) return callFunction(fn, args, thisObj, cls, sc, closure);
+  return new PendingCall(fn, args, thisObj, cls, sc, closure);
+}
 
 export function cValue(n) { // expression whose value will be stored: apply copy-on-write marking
   const E = cExpr(n);
@@ -417,11 +434,12 @@ const EXPR = {
     const F = cExpr(n.f);
     if (n.args === 'fcc') return (f) => callableToClosure(F(f), f);
     const A = compileArgs(n.args);
+    const call = deferCalls ? deferredCall : callFunction;
     return (f) => {
       const callee = F(f);
       const c = resolveCallable(callee, f, true);
       const args = A(f, c.fn);
-      return invokeCallable(c, args);
+      return call(c.fn, args, c.thisObj, c.cls, c.sc, c.closure);
     };
   },
   MCall(n) {
@@ -439,6 +457,7 @@ const EXPR = {
       };
     }
     const A = compileArgs(n.args);
+    const call = deferCalls ? deferredCall : callFunction;
     return (f) => {
       const o = O(f);
       if (!(o instanceof PHPObject)) {
@@ -450,7 +469,7 @@ const EXPR = {
       let name = sname, ln = lname;
       if (!name) {
         const nv = N(f);
-        if (nv instanceof PHPObject) { const c = resolveCallable(nv, f, true); return invokeCallable(c, A(f, c.fn)); }
+        if (nv instanceof PHPObject) { const c = resolveCallable(nv, f, true); return call(c.fn, A(f, c.fn), c.thisObj, c.cls, c.sc, c.closure); }
         name = toStr(nv); ln = name.toLowerCase();
       }
       let m;
@@ -459,8 +478,8 @@ const EXPR = {
       if (m === undefined) m = o.cls.methods.get(ln);
       if (m !== undefined && (m.vis === 'public' || canAccessMember(m, f.cls))) {
         const args = A(f, m.fn);
-        if (m.static) return callFunction(m.fn, args, null, m.cls, o.cls, null);
-        return callFunction(m.fn, args, o, m.cls, o.cls, null);
+        if (m.static) return call(m.fn, args, null, m.cls, o.cls, null);
+        return call(m.fn, args, o, m.cls, o.cls, null);
       }
       // closure stored in property is not a method; __call fallback
       if (o.cls === closureClass && (ln === 'call' || ln === '__invoke' || ln === 'bindto' || ln === 'bind')) {
@@ -470,7 +489,7 @@ const EXPR = {
       const magic = o.cls.methods.get('__call');
       if (magic) {
         const args = A(f, null);
-        return callFunction(magic.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], o, magic.cls, o.cls, null);
+        return call(magic.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], o, magic.cls, o.cls, null);
       }
       if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${o.cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
       throwError('Error', `Call to undefined method ${o.cls.name}::${name}()`);
@@ -494,6 +513,7 @@ const EXPR = {
       };
     }
     const A = compileArgs(n.args);
+    const call = deferCalls ? deferredCall : callFunction;
     return (f) => {
       const cls = C(f);
       const name = sname || toStr(N(f));
@@ -502,10 +522,10 @@ const EXPR = {
         // __callStatic / __call
         if (f.this && f.this.cls.ancestors.has(cls.lname)) {
           const mc = cls.methods.get('__call');
-          if (mc) { const args = A(f, null); return callFunction(mc.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], f.this, mc.cls, f.this.cls, null); }
+          if (mc) { const args = A(f, null); return call(mc.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], f.this, mc.cls, f.this.cls, null); }
         }
         const ms = cls.methods.get('__callstatic');
-        if (ms) { const args = A(f, null); return callFunction(ms.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null); }
+        if (ms) { const args = A(f, null); return call(ms.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null); }
         if (m) throwError('Error', `Call to ${m.vis} method ${cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
         throwError('Error', `Call to undefined method ${cls.name}::${name}()`);
       }
@@ -513,9 +533,9 @@ const EXPR = {
       const args = A(f, m.fn);
       if (m.static) {
         const sc = isRel && (isParent || isSelf) ? (f.sc || cls) : cls;
-        return callFunction(m.fn, args, null, m.cls, sc, null);
+        return call(m.fn, args, null, m.cls, sc, null);
       }
-      if (f.this && f.this.cls.ancestors.has(cls.lname)) return callFunction(m.fn, args, f.this, m.cls, f.this.cls, null);
+      if (f.this && f.this.cls.ancestors.has(cls.lname)) return call(m.fn, args, f.this, m.cls, f.this.cls, null);
       throwError('Error', `Non-static method ${cls.name}::${m.name}() cannot be called statically`);
     };
   },
@@ -697,6 +717,7 @@ function compileNamedCall(n) {
     };
   }
   const A = compileArgs(n.args);
+  const call = deferCalls ? deferredCall : callFunction;
   // the resolved function is cached per call site; rt.epoch changes on every run, since compiled
   // code (includes, eval) is reused across runs but function tables are not
   let cached = null, cachedEpoch = -1;
@@ -711,6 +732,6 @@ function compileNamedCall(n) {
     }
     const args = A(f, fn);
     if (fn.native) return callNative(fn, args);
-    return callFunction(fn, args, null, null, null, null);
+    return call(fn, args, null, null, null, null);
   };
 }

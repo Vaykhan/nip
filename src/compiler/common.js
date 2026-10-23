@@ -32,6 +32,25 @@ export function isFresh(n) { // expressions producing a new value (no copy marki
 }
 export const isLvalNode = (n) => LVAL_KINDS.has(n.k);
 
+// in fiber mode (see compiler/generator.js) every call to user code may suspend
+export const CALL_KINDS = new Set(['Call', 'MCall', 'SCall']);
+export function hasSuspend(n) {
+  if (n === null || typeof n !== 'object') return false;
+  if (n._hs !== undefined) return n._hs;
+  let r = false;
+  if (CALL_KINDS.has(n.k) || n.k === 'Yield' || n.k === 'YieldFrom') r = true;
+  else if (n.k === 'Closure' || n.k === 'ClassDecl' || n.k === 'FuncDecl') r = false;
+  else if (Array.isArray(n)) r = n.some(hasSuspend);
+  else {
+    for (const key in n) {
+      if (key === 'l' || key === '_hy' || key === '_hs') continue;
+      const v = n[key];
+      if (v && typeof v === 'object' && hasSuspend(v)) { r = true; break; }
+    }
+  }
+  if (!Array.isArray(n)) n._hs = r;
+  return r;
+}
 export function hasYield(n) {
   if (n === null || typeof n !== 'object') return false;
   if (n._hy !== undefined) return n._hy;
@@ -41,7 +60,7 @@ export function hasYield(n) {
   else if (Array.isArray(n)) r = n.some(hasYield);
   else {
     for (const key in n) {
-      if (key === 'l' || key === '_hy') continue;
+      if (key === 'l' || key === '_hy' || key === '_hs') continue;
       const v = n[key];
       if (v && typeof v === 'object' && hasYield(v)) { r = true; break; }
     }

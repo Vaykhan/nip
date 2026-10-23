@@ -10,6 +10,7 @@ import { toThrowSig, writeErr } from './errors.js';
 import { callNative, NativeFrame } from './functions.js';
 import { callValue } from './callables.js';
 import { gcShutdown } from './gc.js';
+import { closeFibers } from './fibers.js';
 import { compileSource, runProgram } from './program.js';
 import { deref } from '../lib/core.js';
 import { INI_DEFAULTS } from '../lib/errors.js';
@@ -85,6 +86,7 @@ export function runScript(code, file, argv, opts = {}) {
   try {
     for (let i = 0; i < rt.shutdownFns.length; i++) { const [cb, a] = rt.shutdownFns[i]; callValue(cb, a); }
   } catch (e) { exitCode = handleTopLevel(e); }
+  try { closeFibers(); } catch (e) { exitCode = handleTopLevel(e); }
   try {
     gcShutdown();
   } catch (e) { exitCode = handleTopLevel(e); }

@@ -19,6 +19,8 @@ const BIN_BP = {
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '.=', '%=', '**=', '&=', '|=', '^=', '<<=', '>>=', '??=']);
 const RESERVED_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'callable', 'iterable', 'object', 'mixed', 'void', 'null', 'never', 'false', 'true', 'self', 'parent', 'static']);
 const MAGIC = new Set(['__line__', '__file__', '__dir__', '__function__', '__class__', '__method__', '__namespace__', '__trait__']);
+// statements PHP doesn't tick after (zend_is_unticked_stmt, plus if and switch which don't in practice)
+const UNTICKED = new Set(['Block', 'Label', 'FuncDecl', 'ClassDecl', 'If', 'Switch']);
 // keywords that can't be goto labels where a statement starts
 const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare']);
 
@@ -33,6 +35,8 @@ export class Parser {
   peek(o = 1) { return this.toks[this.p + o] || this.toks[this.toks.length - 1]; }
   next() { return this.toks[this.p++]; }
   error(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l); }
+  // a compile error PHP reports while parsing ("Fatal error", not "Parse error")
+  fatal(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l, 'Fatal error'); }
   // the pending doc comment at token tk, if no declaration has taken it yet (see the lexer)
   takeDoc(tk) { const d = tk && tk.doc; if (!d || d.used) return null; d.used = true; return d.text; }
   // #[Name(args), ...] groups: [{ name, args, l }]
@@ -107,7 +111,11 @@ export class Parser {
     const body = [];
     while (this.tok.t !== 'eof') {
       const s = this.parseStatement(true);
-      if (s) body.push(s);
+      if (s) {
+        if (this.st.nsMode === 'braced' && !(s.k === 'Block' && s.top) && s.k !== 'Nop') throw new ParseErr('No code may exist outside of namespace {}', s.l, 'Fatal error');
+        body.push(s);
+        if (s.k !== 'Nop') this.st.topStmts = (this.st.topStmts || 0) + 1;
+      }
     }
     return body;
   }
@@ -136,7 +144,13 @@ export class Parser {
     return { k: 'Block', body, l: this.tok.l };
   }
 
+  // declare(ticks=N): every statement that PHP ticks after gets `ticks` (see cStmt)
   parseStatement(top) {
+    const st = this.parseStatement0(top);
+    if (st && this.st.ticks && !UNTICKED.has(st.k)) st.ticks = this.st.ticks;
+    return st;
+  }
+  parseStatement0(top) {
     if (this.isOp('#[')) {
       const attrs = this.parseAttributes();
       const st = this.parseStatement(top);
@@ -215,6 +229,7 @@ export class Parser {
           const cases = [];
           while (!(alt ? this.isId('endswitch') : this.isOp('}'))) {
             let test = null;
+            const cl = this.tok.l;
             if (this.acceptId('case')) test = this.parseExpr();
             else if (!this.acceptId('default')) this.unexpected();
             if (!this.accept(':') && !this.accept(';')) this.unexpected();
@@ -223,7 +238,7 @@ export class Parser {
               if (this.tok.t === 'eof') this.unexpected();
               const s = this.parseStatement(); if (s) body.push(s);
             }
-            cases.push({ test, body });
+            cases.push({ test, body, l: cl });
           }
           this.p++;
           if (alt) this.semi();
@@ -301,10 +316,14 @@ export class Parser {
         case 'namespace': {
           if (nx.t === 'op' && nx.v === '\\') break;
           if (nx.t === 'id' && nx.v.toLowerCase().startsWith('namespace\\')) break;
+          if (!this.st.nsMode && this.st.topStmts) this.fatal('Namespace declaration statement has to be the very first statement or after any declare call in the script');
           this.p++;
           let name = '';
           if (this.tok.t === 'id') name = this.next().v;
           this.st.ns = name; this.st.uses = new Map(); this.st.useFns = new Map(); this.st.useConsts = new Map();
+          const mode = this.isOp('{') ? 'braced' : 'simple';
+          if (this.st.nsMode && this.st.nsMode !== mode) this.fatal('Cannot mix bracketed namespace declarations with unbracketed namespace declarations');
+          this.st.nsMode = mode;
           if (this.isOp('{')) {
             const b = this.parseBlock();
             b.top = true;
@@ -352,12 +371,14 @@ export class Parser {
         }
         case 'declare': {
           this.p++; this.expect('(');
-          do { const name = this.ident().toLowerCase(); this.expect('='); const e = this.parseExpr(); if (name === 'strict_types') this.st.strict = e.k === 'Lit' && toBool(e.v); } while (this.accept(','));
+          const prevTicks = this.st.ticks;
+          do { const name = this.ident().toLowerCase(); this.expect('='); const e = this.parseExpr(); if (name === 'ticks') { if (e.k !== 'Lit') throw new ParseErr('declare(ticks) value must be a literal', e.l, 'Fatal error'); this.st.ticks = Number(e.v); } if (name === 'strict_types') this.st.strict = e.k === 'Lit' && toBool(e.v); } while (this.accept(','));
           this.expect(')');
-          if (this.isOp('{')) return this.parseBlock();
-          if (this.accept(':')) { const b = this.parseStmtsUntil('enddeclare'); this.p++; this.semi(); return b; }
+          // block form: the declaration applies to the block only
+          if (this.isOp('{')) { const b = this.parseBlock(); this.st.ticks = prevTicks; return b; }
+          if (this.accept(':')) { const b = this.parseStmtsUntil('enddeclare'); this.p++; this.semi(); this.st.ticks = prevTicks; return b; }
           this.semi();
-          return null;
+          return this.st.ticks ? { k: 'Nop', l } : null; // a declare statement ticks itself
         }
         case '__halt_compiler': {
           this.p = this.toks.length - 1;
@@ -432,7 +453,8 @@ export class Parser {
 
   // ---------------------------------------------------------------- types
   parseType() {
-    if (this.accept('?')) { const t = this.parseSingleType(); return { alts: [t], nullable: true }; }
+    const l = this.tok.l;
+    if (this.accept('?')) { const t = this.parseSingleType(); return { alts: t === 'null' ? [] : [t], nullable: true, q: true, raw: [t], l }; }
     const alts = [];
     let inter = false;
     for (;;) {
@@ -446,9 +468,9 @@ export class Parser {
       if (this.isOp('&') && !(this.peek().t === 'var' || (this.peek().t === 'op' && (this.peek().v === '...' || this.peek().v === '&')))) { this.p++; inter = true; continue; }
       break;
     }
-    if (inter) return { alts: [{ inter: alts }], nullable: false };
+    if (inter) return { alts: [{ inter: alts }], nullable: false, raw: alts, l };
     const nullable = alts.some((a) => a === 'null' || a === 'mixed');
-    return { alts: alts.filter((a) => a !== 'null'), nullable };
+    return { alts: alts.filter((a) => a !== 'null'), nullable, raw: alts, l };
   }
   parseSingleType() {
     const name = this.ident();
@@ -469,7 +491,7 @@ export class Parser {
     while (!this.isOp(')')) {
       const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false, attrs: this.parseAttributes() };
       for (;;) {
-        if (this.isId('public') || this.isId('protected') || this.isId('private')) { prm.promote = this.next().v.toLowerCase(); continue; }
+        if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (prm.promoteKw) this.fatal('Multiple access type modifiers are not allowed'); prm.promote = this.next().v.toLowerCase(); prm.promoteKw = true; continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
         break;
       }
@@ -515,7 +537,12 @@ export class Parser {
   parseClass(anonArgs) {
     const l = this.tok.l;
     const flags = { abstract: false, final: false, readonly: false };
-    while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) flags[this.next().v.toLowerCase()] = true;
+    while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) {
+      const f = this.next().v.toLowerCase();
+      if (flags[f]) this.fatal(`Multiple ${f} modifiers are not allowed`);
+      flags[f] = true;
+    }
+    if (flags.abstract && flags.final) this.fatal('Cannot use the final modifier on an abstract class');
     const startLine = this.tok.l;
     const kind = this.ident().toLowerCase(); // class|interface|trait|enum
     let name;
@@ -575,15 +602,17 @@ export class Parser {
       return;
     }
     const mods = { vis: null, static: false, abstract: false, final: false, readonly: cd.flags.readonly, var: false };
+    const once = (key, word) => { if (mods[key] && (key !== 'readonly' || !cd.flags.readonly || mods.readonlyKw)) this.fatal(`Multiple ${word} modifiers are not allowed`); mods[key] = true; };
     for (;;) {
-      if (this.isId('public') || this.isId('protected') || this.isId('private')) { mods.vis = this.next().v.toLowerCase(); continue; }
-      if (this.isId('static') && !this.isOp('::', 1)) { this.p++; mods.static = true; continue; }
-      if (this.isId('abstract')) { this.p++; mods.abstract = true; continue; }
-      if (this.isId('final')) { this.p++; mods.final = true; continue; }
-      if (this.isId('readonly')) { this.p++; mods.readonly = true; continue; }
+      if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (mods.vis) this.fatal('Multiple access type modifiers are not allowed'); mods.vis = this.next().v.toLowerCase(); continue; }
+      if (this.isId('static') && !this.isOp('::', 1)) { once('static', 'static'); this.p++; continue; }
+      if (this.isId('abstract')) { once('abstract', 'abstract'); this.p++; continue; }
+      if (this.isId('final')) { once('final', 'final'); this.p++; continue; }
+      if (this.isId('readonly')) { once('readonly', 'readonly'); mods.readonlyKw = true; this.p++; continue; }
       if (this.isId('var')) { this.p++; mods.var = true; continue; }
       break;
     }
+    if (mods.abstract && mods.final && this.isId('function')) this.fatal('Cannot use the final modifier on an abstract method');
     if (this.acceptId('const')) {
       // optional type (PHP 8.3)
       let type = null;
@@ -968,6 +997,7 @@ export class Parser {
       const t = this.tok;
       if (t.t !== 'op') break;
       const l = t.l;
+      if (t.v === '{' && (e.k === 'Var' || e.k === 'Index' || e.k === 'Prop' || e.k === 'SProp')) this.fatal('Array and string offset access syntax with curly braces is no longer supported');
       switch (t.v) {
         case '[': {
           this.p++;

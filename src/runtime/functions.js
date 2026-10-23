@@ -4,10 +4,10 @@ import {
   cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, PHPArray, PHPObject, Ref
 } from '../values.js';
 import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
-import { Frame, RETURN } from '../compiler/common.js';
+import { Frame, hasSuspend, RETURN } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { cStmts } from '../compiler/stmt.js';
-import { cStmtsG } from '../compiler/generator.js';
+import { cStmtsG, fiberBody } from '../compiler/generator.js';
 import { rt } from './state.js';
 import { deprecated, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { findMethod, isCallable } from './callables.js';
@@ -324,6 +324,38 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   return ret;
 }
 
+// fiber mode (see compiler/generator.js): like callFunction(), but runs the callee's fiber-mode
+// body, so it can suspend; builtins and generator functions are called normally
+export function* callFunctionG(fn, args, thisObj, cls, sc, closure) {
+  if (fn.native !== undefined || fn.isGen) return callFunction(fn, args, thisObj, cls, sc, closure);
+  // a body without calls can't suspend: run it normally
+  if (fn.mayCall === undefined) fn.mayCall = hasSuspend(fn.decl.body || []);
+  if (!fn.mayCall) return callFunction(fn, args, thisObj, cls, sc, closure);
+  const f = new Frame(fn, thisObj, cls, sc);
+  if (closure !== null && closure !== undefined) {
+    f.closure = closure;
+    if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
+  }
+  bindParams(fn, f, args);
+  f.args = args;
+  const saved = compilingByRef;
+  compilingByRef = !!fn.decl.byRef;
+  let body;
+  try { body = fiberBody(fn); } finally { compilingByRef = saved; }
+  const prevFrame = rt.frame, prevLine = rt.line, prevFile = rt.file;
+  if (++rt.depth > MAX_DEPTH) { rt.depth = 0; throw new FatalSig(`Maximum function nesting level of '${MAX_DEPTH}' reached, aborting!`); }
+  rt.frame = f; rt.file = fn.file;
+  f.callLine = prevLine; f.callFile = prevFile;
+  rt.stack.push(f);
+  let r;
+  try { r = yield* body(f); }
+  finally { rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--; }
+  const ret = r === RETURN ? f.ret : null;
+  if (f.retRef) rt.lastRetRef = f.retRef; else if (fn.byRef) rt.lastRetRef = NOREF;
+  if (f.destr) gcAfterCall(f, ret);
+  if (fn.ret !== null && fn.ret !== undefined) return checkReturn(fn, ret, f, r !== RETURN);
+  return ret;
+}
 export function callNative(fn, args) {
   if (args.length < fn.min) {
     if (args.named) args = mapNamedNative(fn, args);

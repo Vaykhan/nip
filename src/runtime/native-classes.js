@@ -7,12 +7,13 @@ import { throwError, warn } from './errors.js';
 import { callFunction } from './functions.js';
 import { callableToClosure, makeClosure } from './callables.js';
 import { addInterface, inheritFrom, lookupClass, PHPClass } from './classes.js';
+import { bootFibers } from './fibers.js';
 
 export const PHP_VERSION = '8.3.6';
 // set by bootNativeClasses()
 export let closureClass = null, generatorClass = null;
 
-function nativeClass(name, opts = {}) {
+export function nativeClass(name, opts = {}) {
   const cls = new PHPClass(name);
   if (opts.parent) inheritFrom(cls, rt.classes.get(opts.parent.toLowerCase()));
   for (const i of opts.interfaces || []) addInterface(cls, rt.classes.get(i.toLowerCase()));
@@ -61,6 +62,7 @@ export function bootNativeClasses() {
     },
   });
   nativeClass('__PHP_Incomplete_Class').allowDynamic = true;
+  bootFibers();
   nativeClass('WeakReference', {
     final: true,
     methods: {

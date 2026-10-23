@@ -38,8 +38,8 @@ root = path.resolve(root);
 // Tests using features NIP doesn't implement yet are skipped instead of counted as failures.
 // Remove an entry once the feature is implemented.
 const UNSUPPORTED = [
-  'opcache', 'ffi', 'zend_test', '_ZendTestClass', 'gc_', 'memory_get', 'Fiber', 'debug_zval',
-  'token_get_all', 'zend\\.', 'declare\\(ticks', 'highlight_', 'php_strip', '__halt_compiler',
+  'opcache', 'ffi', 'zend_test', '_ZendTestClass', 'gc_', 'memory_get', 'debug_zval',
+  'token_get_all', 'zend\\.', 'highlight_', 'php_strip', '__halt_compiler',
 ];
 const UNSUPPORTED_RE = new RegExp(UNSUPPORTED.join('|'), 'i');
 // Sections that need a SAPI or harness features the runner doesn't emulate.

@@ -9,7 +9,8 @@ import {
   E_ALL, E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING, rt, writeFd
 } from '../runtime/state.js';
 import { captureTrace, raise, throwError, traceAsString } from '../runtime/errors.js';
-import { callValue } from '../runtime/callables.js';
+import { callableFn, callValue } from '../runtime/callables.js';
+import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
 import { sgn } from './string.js';
 import { PHP_VERSION } from '../runtime/native-classes.js';
@@ -93,6 +94,16 @@ def('error_get_last', () => {
 });
 def('error_clear_last', () => { rt.lastError = null; });
 def('register_shutdown_function', (callback, ...args) => { rt.shutdownFns.push([callback, args]); });
+def('register_tick_function', (callback, ...args) => {
+  callableFn(callback); // validates, with PHP's message
+  rt.tickFns.push({ cb: callback, args, calling: false });
+  return true;
+});
+def('unregister_tick_function', (callback) => {
+  callableFn(callback);
+  rt.tickFns = rt.tickFns.filter((t) => !looseEq(t.cb, callback));
+  return null;
+});
 def('assert', (assertion, description = null) => {
   if (rt.ini.get('zend.assertions') !== '1') return true;
   if (toBool(assertion)) return true;

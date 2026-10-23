@@ -5,10 +5,12 @@
 
 import { FatalSig } from '../values.js';
 import { rt } from '../runtime/state.js';
+import { typeStr } from '../runtime/functions.js';
 
 // How an expression is used: read, written (assignment target, by-ref argument, ...), unset,
 // or passed as an argument whose by-ref-ness is only known at run time.
-const READ = 0, WRITE = 1, UNSET = 2, ARG = 3;
+// ASSIGN: the target itself is assigned ($x = ..., foreach targets, list() items)
+const READ = 0, WRITE = 1, UNSET = 2, ARG = 3, ASSIGN = 4;
 
 export function checkProgram(ast) {
   const seen = new WeakSet();
@@ -30,6 +32,7 @@ export function checkProgram(ast) {
     switch (n.k) {
       case 'Lit': return;
       case 'ClassDecl': {
+        checkClass(n);
         checkAttrs(n.attrs, T_CLASS);
         for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD); methods.add(m.fn); }
         for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
@@ -49,42 +52,66 @@ export function checkProgram(ast) {
         visit(n.o, ctx === READ ? READ : ctx === UNSET ? UNSET : WRITE);
         visit(n.i, READ);
         return;
+      case 'Var':
+        if (ctx === ASSIGN && n.name === 'this') fail('Cannot re-assign $this', n);
+        if (ctx === ASSIGN && n.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', n);
+        if (ctx === UNSET && n.name === 'this') fail('Cannot unset $this', n);
+        return;
       case 'Prop':
+        if (n.nullsafe && ctx !== READ && ctx !== ARG) fail("Can't use nullsafe operator in write context", n);
         visit(n.o, ctx === READ ? READ : WRITE);
         if (typeof n.name === 'object') visit(n.name, READ);
         return;
-      case 'Assign': case 'AssignOp': visit(n.t, WRITE); visit(n.e, READ); return;
-      case 'AssignRef': visit(n.t, WRITE); visit(n.e, WRITE); return;
+      case 'Assign': case 'AssignOp': visit(n.t, ASSIGN); visit(n.e, READ); return;
+      case 'AssignRef':
+        if (n.e && n.e.k === 'Prop' && n.e.nullsafe) fail('Cannot take reference of a nullsafe chain', n);
+        visit(n.t, ASSIGN); visit(n.e, WRITE); return;
       case 'PreInc': case 'PreDec': case 'PostInc': case 'PostDec': visit(n.e, WRITE); return;
       case 'Unset': visit(n.list, UNSET); return;
       case 'Arr':
-        if (ctx !== WRITE) break;
+        if (ctx !== WRITE && ctx !== ASSIGN) break;
       // falls through: [$a, $b] = ... destructuring
       case 'List': {
         const items = (n.items || []).filter(Boolean);
         if (!items.length) fail('Cannot use empty list', n);
         if (items.some((it) => it.spread)) fail('Spread operator is not supported in assignments', n);
         if (items.some((it) => it.key) && items.some((it) => !it.key)) fail('Cannot mix keyed and unkeyed array entries in assignments', n);
-        for (const it of items) { visit(it.key, READ); visit(it.v, WRITE); }
+        for (const it of items) { visit(it.key, READ); visit(it.v, it.byRef ? WRITE : ASSIGN); }
         return;
       }
-      case 'Call': visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) : null); return;
-      case 'MCall': case 'NullsafeMCall': visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null); return;
-      case 'SCall': case 'New': visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null); return;
+      case 'Call': visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) : null, n); return;
+      case 'MCall': case 'NullsafeMCall': visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
+      case 'SCall': case 'New': visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
+      case 'Global':
+        for (const x of n.names) if (x === 'this') fail('Cannot use $this as global variable', n);
+        break;
+      case 'StaticVar':
+        for (const v of n.vars) if (v.name === 'this') fail('Cannot use $this as static variable', n);
+        break;
       case 'Label':
         if (scope.labels.has(n.name)) fail(`Label '${n.name}' already defined`, n);
         scope.labels.set(n.name, path.slice());
         return;
       case 'Goto': scope.gotos.push({ n, path: path.slice() }); return;
-      case 'Return': visit(n.e, scope.byRef ? WRITE : READ); return; // function &f() { return $a[]; }
+      case 'Return': {
+        const ret = scope.ret && !scope.isGen && scope.ret.raw && scope.ret.raw.length === 1 && !scope.ret.q && typeof scope.ret.raw[0] === 'string' ? scope.ret.raw[0].toLowerCase() : null;
+        if (ret === 'void' && n.e) fail(n.e.k === 'Lit' && n.e.v === null ? 'A void function must not return a value (did you mean "return;" instead of "return null;"?)' : 'A void function must not return a value', n);
+        if (ret === 'never') fail('A never-returning function must not return', n);
+        visit(n.e, scope.byRef ? WRITE : READ); return; // function &f() { return $a[]; }
+      }
       case 'While': case 'DoWhile': case 'For': case 'Foreach': case 'Switch': {
         const { body, cases, ...rest } = n;
-        const writes = (key) => key === 'kv' || key === 'v' || (key === 'e' && n.k === 'Foreach' && n.byRef);
-        for (const key in rest) if (key !== 'l' && key !== 'k') visit(rest[key], writes(key) ? WRITE : READ);
+        if (n.k === 'Switch') {
+          const defaults = n.cases.filter((c) => !c.test);
+          if (defaults.length > 1) fail('Switch statements may only contain one default clause', defaults[1]);
+        }
+        const ctxOf = (key) => (key === 'kv' || key === 'v' ? ASSIGN : key === 'e' && n.k === 'Foreach' && n.byRef ? WRITE : READ);
+        for (const key in rest) if (key !== 'l' && key !== 'k') visit(rest[key], ctxOf(key));
         within('loop', () => { visit(body, READ); visit(cases, READ); });
         return;
       }
       case 'Try':
+        for (const c of n.catches) if (c.v === 'this') fail('Cannot re-assign $this', n);
         if (n.fin) scope.hasFinally = true; else scope.hasTryWithoutFinally = true;
         within('try', () => { visit(n.body, READ); visit(n.catches, READ); });
         within('finally', () => visit(n.fin, READ));
@@ -99,8 +126,15 @@ export function checkProgram(ast) {
     const fn = rt.fns.get(n.f.replace(/^\\/, '').toLowerCase());
     return fn && fn.native ? fn : null;
   }
-  function visitArgs(args, fn) {
+  function visitArgs(args, fn, call) {
     if (!Array.isArray(args)) return;
+    let unpacked = false, named = false;
+    for (const a of args) {
+      if (a.spread) unpacked = true;
+      else if (a.name) named = true;
+      else if (unpacked) fail('Cannot use positional argument after argument unpacking', call);
+      else if (named) fail('Cannot use positional argument after named argument', call);
+    }
     args.forEach((a, i) => {
       if (!a) return;
       const e = a.e !== undefined ? a.e : a;
@@ -110,6 +144,93 @@ export function checkProgram(ast) {
     });
   }
 
+  // declaration rules PHP checks when compiling a class
+  function checkClass(n) {
+    const name = n.anon ? 'class@anonymous' : n.name, kind = n.kind;
+    if (kind !== 'class' && kind !== 'enum' && hasAttrName(n.attrs, 'allowdynamicproperties')) fail(`Cannot apply #[AllowDynamicProperties] to ${kind}`, n);
+    if (kind === 'enum' && n.enumType) {
+      const bt = n.enumType.raw && n.enumType.raw.length === 1 ? String(n.enumType.raw[0]).toLowerCase() : 'mixed';
+      if (bt !== 'int' && bt !== 'string') fail(`Enum backing type must be int or string, ${typeStr(n.enumType, null, true)} given`, n);
+    }
+    const consts = new Set();
+    for (const c of [...n.consts, ...n.cases].sort((a, b) => a.seq - b.seq)) {
+      if (consts.has(c.name)) fail(`Cannot redefine class constant ${name}::${c.name}`, c);
+      consts.add(c.name);
+      if (kind === 'interface' && c.vis && c.vis !== 'public') fail(`Access type for interface constant ${name}::${c.name} must be public`, c);
+    }
+    for (const c of n.cases) {
+      if (!n.enumType && c.e) fail(`Case ${c.name} of non-backed enum ${name} must not have a value`, c);
+      if (n.enumType && !c.e) fail(`Case ${c.name} of backed enum ${name} must have a value`, c);
+    }
+    const props = new Set();
+    const checkProp = (p, l, promoted) => {
+      if (props.has(p.name)) fail(`Cannot redeclare ${name}::$${p.name}`, l);
+      props.add(p.name);
+      if (p.readonly && !p.type) fail(`Readonly property ${name}::$${p.name} must have type`, l);
+      if (p.readonly && p.static) fail(`Static property ${name}::$${p.name} cannot be readonly`, l);
+      if (p.readonly && p.hasDef) fail(`Readonly property ${name}::$${p.name} cannot have default value`, l);
+      if (p.type && !promoted) checkTypeDecl(p.type, 'prop', l, `${name}::$${p.name}`);
+    };
+    for (const p of n.props) {
+      if (kind === 'interface') fail('Interfaces may not include properties', p);
+      if (kind === 'enum') fail(`Enum ${name} cannot include properties`, p);
+      checkProp(p, p, false);
+    }
+    const methods = new Set();
+    for (const m of n.methods) {
+      const fn = m.fn, ln = fn.name.toLowerCase();
+      if (methods.has(ln)) fail(`Cannot redeclare ${name}::${fn.name}()`, m);
+      methods.add(ln);
+      if (kind === 'interface') {
+        if (m.vis !== 'public') fail(`Access type for interface method ${name}::${fn.name}() must be public`, m);
+        if (m.final) fail(`Interface method ${name}::${fn.name}() must not be final`, m);
+        if (fn.body) fail(`Interface function ${name}::${fn.name}() cannot contain body`, m);
+      } else if (m.abstract && fn.body) fail(`Abstract function ${name}::${fn.name}() cannot contain body`, m);
+      else if (!m.abstract && !fn.body) fail(`Non-abstract method ${name}::${fn.name}() must contain body`, m);
+      if (kind === 'enum' && ENUM_MAGIC.has(ln)) fail(`Enum ${name} cannot include magic method ${fn.name}`, m);
+      for (const p of fn.params) {
+        if (!p.promote) continue;
+        if (ln !== '__construct') fail('Cannot declare promoted property outside a constructor', m);
+        if (m.abstract || kind === 'interface') fail('Cannot declare promoted property in an abstract constructor', m);
+        if (p.variadic) fail('Cannot declare variadic promoted property', m);
+        if (fn.params.filter((q) => q.name === p.name).length > 1) fail(`Redefinition of parameter $${p.name}`, m);
+        checkProp({ name: p.name, readonly: p.readonly || n.flags.readonly, type: p.type, static: false, hasDef: false }, m, true);
+      }
+    }
+  }
+  // type declarations: redundant or impossible combinations
+  function checkTypeDecl(t, where, n, propName) {
+    const raw = t.raw;
+    if (!raw) return;
+    const names = raw.filter((a) => typeof a === 'string');
+    const ls = names.map((a) => a.toLowerCase());
+    if (t.q) {
+      const x = ls[0];
+      if (x === 'mixed') fail('Type mixed cannot be marked as nullable since mixed already includes null', n);
+      if (x === 'null') fail('null cannot be marked as nullable', n);
+      if (x === 'void') fail('Void can only be used as a standalone type', n);
+      if (x === 'never') fail('never can only be used as a standalone type', n);
+    } else if (raw.length > 1) {
+      if (ls.includes('mixed')) fail('Type mixed can only be used as a standalone type', n);
+      if (ls.includes('void')) fail('Void can only be used as a standalone type', n);
+      if (ls.includes('never')) fail('never can only be used as a standalone type', n);
+      const seen = new Set();
+      names.forEach((a, i) => {
+        const k = ls[i];
+        if (seen.has(k)) fail(`Duplicate type ${BUILTIN_TYPES.has(k) ? k : a} is redundant`, n);
+        seen.add(k);
+      });
+      if (seen.has('iterable') && seen.has('array')) fail('Duplicate type array is redundant', n);
+      if (seen.has('iterable') && seen.has('traversable')) fail('Duplicate type Traversable is redundant', n);
+      if (seen.has('bool') && seen.has('false')) fail('Duplicate type false is redundant', n);
+      if (seen.has('bool') && seen.has('true')) fail('Duplicate type true is redundant', n);
+      if (seen.has('true') && seen.has('false')) fail('Type contains both true and false, bool should be used instead', n);
+      if (seen.has('object') && ls.some((k) => !BUILTIN_TYPES.has(k))) fail(`Type ${typeStr(t, null, true)} contains both object and a class type, which is redundant`, n);
+    }
+    const one = ls.length === 1 && raw.length === 1 ? ls[0] : null;
+    if (where === 'param' && (one === 'void' || one === 'never')) fail(`${one} cannot be used as a parameter type`, n);
+    if (where === 'prop' && (one === 'void' || one === 'never' || one === 'callable')) fail(`Property ${propName} cannot have type ${one}`, n);
+  }
   // the attribute classes of the engine are validated at compile time; user ones only by
   // ReflectionAttribute::newInstance()
   function checkAttrs(attrs, target) {
@@ -149,7 +270,16 @@ export function checkProgram(ast) {
     for (const p of fn.params) if (p.type) checkType(p.type, fn, fnCtx);
     if (fn.ret) checkType(fn.ret, fn, fnCtx);
     scope = newScope(); path = [];
-    scope.byRef = !!fn.byRef;
+    scope.byRef = !!fn.byRef; scope.ret = fn.ret; scope.isGen = !!fn.isGen;
+    const pnames = new Set();
+    for (const p of fn.params) {
+      if (p.name === 'this') fail('Cannot use $this as parameter', fn);
+      if (pnames.has(p.name)) fail(`Redefinition of parameter $${p.name}`, fn);
+      pnames.add(p.name);
+      if (p.type) checkTypeDecl(p.type, 'param', fn);
+    }
+    if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
+    for (const u of fn.uses || []) if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
     if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
     for (const p of fn.params) checkAttrs(p.attrs, T_PARAMETER);
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
@@ -187,6 +317,9 @@ const NO_OPCODES = new Set(['Label', 'FuncDecl']);
 
 function newScope() { return { labels: new Map(), gotos: [] }; }
 
+const BUILTIN_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'object', 'callable', 'iterable', 'mixed', 'void', 'never', 'null', 'false', 'true', 'static', 'self', 'parent']);
+const ENUM_MAGIC = new Set(['__construct', '__destruct', '__clone', '__get', '__set', '__unset', '__isset', '__tostring', '__debuginfo', '__serialize', '__unserialize', '__sleep', '__wakeup', '__set_state']);
+function hasAttrName(attrs, lname) { return !!attrs && attrs.some((a) => (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase() === lname); }
 const CLASS_REF_NODES = new Set(['CConst', 'ClassName', 'New', 'SCall', 'SProp', 'Instanceof']);
 const T_CLASS = 1, T_FUNCTION = 2, T_METHOD = 4, T_PROPERTY = 8, T_CLASS_CONSTANT = 16, T_PARAMETER = 32;
 const TARGET_NAMES = [[T_CLASS, 'class'], [T_FUNCTION, 'function'], [T_METHOD, 'method'], [T_PROPERTY, 'property'], [T_CLASS_CONSTANT, 'class constant'], [T_PARAMETER, 'parameter']];

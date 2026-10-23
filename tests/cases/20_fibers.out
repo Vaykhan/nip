@@ -1,0 +1,20 @@
+start A
+suspended: first
+resumed with B
+suspended: from helper B
+bool(true)
+bool(false)
+NULL
+string(6) "done C"
+bool(true)
+FiberError: Cannot resume a fiber that is not suspended
+Cannot suspend outside of a fiber
+caught boom
+int(5)
+10,20,30
+in method
+ok!
+finally of unfinished fiber
+a1 b1 a2 b2 a3 b3
+end
+[exit 0]

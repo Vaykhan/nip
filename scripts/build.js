@@ -20,7 +20,7 @@ const MODULES = [
   'values.js', 'convert.js', 'compare.js', 'arith.js', 'utf8.js', 'lexer.js', 'parser.js',
   'compiler/common.js', 'compiler/checks.js', 'compiler/lvalue.js', 'compiler/expr.js', 'compiler/stmt.js', 'compiler/generator.js',
   'runtime/state.js', 'runtime/errors.js', 'runtime/functions.js', 'runtime/callables.js', 'runtime/classes.js',
-  'runtime/gc.js', 'runtime/generators.js', 'runtime/program.js',
+  'runtime/gc.js', 'runtime/generators.js', 'runtime/fibers.js', 'runtime/program.js',
   'lib/core.js', 'lib/dump.js', 'lib/printf.js', 'lib/string.js', 'lib/hash.js', 'lib/mbstring.js', 'lib/math.js',
   'lib/array.js', 'lib/var.js', 'lib/functions.js', 'lib/errors.js', 'lib/output.js', 'lib/json.js',
   'lib/serialize.js', 'lib/pcre.js', 'lib/date.js', 'lib/file.js',
@@ -60,7 +60,8 @@ for (const mod of MODULES) {
   code = code.replace(/^export (?=(?:async )?function|class |const |let )/gm, '');
   if (mod === 'prelude.js') code = inlinePrelude(code);
   if (/import\.meta/.test(code)) throw new Error(`build: import.meta used in ${mod}`);
-  for (const m of code.matchAll(/^(?:async )?(?:function\*?|class) +([\w$]+)/gm)) {
+  for (const m of code.matchAll(/^(?:(?:async )?(?:function\*?|class) +([\w$]+)|(?:const|let) +([\w$]+) *=)/gm)) {
+    m[1] = m[1] || m[2];
     if (declared.has(m[1])) throw new Error(`build: ${m[1]} is declared in both ${declared.get(m[1])} and ${mod}`);
     declared.set(m[1], mod);
   }

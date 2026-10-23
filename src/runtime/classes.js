@@ -178,8 +178,10 @@ export function declareClass(decl, f) {
     cls.allowDynamic = (!!cls.parent && cls.parent.allowDynamic) || hasAttr(decl.attrs, 'allowdynamicproperties'); // inherited
     cls.noDynamic = cls.readonly;
     for (const m of cls.methods.values()) {
-      if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto) {
-        throw new FatalSig(`${cls.name}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
+      // an abstract method of a used trait counts as the overridden method
+      const fromTrait = () => decl.traits.some((tu) => tu.names.some((tn) => { const t = lookupClass(tn, true); const tm = t && t.methods.get(m.name.toLowerCase()); return !!tm && tm.abstract; }));
+      if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto && !fromTrait()) {
+        throw new FatalSig(`${displayName(cls)}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
       }
     }
     cls.hasDestructor = cls.methods.has('__destruct');

@@ -11,6 +11,7 @@ import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { compilingByRef, declareFunction, valueName } from '../runtime/functions.js';
 import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
 import { gcCheck } from '../runtime/gc.js';
+import { callValue } from '../runtime/callables.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
 export function cStmts(list) {
@@ -80,7 +81,23 @@ export function cStmt(n) {
   if (!n) return null;
   const fn = STMT[n.k];
   if (!fn) throw new FatalSig(`Unsupported statement type ${n.k}`, n.l);
-  return fn(n);
+  const c = fn(n);
+  return n.ticks ? withTick(c, n.ticks) : c;
+}
+// declare(ticks=N): run the tick functions after every N ticked statements
+function withTick(c, every) {
+  const t = (f) => { const r = c(f); tick(every); return r; };
+  if (c.labels) { t.labels = c.labels; t.enter = (f, label) => { const r = c.enter(f, label); tick(every); return r; }; }
+  return t;
+}
+export function tick(every) {
+  if (++rt.tickCount < every) return; // counts even when no tick function is registered
+  rt.tickCount = 0;
+  for (const t of rt.tickFns.slice()) {
+    if (t.calling) continue;
+    t.calling = true;
+    try { callValue(t.cb, t.args); } finally { t.calling = false; }
+  }
 }
 
 const STMT = {
@@ -93,6 +110,7 @@ const STMT = {
     return (f) => { rt.line = l; for (let i = 0; i < args.length; i++) { const v = args[i](f); rt.echo(typeof v === 'string' ? v : toStr(v)); } };
   },
   ExprStmt(n) {
+    if (n.e.k === 'Var' && n.e.name !== 'this') return () => undefined; // `$x;` compiles to nothing in PHP (no warning)
     const E = cExpr(n.e); const l = n.l;
     if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; E(f); };
     return (f) => { rt.line = l; const v = E(f); if (v instanceof PHPObject && v.cls.hasDestructor && !v.destructed) gcCheck(v); };
@@ -322,6 +340,7 @@ const STMT = {
     return exposeLabels((f) => run(f, undefined), [B, ...catches.map((c) => c.B)], run);
   },
   Label() { return () => undefined; },
+  Nop() { return () => undefined; },
   Goto(n) { const sig = { t: GOTO, label: n.label }; return () => sig; },
   Global(n) {
     const names = n.names.map((x) => (typeof x === 'string' ? x : cExpr(x.e)));

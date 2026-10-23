@@ -1,18 +1,47 @@
 // Generator-mode compilation: bodies of functions containing yield become JS generator functions.
+//
+// The same compiler builds "fiber mode" bodies (fiberBody()): code running inside a Fiber, where
+// every call to a user function may suspend. There, calls are treated like yields: hoisted out of
+// their expression and run with yield* (see PendingCall in expr.js), and Fiber::suspend() is a
+// JS yield that unwinds to the Fiber driver in runtime/fibers.js.
 
 import { cp, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
 import { toBool, toStr } from '../convert.js';
 import { looseEq, strictEq } from '../compare.js';
-import { hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
+import { CALL_KINDS, hasSuspend, hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
 import { cLval } from './lvalue.js';
-import { cExpr, matchRepr } from './expr.js';
-import { cStmt, GOTO, gotoTargets, iterateObject } from './stmt.js';
+import { cExpr, compileDeferred, matchRepr, PendingCall } from './expr.js';
+import { cStmt, GOTO, gotoTargets, iterateObject, tick } from './stmt.js';
 import { rt } from '../runtime/state.js';
 import { throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { valueName } from '../runtime/functions.js';
+import { callFunctionG, valueName } from '../runtime/functions.js';
 import { callMethodName } from '../runtime/classes.js';
 import { GenThrow } from '../runtime/generators.js';
+import { FiberExit } from '../runtime/fibers.js';
 import { generatorClass } from '../runtime/native-classes.js';
+
+let fiberMode = false;
+const suspends = (n) => (fiberMode ? hasSuspend(n) : hasYield(n));
+// the fiber-mode body of a (non-generator) user function, compiled on first use
+export function fiberBody(fn) {
+  const d = fn.decl;
+  if (!d._fbody) {
+    const prev = fiberMode;
+    fiberMode = true;
+    try { d._fbody = cStmtsG(d.body || []); } finally { fiberMode = prev; }
+  }
+  return d._fbody;
+}
+export const FIBER_SUSPEND = { suspend: true };
+function* runPending(p) {
+  if (p.fn.suspends) { // Fiber::suspend()
+    if (rt.currentFiber && rt.currentFiber.fiber.closing) throwError('FiberError', 'Cannot suspend in a force-closed fiber');
+    const sent = yield p.args.length ? (p.args[0] instanceof Ref ? p.args[0].v : p.args[0]) : null;
+    if (sent instanceof GenThrow) throw new ThrowSig(sent.obj);
+    return sent === undefined ? null : sent;
+  }
+  return yield* callFunctionG(p.fn, p.args, p.thisObj, p.cls, p.sc, p.closure);
+}
 
 // wraps a non-yielding body so it can be driven like a generator
 function genWrap(fn) {
@@ -22,12 +51,12 @@ function genWrap(fn) {
 }
 
 function cExprG(n) {
-  if (!hasYield(n)) return genWrap(cExpr(n));
+  if (!suspends(n)) return genWrap(cExpr(n));
   switch (n.k) {
     case 'Yield': {
       const K = n.key ? cExprG(n.key) : null;
       const V = n.v ? cExprG(n.v) : null;
-      const Lv = n.v && isLvalNode(n.v) && !hasYield(n.v) ? cLval(n.v) : null;
+      const Lv = n.v && isLvalNode(n.v) && !suspends(n.v) ? cLval(n.v) : null;
       return function* (f) {
         const k = K ? yield* K(f) : undefined;
         let v = null, ref = null;
@@ -73,7 +102,7 @@ function cExprG(n) {
     case 'And': { const A = cExprG(n.a), B = cExprG(n.b); return function* (f) { return toBool(yield* A(f)) && toBool(yield* B(f)); }; }
     case 'Or': { const A = cExprG(n.a), B = cExprG(n.b); return function* (f) { return toBool(yield* A(f)) || toBool(yield* B(f)); }; }
     case 'Coalesce': {
-      const A = isLvalNode(n.a) && !hasYield(n.a) ? genWrap(cLval(n.a).getq) : cExprG(n.a);
+      const A = isLvalNode(n.a) && !suspends(n.a) ? genWrap(cLval(n.a).getq) : cExprG(n.a);
       const B = cExprG(n.b);
       return function* (f) { const v = yield* A(f); return v === undefined || v === null ? yield* B(f) : v; };
     }
@@ -98,23 +127,31 @@ function cExprG(n) {
   const replace = (node) => {
     if (!node || typeof node !== 'object') return node;
     if (Array.isArray(node)) return node.map(replace);
-    if (!hasYield(node)) return node;
-    if (['Yield', 'YieldFrom', 'Ternary', 'And', 'Or', 'Coalesce', 'Match'].includes(node.k)) {
+    if (!suspends(node)) return node;
+    if (['Yield', 'YieldFrom', 'Ternary', 'And', 'Or', 'Coalesce', 'Match'].includes(node.k) || (fiberMode && CALL_KINDS.has(node.k))) {
       const id = 't' + (genTempCounter++) + '_' + (tempId++);
       hoisted.push({ id, G: cExprG(node) });
       return { k: 'Temp', id, l: node.l };
     }
     const copy = {};
     for (const key in node) { if (key === '_hy') continue; copy[key] = (key === 'l' || key === 'k') ? node[key] : replace(node[key]); }
-    copy._hy = false;
+    copy._hy = false; copy._hs = false;
     return copy;
   };
-  const replaced = replace(n);
-  const E = cExpr(replaced);
+  // a call in fiber mode: hoist suspending arguments, then run the call itself with yield*
+  const isCall = fiberMode && CALL_KINDS.has(n.k);
+  let replaced;
+  if (isCall) {
+    replaced = {};
+    for (const key in n) { if (key === '_hy' || key === '_hs') continue; replaced[key] = (key === 'l' || key === 'k') ? n[key] : replace(n[key]); }
+    replaced._hy = false; replaced._hs = false;
+  } else replaced = replace(n);
+  const E = isCall ? compileDeferred(() => cExpr(replaced)) : cExpr(replaced);
   return function* (f) {
     if (!f.temps) f.temps = Object.create(null);
     for (const h of hoisted) f.temps[h.id] = yield* h.G(f);
-    return E(f);
+    const v = E(f);
+    return v instanceof PendingCall ? yield* runPending(v) : v;
   };
 }
 let genTempCounter = 0;
@@ -164,8 +201,15 @@ function exposeLabelsG(fn, parts, enter) {
 function cBodyG(n) { return n.k === 'Block' ? cStmtsG(n.body) : cStmtsG([n]); }
 
 function cStmtG(n) {
+  const c = cStmtG0(n);
+  if (!c || !n.ticks || !suspends(n)) return c;
+  const t = function* (f) { const r = yield* c(f); tick(n.ticks); return r; };
+  if (c.labels) { t.labels = c.labels; t.enter = function* (f, label) { const r = yield* c.enter(f, label); tick(n.ticks); return r; }; }
+  return t;
+}
+function cStmtG0(n) {
   if (!n) return null;
-  if (!hasYield(n)) { const s = cStmt(n); return s ? genWrap(s) : null; }
+  if (!suspends(n)) { const s = cStmt(n); return s ? genWrap(s) : null; }
   const l = n.l;
   switch (n.k) {
     case 'Block': return cStmtsG(n.body);
@@ -310,7 +354,10 @@ function cStmtG(n) {
           res = label === undefined ? yield* B(f) : yield* B.enter(f, label);
         } catch (e) {
           const sig = toThrowSig(e);
-          if (!sig) throw e;
+          if (!sig) {
+            if (F && e instanceof FiberExit) { const fr = yield* F(f); if (fr !== undefined) return fr; }
+            throw e;
+          }
           const obj = sig.obj;
           for (const c of catches) {
             if (c.types.some((t) => obj.cls.ancestors.has(t))) {

@@ -83,3 +83,6 @@ class UnderflowException extends RuntimeException {}
 class UnexpectedValueException extends RuntimeException {}
 class JsonException extends Exception {}
 class Random\RandomException extends Exception {}
+final class FiberError extends Error {
+  public function __construct() { throw new Error('The "FiberError" class is reserved for internal use and cannot be manually instantiated'); }
+}

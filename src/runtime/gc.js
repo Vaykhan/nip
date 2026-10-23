@@ -10,6 +10,7 @@ function gcVisitRoots(push, extra) {
   const g = rt.globals;
   for (const k in g) push(g[k]);
   for (const e of rt.stack) push(e);
+  for (const st of rt.suspendedFibers) for (const e of st.stack) push(e);
   if (rt.frame) push(rt.frame);
   if (rt.mainStatics) push(rt.mainStatics);
   const seenFn = new Set();
@@ -108,6 +109,7 @@ function runDestructor(o) {
   o.destructed = true;
   const i = rt.destructibles.indexOf(o);
   if (i >= 0) rt.destructibles.splice(i, 1);
+  if (o.cls.nativeDestruct) { o.cls.nativeDestruct(o); return; } // internal classes (Fiber)
   const m = o.cls.methods.get('__destruct');
   if (m) callFunction(m.fn, [], o, m.cls, o.cls, null);
 }

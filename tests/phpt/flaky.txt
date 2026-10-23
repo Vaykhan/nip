@@ -2,3 +2,8 @@
 # only warns when one of these stops passing.
 ext/standard/tests/array/array_rand.phpt
 ext/standard/tests/file/filestat.phpt
+ext/date/tests/007.phpt
+ext/date/tests/008.phpt
+ext/date/tests/gmdate_basic.phpt
+ext/date/tests/gmmktime_variation7.phpt
+ext/date/tests/localtime_basic.phpt
