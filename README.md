@@ -1,8 +1,5 @@
 # NIP — Nip is php
 
-A PHP 8.3 interpreter written in pure JavaScript for Node.js. No PHP binary, no WebAssembly,
-no dependencies.
-
 ```sh
 node bin/nip.js script.php arg1 arg2      # run a script ($argv / $argc populated)
 node bin/nip.js -r 'echo PHP_VERSION;'    # run code
@@ -13,7 +10,8 @@ node bin/nip.js -d precision=17 file.php  # set ini values
 
 Once installed as a package (`npm install github:Vaykhan/nip`), the command is `nip`.
 
-NIP checks its behaviour against the real `php` binary and aims for identical output, including
+NIP is written in pure JavaScript, with no PHP binary, WebAssembly or dependencies. It checks
+its behaviour against the real `php` binary and aims for identical output, including
 warnings and error messages. It is **alpha** software: good for running scripts and CLI tools,
 not yet for serving web applications. See the [roadmap](ROADMAP.md) for what is missing and the
 plan to get there.
