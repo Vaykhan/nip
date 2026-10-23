@@ -11,3 +11,5 @@ ext/date/tests/mktime_basic1.phpt
 ext/date/tests/time_basic.phpt
 ext/standard/tests/file/feof_basic.phpt
 ext/date/tests/gmdate_variation11.phpt
+Zend/tests/concat_003.phpt
+ext/standard/tests/file/ftruncate_bug76422.phpt

@@ -17,21 +17,20 @@ import { INI_DEFAULTS } from '../lib/errors.js';
 import { obApply, obEmit } from '../lib/output.js';
 import { boot, resetRuntime } from './boot.js';
 
-function formatUncaught(obj) {
+function writeUncaught(obj) {
   let s;
   try { s = toStr(obj); } catch (e) { s = obj.cls.name; }
-  const file = deref(obj.props.get('file')), line = deref(obj.props.get('line'));
-  return `Uncaught ${s}\n  thrown in ${file} on line ${line}`;
+  writeErr('Fatal error', `Uncaught ${s}\n  thrown`, deref(obj.props.get('file')), deref(obj.props.get('line')));
 }
 function handleTopLevel(e) {
   if (e instanceof ExitSig) return e.code;
   if (e instanceof FatalSig) {
     rt.flush();
     const kind = e.kind || 'Fatal error';
-    writeErr(`${kind}: ${e.msg} in ${e.file || rt.file} on line ${e.line || rt.line}`);
+    writeErr(kind, e.msg, e.file || rt.file, e.line || rt.line);
     return 255;
   }
-  if (e instanceof ParseErr) { writeErr(`Parse error: ${e.msg} in ${rt.file} on line ${e.line}`); return 255; }
+  if (e instanceof ParseErr) { writeErr('Parse error', e.msg, rt.file, e.line); return 255; }
   const sig = toThrowSig(e);
   if (sig) {
     if (rt.exceptionHandlers.length) {
@@ -39,8 +38,8 @@ function handleTopLevel(e) {
       try { callValue(h, [sig.obj]); return 0; } catch (e2) { return handleTopLevel(e2); }
     }
     rt.flush();
-    if (sig.obj.cls.lname === 'parseerror') writeErr(`Parse error: ${toStr(deref(sig.obj.props.get('message')))} in ${deref(sig.obj.props.get('file'))} on line ${deref(sig.obj.props.get('line'))}`);
-    else writeErr(`Fatal error: ${formatUncaught(sig.obj)}`);
+    if (sig.obj.cls.lname === 'parseerror') writeErr('Parse error', toStr(deref(sig.obj.props.get('message'))), deref(sig.obj.props.get('file')), deref(sig.obj.props.get('line')));
+    else writeUncaught(sig.obj);
     return 255;
   }
   throw e;

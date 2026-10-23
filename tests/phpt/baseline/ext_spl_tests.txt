@@ -3,6 +3,8 @@ ext/spl/tests/ArrayObject_dump_during_sort.phpt
 ext/spl/tests/ArrayObject_get_object_vars.phpt
 ext/spl/tests/ArrayObject_modify_shared_object_properties.phpt
 ext/spl/tests/CallbackFilterIteratorTest.phpt
+ext/spl/tests/RecursiveIteratorIterator_dtor_order.phpt
+ext/spl/tests/SPLDoublyLinkedList_iterate_by_reference.phpt
 ext/spl/tests/SplDoublyLinkedList_bottom_empty.phpt
 ext/spl/tests/SplDoublyLinkedList_current.phpt
 ext/spl/tests/SplDoublyLinkedList_current_empty.phpt
@@ -40,6 +42,7 @@ ext/spl/tests/SplObjectStorage_setInfo_empty_storage.phpt
 ext/spl/tests/SplObjectStorage_unset.phpt
 ext/spl/tests/SplObjectStorage_var_dump.phpt
 ext/spl/tests/arrayIterator_ksort_basic1.phpt
+ext/spl/tests/arrayObject___construct_basic6.phpt
 ext/spl/tests/arrayObject___construct_error2.phpt
 ext/spl/tests/arrayObject_asort_basic1.phpt
 ext/spl/tests/arrayObject_clone_basic1.phpt
@@ -63,6 +66,7 @@ ext/spl/tests/array_014.phpt
 ext/spl/tests/array_016.phpt
 ext/spl/tests/array_018.phpt
 ext/spl/tests/array_021.phpt
+ext/spl/tests/array_023.phpt
 ext/spl/tests/array_024.phpt
 ext/spl/tests/array_027.phpt
 ext/spl/tests/bug28822.phpt
@@ -177,6 +181,7 @@ ext/spl/tests/heap_005.phpt
 ext/spl/tests/heap_006.phpt
 ext/spl/tests/heap_007.phpt
 ext/spl/tests/heap_008.phpt
+ext/spl/tests/heap_009.phpt
 ext/spl/tests/heap_010.phpt
 ext/spl/tests/heap_011.phpt
 ext/spl/tests/heap_012.phpt
@@ -198,6 +203,7 @@ ext/spl/tests/iterator_057.phpt
 ext/spl/tests/iterator_058.phpt
 ext/spl/tests/iterator_062.phpt
 ext/spl/tests/iterator_067.phpt
+ext/spl/tests/iterator_069.phpt
 ext/spl/tests/iterator_count_array.phpt
 ext/spl/tests/iterator_count_exception.phpt
 ext/spl/tests/iterator_to_array_array.phpt
@@ -219,6 +225,7 @@ ext/spl/tests/spl_autoload_003.phpt
 ext/spl/tests/spl_autoload_010.phpt
 ext/spl/tests/spl_autoload_011.phpt
 ext/spl/tests/spl_autoload_012.phpt
+ext/spl/tests/spl_autoload_013.phpt
 ext/spl/tests/spl_autoload_014.phpt
 ext/spl/tests/spl_autoload_bug48541.phpt
 ext/spl/tests/spl_autoload_called_scope.phpt
@@ -229,6 +236,7 @@ ext/spl/tests/spl_heap_isempty.phpt
 ext/spl/tests/spl_iterator_apply_error.phpt
 ext/spl/tests/spl_iterator_apply_error_001.phpt
 ext/spl/tests/spl_iterator_iterator_constructor.phpt
+ext/spl/tests/spl_iterator_recursive_getiterator_error.phpt
 ext/spl/tests/spl_iterator_to_array_error.phpt
 ext/spl/tests/spl_object_id.phpt
 ext/spl/tests/spl_pq_top_basic.phpt

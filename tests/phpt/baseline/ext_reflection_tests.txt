@@ -81,6 +81,7 @@ ext/reflection/tests/ReflectionEnumUnitCase_getDocComment.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_getValue.phpt
 ext/reflection/tests/ReflectionEnum_construct.phpt
 ext/reflection/tests/ReflectionEnum_getBackingType.phpt
+ext/reflection/tests/ReflectionEnum_getCase.phpt
 ext/reflection/tests/ReflectionEnum_hasCase.phpt
 ext/reflection/tests/ReflectionEnum_isBacked.phpt
 ext/reflection/tests/ReflectionExtension_constructor_basic.phpt
@@ -90,6 +91,7 @@ ext/reflection/tests/ReflectionExtension_getVersion_basic.phpt
 ext/reflection/tests/ReflectionExtension_isPersistant.phpt
 ext/reflection/tests/ReflectionExtension_isTemporary.phpt
 ext/reflection/tests/ReflectionFunction_construct.001.phpt
+ext/reflection/tests/ReflectionFunction_getClosureScopeClass.phpt
 ext/reflection/tests/ReflectionFunction_getClosureThis.phpt
 ext/reflection/tests/ReflectionFunction_getClosureUsedVariables.phpt
 ext/reflection/tests/ReflectionFunction_getClosure_basic.phpt
@@ -112,6 +114,7 @@ ext/reflection/tests/ReflectionMethod_createFromMethodName.phpt
 ext/reflection/tests/ReflectionMethod_getClosureThis.phpt
 ext/reflection/tests/ReflectionMethod_getClosure_basic.phpt
 ext/reflection/tests/ReflectionMethod_getClosure_error.phpt
+ext/reflection/tests/ReflectionMethod_getDeclaringClass_basic.phpt
 ext/reflection/tests/ReflectionMethod_getDocComment_basic.phpt
 ext/reflection/tests/ReflectionMethod_getDocComment_property_list.phpt
 ext/reflection/tests/ReflectionMethod_getModifiers_basic.phpt
@@ -140,6 +143,8 @@ ext/reflection/tests/ReflectionObject_isInternal_basic.phpt
 ext/reflection/tests/ReflectionObject_isSubclassOf_basic.phpt
 ext/reflection/tests/ReflectionObject_isSubclassOf_error.phpt
 ext/reflection/tests/ReflectionObject_isUserDefined_basic.phpt
+ext/reflection/tests/ReflectionParameter_001.phpt
+ext/reflection/tests/ReflectionParameter_002.phpt
 ext/reflection/tests/ReflectionParameter_003.phpt
 ext/reflection/tests/ReflectionParameter_DefaultValueConstant_basic1.phpt
 ext/reflection/tests/ReflectionParameter_DefaultValueConstant_basic2.phpt
@@ -151,6 +156,7 @@ ext/reflection/tests/ReflectionParameter_getPosition_basic.phpt
 ext/reflection/tests/ReflectionParameter_isDefault.phpt
 ext/reflection/tests/ReflectionParameter_isVariadic_basic.phpt
 ext/reflection/tests/ReflectionParameter_toString_basic.phpt
+ext/reflection/tests/ReflectionProperty_basic2.phpt
 ext/reflection/tests/ReflectionProperty_constructor_error.phpt
 ext/reflection/tests/ReflectionProperty_constructor_variation1.phpt
 ext/reflection/tests/ReflectionProperty_error.phpt
@@ -195,6 +201,7 @@ ext/reflection/tests/bug41061.phpt
 ext/reflection/tests/bug41884.phpt
 ext/reflection/tests/bug43926.phpt
 ext/reflection/tests/bug45139.phpt
+ext/reflection/tests/bug46064_2.phpt
 ext/reflection/tests/bug46103.phpt
 ext/reflection/tests/bug47254.phpt
 ext/reflection/tests/bug48336.phpt
@@ -204,6 +211,7 @@ ext/reflection/tests/bug49092.phpt
 ext/reflection/tests/bug49719.phpt
 ext/reflection/tests/bug51905.phpt
 ext/reflection/tests/bug51911.phpt
+ext/reflection/tests/bug52854.phpt
 ext/reflection/tests/bug53366.phpt
 ext/reflection/tests/bug53915.phpt
 ext/reflection/tests/bug60357.phpt
@@ -211,6 +219,7 @@ ext/reflection/tests/bug61388.phpt
 ext/reflection/tests/bug62384.phpt
 ext/reflection/tests/bug63399.phpt
 ext/reflection/tests/bug63614.phpt
+ext/reflection/tests/bug64239.phpt
 ext/reflection/tests/bug66430.phpt
 ext/reflection/tests/bug70674.phpt
 ext/reflection/tests/bug70960.phpt
@@ -251,6 +260,7 @@ ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefa
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefaultValueConstant_Internal.phpt
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_toString_Internal.phpt
 ext/reflection/tests/internal_parameter_default_value/check_all.phpt
+ext/reflection/tests/new_in_attributes.phpt
 ext/reflection/tests/parameters_002.phpt
 ext/reflection/tests/readonly_class.phpt
 ext/reflection/tests/reflectionclass_for_traits.phpt

@@ -8,7 +8,7 @@ import { cExpr } from './expr.js';
 import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
-import { deprecated } from '../runtime/errors.js';
+import { deprecated, warn } from '../runtime/errors.js';
 import { RESERVED_CLASS_NAMES } from '../parser.js';
 
 // How an expression is used: read, written (assignment target, by-ref argument, ...), unset,
@@ -20,6 +20,34 @@ const READ = 0, WRITE = 1, UNSET = 2, ARG = 3, ASSIGN = 4;
 const VAR_OR_CALL = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'Call', 'MCall', 'NullsafeMCall', 'SCall']);
 const CONST_EXPR_NODES = new Set(['Lit', 'Bin', 'And', 'Or', 'Xor', 'Not', 'BitNot', 'Neg', 'Plus', 'Ternary', 'Index', 'Arr',
   'Const', 'CConst', 'ClassName', 'Name', 'MagicClass', 'MagicMethod', 'Coalesce', 'New', 'Prop']);
+// [argument count (null: any), static, must be public, argument types, return type (false: none
+// allowed)]
+const MAGIC_SIGS = {
+  __construct: [null, false, false, null, false], __destruct: [0, false, false, null, false], __clone: [0, false, false, null, 'void'],
+  __get: [1, false, true, ['string'], null], __set: [2, false, true, ['string'], 'void'], __unset: [1, false, true, ['string'], 'void'],
+  __isset: [1, false, true, ['string'], 'bool'], __call: [2, false, true, ['string', 'array'], null],
+  __callstatic: [2, true, true, ['string', 'array'], null], __tostring: [0, false, true, null, 'string'],
+  __debuginfo: [0, false, true, null, '?array'], __serialize: [0, false, true, null, 'array'],
+  __unserialize: [1, false, true, ['array'], 'void'], __set_state: [1, true, true, ['array'], 'object'],
+  __invoke: [null, false, true, null, null], __sleep: [0, false, true, null, 'array'], __wakeup: [0, false, true, null, 'void'],
+};
+// the builtin types a declared type allows (complex: it names a class)
+const TYPE_BITS = {
+  int: ['int'], float: ['float'], string: ['string'], bool: ['true', 'false'], true: ['true'], false: ['false'], array: ['array'],
+  object: ['object'], callable: ['callable'], iterable: ['array'], void: ['void'], never: ['never'], null: ['null'], static: ['static'],
+  mixed: ['int', 'float', 'string', 'true', 'false', 'array', 'object', 'callable', 'null', 'resource'],
+};
+function typeBits(t) {
+  const bits = new Set();
+  let complex = false;
+  for (const a of t.alts) {
+    const b = typeof a === 'string' ? TYPE_BITS[a.toLowerCase()] : null;
+    if (b) b.forEach((x) => bits.add(x)); else complex = true;
+    if (a === 'iterable') complex = true;
+  }
+  if (t.nullable) bits.add('null');
+  return { bits, complex };
+}
 const AUTO_GLOBALS = new Set(['GLOBALS', '_SERVER', '_GET', '_POST', '_COOKIE', '_FILES', '_ENV', '_REQUEST', '_SESSION']);
 const isTemp = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && !VAR_OR_CALL.has(n.k);
 
@@ -27,11 +55,12 @@ export function checkProgram(ast, file) {
   const seen = new WeakSet();
   const fail = (msg, n) => { throw new FatalSig(msg, n.l); };
   // deprecations PHP raises while compiling
-  const compileDeprecated = (msg, n) => {
+  const atNode = (raiseFn) => (msg, n) => {
     const prevFile = rt.file, prevLine = rt.line;
     rt.file = file; rt.line = n.l;
-    try { deprecated(msg); } finally { rt.file = prevFile; rt.line = prevLine; }
+    try { raiseFn(msg); } finally { rt.file = prevFile; rt.line = prevLine; }
   };
+  const compileDeprecated = atNode(deprecated), compileWarning = atNode(warn);
   // goto: labels and gotos of the current function, and the loops/switches/finally blocks
   // enclosing the statement being visited
   let scope = newScope(), path = [];
@@ -146,6 +175,20 @@ export function checkProgram(ast, file) {
         scope.labels.set(n.name, path.slice());
         return;
       case 'Goto': scope.gotos.push({ n, path: path.slice() }); return;
+      case 'Break': case 'Continue': {
+        const word = n.k === 'Break' ? 'break' : 'continue', depth = Number(n.n);
+        const targets = path.filter((p) => p.kind === 'loop' || p.kind === 'switch').reverse();
+        if (!targets.length) fail(`'${word}' not in the 'loop' or 'switch' context`, n);
+        if (depth > targets.length) fail(`Cannot '${word}' ${depth} level${depth === 1 ? '' : 's'}`, n);
+        const fin = path.findIndex((p) => p.kind === 'finally');
+        if (fin >= 0 && path.indexOf(targets[depth - 1]) < fin) fail('jump out of a finally block is disallowed', n);
+        if (word === 'continue' && targets[depth - 1].kind === 'switch') {
+          const outer = depth < targets.length;
+          const msg = depth === 1 ? '"continue" targeting switch is equivalent to "break"' : `"continue ${depth}" targeting switch is equivalent to "break ${depth}"`;
+          compileWarning(outer ? `${msg}. Did you mean to use "continue ${depth + 1}"?` : msg, n);
+        }
+        return;
+      }
       case 'Return': {
         const ret = scope.ret && !scope.isGen && scope.ret.raw && scope.ret.raw.length === 1 && !scope.ret.q && typeof scope.ret.raw[0] === 'string' ? scope.ret.raw[0].toLowerCase() : null;
         if (ret === 'void' && n.e) fail(n.e.k === 'Lit' && n.e.v === null ? 'A void function must not return a value (did you mean "return;" instead of "return null;"?)' : 'A void function must not return a value', n);
@@ -165,7 +208,7 @@ export function checkProgram(ast, file) {
         }
         const ctxOf = (key) => (key === 'kv' || key === 'v' ? ASSIGN : key === 'e' && n.k === 'Foreach' && n.byRef ? WRITE : READ);
         for (const key in rest) if (key !== 'l' && key !== 'k') visit(rest[key], ctxOf(key));
-        within('loop', () => { visit(body, READ); visit(cases, READ); });
+        within(n.k === 'Switch' ? 'switch' : 'loop', () => { visit(body, READ); visit(cases, READ); });
         return;
       }
       case 'Try':
@@ -247,6 +290,7 @@ export function checkProgram(ast, file) {
       } else if (m.abstract && fn.body) fail(`Abstract function ${name}::${fn.name}() cannot contain body`, m);
       else if (!m.abstract && !fn.body) fail(`Non-abstract method ${name}::${fn.name}() must contain body`, m);
       if (kind === 'enum' && ENUM_MAGIC.has(ln)) fail(`Enum ${name} cannot include magic method ${fn.name}`, m);
+      if (ln.startsWith('__') && MAGIC_SIGS[ln]) checkMagicMethod(name, m, MAGIC_SIGS[ln]);
       for (const p of fn.params) {
         if (!p.promote) continue;
         if (ln !== '__construct') fail('Cannot declare promoted property outside a constructor', m);
@@ -255,6 +299,35 @@ export function checkProgram(ast, file) {
         if (fn.params.filter((q) => q.name === p.name).length > 1) fail(`Redefinition of parameter $${p.name}`, m);
         checkProp({ name: p.name, readonly: p.readonly || n.flags.readonly, type: p.type, static: false, hasDef: false }, m, true);
       }
+    }
+  }
+  // zend_check_magic_method_implementation: argument count, static-ness, visibility and the types
+  // a magic method may declare
+  function checkMagicMethod(cname, m, sig) {
+    const fn = m.fn, mname = `${cname}::${fn.name}`;
+    const [nargs, isStatic, isPublic, argTypes, ret] = sig;
+    if (nargs !== null) {
+      const n = fn.params.filter((p) => !p.variadic).length;
+      if (n !== nargs || fn.params.some((p) => p.variadic)) fail(nargs === 0 ? `Method ${mname}() cannot take arguments` : `Method ${mname}() must take exactly ${nargs} argument${nargs === 1 ? '' : 's'}`, m);
+      if (fn.params.some((p) => p.byRef)) fail(`Method ${mname}() cannot take arguments by reference`, m);
+    }
+    if (isStatic && !m.static) fail(`Method ${mname}() must be static`, m);
+    if (!isStatic && m.static) fail(`Method ${mname}() cannot be static`, m);
+    if (ret === false && fn.ret) fail(`Method ${mname}() cannot declare a return type`, m);
+    if (isPublic && m.vis && m.vis !== 'public') compileWarning(`The magic method ${mname}() must have public visibility`, m);
+    (argTypes || []).forEach((want, i) => {
+      const p = fn.params[i];
+      if (!p || !p.type) return;
+      const { bits } = typeBits(p.type);
+      if (!bits.has(want)) fail(`${mname}(): Parameter #${i + 1} ($${p.name}) must be of type ${want} when declared`, m);
+    });
+    if (ret && fn.ret) {
+      const { bits, complex } = typeBits(fn.ret);
+      if (bits.has('never')) return;
+      const allowed = new Set(ret === 'bool' ? ['true', 'false'] : ret === '?array' ? ['array', 'null'] : [ret]);
+      let cx = complex;
+      if (bits.has('static')) { bits.delete('static'); cx = true; }
+      if ([...bits].some((b) => !allowed.has(b)) || (cx && ret !== 'object')) fail(`${mname}(): Return type must be ${ret} when declared`, m);
     }
   }
   // type declarations: redundant or impossible combinations
@@ -375,6 +448,11 @@ export function checkProgram(ast, file) {
       if (p.type) checkTypeDecl(p.type, 'param', fn);
     }
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
+    if (fn.isGen && fn.ret) {
+      const { bits } = typeBits(fn.ret);
+      const ok = bits.has('object') || fn.ret.alts.some((a) => typeof a === 'string' && /^(traversable|iterator|generator|iterable)$/i.test(a.replace(/^\\/, '')));
+      if (!ok) fail(`Generator return type must be a supertype of Generator, ${typeStr(fn.ret, null, true)} given`, fn);
+    }
     const unames = new Set();
     for (const u of fn.uses || []) {
       if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
@@ -419,7 +497,7 @@ export function checkProgram(ast, file) {
       let p = 0;
       while (p < to.length && p < from.length && to[p] === from[p]) p++;
       for (const c of to.slice(p)) {
-        if (c.kind === 'loop') fail("'goto' into loop or switch statement is disallowed", n);
+        if (c.kind === 'loop' || c.kind === 'switch') fail("'goto' into loop or switch statement is disallowed", n);
         if (c.kind === 'finally') fail('jump into a finally block is disallowed', n);
       }
       if (from.slice(p).some((c) => c.kind === 'finally')) fail('jump out of a finally block is disallowed', n);

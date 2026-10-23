@@ -8,6 +8,8 @@ tests/basic/bug45986.phpt
 tests/basic/bug67198.phpt
 tests/basic/bug71273.phpt
 tests/basic/bug73969.phpt
+tests/basic/timeout_variation_0.phpt
+tests/basic/timeout_variation_7.phpt
 tests/classes/__call_001.phpt
 tests/classes/__call_003.phpt
 tests/classes/__set__get_001.phpt
@@ -37,6 +39,7 @@ tests/classes/autoload_006.phpt
 tests/classes/autoload_007.phpt
 tests/classes/autoload_008.phpt
 tests/classes/autoload_009.phpt
+tests/classes/autoload_010.phpt
 tests/classes/autoload_011.phpt
 tests/classes/autoload_013.phpt
 tests/classes/autoload_014.phpt
@@ -124,6 +127,7 @@ tests/classes/interface_method_private.phpt
 tests/classes/interface_must_be_implemented.phpt
 tests/classes/interface_optional_arg.phpt
 tests/classes/interface_optional_arg_002.phpt
+tests/classes/interface_optional_arg_003.phpt
 tests/classes/interfaces_001.phpt
 tests/classes/interfaces_002.phpt
 tests/classes/interfaces_003.phpt
@@ -183,6 +187,7 @@ tests/classes/property_override_public_protected.phpt
 tests/classes/property_override_public_protectedStatic.phpt
 tests/classes/property_override_public_public.phpt
 tests/classes/property_override_public_publicStatic.phpt
+tests/classes/property_recreate_private.phpt
 tests/classes/property_recreate_protected.phpt
 tests/classes/protected_001.phpt
 tests/classes/protected_001b.phpt
@@ -230,6 +235,7 @@ tests/func/002.phpt
 tests/func/003.phpt
 tests/func/004.phpt
 tests/func/005.phpt
+tests/func/005a.phpt
 tests/func/006.phpt
 tests/func/007.phpt
 tests/func/008.phpt
@@ -277,6 +283,7 @@ tests/lang/041.phpt
 tests/lang/042.phpt
 tests/lang/043.phpt
 tests/lang/044.phpt
+tests/lang/045.phpt
 tests/lang/array_shortcut_001.phpt
 tests/lang/array_shortcut_002.phpt
 tests/lang/array_shortcut_003.phpt
@@ -284,13 +291,17 @@ tests/lang/array_shortcut_005.phpt
 tests/lang/bison1.phpt
 tests/lang/bug18872.phpt
 tests/lang/bug19943.phpt
+tests/lang/bug20175.phpt
 tests/lang/bug21094.phpt
 tests/lang/bug21600.phpt
 tests/lang/bug21669.phpt
+tests/lang/bug21820.phpt
 tests/lang/bug21849.phpt
 tests/lang/bug21961.phpt
+tests/lang/bug22231.phpt
 tests/lang/bug22510.phpt
 tests/lang/bug22592.phpt
+tests/lang/bug23279.phpt
 tests/lang/bug23384.phpt
 tests/lang/bug23489.phpt
 tests/lang/bug23524.phpt
@@ -318,6 +329,7 @@ tests/lang/bug27354.phpt
 tests/lang/bug27439.phpt
 tests/lang/bug27443.phpt
 tests/lang/bug27535.phpt
+tests/lang/bug28213.phpt
 tests/lang/bug28800.phpt
 tests/lang/bug29566.phpt
 tests/lang/bug29893.phpt
@@ -326,6 +338,7 @@ tests/lang/bug30578.phpt
 tests/lang/bug30726.phpt
 tests/lang/bug30862.phpt
 tests/lang/bug32828.phpt
+tests/lang/bug32924.phpt
 tests/lang/bug43958.phpt
 tests/lang/bug44654.phpt
 tests/lang/bug44827.phpt
@@ -342,6 +355,7 @@ tests/lang/compare_objects_basic2.phpt
 tests/lang/constants/PHP_INT_64bit.phpt
 tests/lang/empty_variation.phpt
 tests/lang/engine_assignExecutionOrder_001.phpt
+tests/lang/engine_assignExecutionOrder_002.phpt
 tests/lang/engine_assignExecutionOrder_003.phpt
 tests/lang/engine_assignExecutionOrder_004.phpt
 tests/lang/engine_assignExecutionOrder_005.phpt
@@ -361,17 +375,23 @@ tests/lang/foreachLoop.009.phpt
 tests/lang/foreachLoop.010.phpt
 tests/lang/foreachLoop.011.phpt
 tests/lang/foreachLoop.012.phpt
+tests/lang/foreachLoop.013.phpt
 tests/lang/foreachLoop.014.phpt
+tests/lang/foreachLoop.015.phpt
 tests/lang/foreachLoop.016.phpt
 tests/lang/foreachLoop.017.phpt
 tests/lang/foreachLoopIterator.001.phpt
+tests/lang/foreachLoopIterator.002.phpt
 tests/lang/foreachLoopIteratorAggregate.001.phpt
 tests/lang/foreachLoopIteratorAggregate.002.phpt
 tests/lang/foreachLoopIteratorAggregate.003.phpt
 tests/lang/foreachLoopIteratorAggregate.004.phpt
 tests/lang/foreachLoopObjects.001.phpt
+tests/lang/foreachLoopObjects.002.phpt
+tests/lang/foreachLoopObjects.003.phpt
 tests/lang/foreachLoopObjects.004.phpt
 tests/lang/foreachLoopObjects.005.phpt
+tests/lang/foreachLoopObjects.006.phpt
 tests/lang/foreach_with_object_001.phpt
 tests/lang/foreach_with_references_001.phpt
 tests/lang/func_get_arg.001.phpt
@@ -462,6 +482,7 @@ tests/lang/passByReference_006.phpt
 tests/lang/passByReference_007.phpt
 tests/lang/passByReference_008.phpt
 tests/lang/passByReference_009.phpt
+tests/lang/passByReference_010.phpt
 tests/lang/passByReference_012.phpt
 tests/lang/returnByReference.001.phpt
 tests/lang/returnByReference.002.phpt
@@ -476,6 +497,7 @@ tests/lang/short_tags.001.phpt
 tests/lang/short_tags.002.phpt
 tests/lang/short_tags.004.phpt
 tests/lang/static_basic_001.phpt
+tests/lang/static_basic_002.phpt
 tests/lang/static_variation_001.phpt
 tests/lang/static_variation_002.phpt
 tests/lang/string/unicode_escape.phpt
@@ -488,10 +510,13 @@ tests/lang/string/unicode_escape_sign2.phpt
 tests/lang/string/unicode_escape_surrogates.phpt
 tests/lang/string/unicode_escape_whitespace.phpt
 tests/lang/string_decimals_001.phpt
+tests/lang/syntax_errors.phpt
 tests/lang/this_assignment.phpt
 tests/lang/throw_variation_001.phpt
 tests/lang/type_hints_001.phpt
 tests/lang/type_hints_002.phpt
+tests/lang/type_hints_003.phpt
+tests/lang/zend_throw_exception_001.phpt
 tests/output/bug60322.phpt
 tests/output/bug60768.phpt
 tests/output/flush_basic_001.phpt

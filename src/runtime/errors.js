@@ -20,11 +20,22 @@ function errorTypeName(type) {
   }
 }
 
-export function writeErr(msg) {
+// display an error: "Warning: msg in file on line N" (file undefined: no location), as HTML with
+// html_errors (docref_root adds a manual link to function errors)
+export function writeErr(kind, msg, file, line) {
   rt.flush();
-  if (rt.displayErrors === 'stdout') rt.echo('\n' + msg + '\n');
-  else if (rt.capture) rt.capture.push('\nPHP ' + msg + '\n');
-  else writeFd(2, Buffer.from('PHP ' + msg.replace(/^(\w[\w ]*?): /, '$1:  ') + '\n', 'latin1'));
+  const loc = file === undefined ? '' : ` in ${file} on line ${line}`;
+  if (rt.displayErrors === 'stdout') {
+    const ini = (k) => rt.ini.get(k) || '';
+    if (iniBool('html_errors', false)) {
+      if (kind === 'Fatal error') msg = msg.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+      const root = ini('docref_root');
+      if (root) msg = msg.replace(/^([A-Za-z_][\w]*)\(([^)]*)\): /, (m, fn, params) => { const ref = 'function.' + fn.toLowerCase().replace(/_/g, '-') + ini('docref_ext'); return `${fn}(${params}) [<a href='${root}${ref}'>${ref}</a>]: `; });
+      const hloc = file === undefined ? '' : ` in <b>${file}</b> on line <b>${line}</b>`;
+      rt.echo(`${ini('error_prepend_string')}<br />\n<b>${kind}</b>:  ${msg}${hloc}<br />\n${ini('error_append_string')}`);
+    } else rt.echo(`${ini('error_prepend_string')}\n${kind}: ${msg}${loc}\n${ini('error_append_string')}`);
+  } else if (rt.capture) rt.capture.push(`\nPHP ${kind}: ${msg}${loc}\n`);
+  else writeFd(2, Buffer.from(`PHP ${kind}:  ${msg}${loc}\n`, 'latin1'));
 }
 
 export function raise(type, msg) {
@@ -44,7 +55,7 @@ export function raise(type, msg) {
   if (rt.silence) return;
   if (!(rt.errorReporting & type)) return;
   if (rt.displayErrors === '0' || rt.displayErrors === 'off') return;
-  writeErr(`${errorTypeName(type)}: ${msg} in ${file} on line ${line}`);
+  writeErr(errorTypeName(type), msg, file, line);
 }
 export function warn(msg) { raise(E_WARNING, msg); }
 export function notice(msg) { raise(E_NOTICE, msg); }

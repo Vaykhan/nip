@@ -5,7 +5,7 @@ import { toBool, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { isRefParam } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
-import { PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
+import { deprecated, PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
 import { FRAME_FUNCS } from '../runtime/functions.js';
 import { callValue, invokeCallable, nativeCallback } from '../runtime/callables.js';
 import {
@@ -30,15 +30,22 @@ def('call_user_func_array', (callback, args) => {
 def('forward_static_call', (callback, ...args) => callValue(callback, args));
 def('forward_static_call_array', (callback, args) => callValue(callback, A(args).values()));
 def('get_class', (object = undefined) => {
-  if (object === undefined) { const f = rt.frame; if (f && f.cls) return f.cls.name; throwError('Error', 'get_class() without arguments must be called from within a class'); }
+  if (object === undefined) {
+    const f = rt.frame;
+    if (f && f.cls) { deprecated('Calling get_class() without arguments is deprecated'); return f.cls.name; }
+    throwError('Error', 'get_class() without arguments must be called from within a class');
+  }
   if (!(object instanceof PHPObject)) throwError('TypeError', `get_class(): Argument #1 ($object) must be of type object, ${typeOf(object)} given`);
   return object.cls.name;
 }, { min: 0 });
 def('get_parent_class', (object_or_class = undefined) => {
   let c;
-  if (object_or_class === undefined) c = rt.frame ? rt.frame.cls : null;
+  if (object_or_class === undefined) { deprecated('Calling get_parent_class() without arguments is deprecated'); c = rt.frame ? rt.frame.cls : null; }
   else if (object_or_class instanceof PHPObject) c = object_or_class.cls;
-  else c = classExists(S(object_or_class), true);
+  else {
+    c = typeof object_or_class === 'string' ? classExists(object_or_class, true) : null;
+    if (!c) throwError('TypeError', `get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, ${typeOf(object_or_class)} given`);
+  }
   return c && c.parent ? c.parent.name : false;
 }, { min: 0 });
 def('get_object_vars', (object) => PHPArray.fromPairs(objVisibleProps(object, rt.frame ? rt.frame.cls : null).map(([k, v]) => [normKey(k), cp(v)])));
@@ -126,7 +133,8 @@ def('get_defined_functions', () => {
 def('define', (constant_name, value, case_insensitive = false) => {
   const n = S(constant_name);
   if (n.includes('::')) throwError('ValueError', 'define(): Argument #1 ($constant_name) cannot be a class constant');
-  if (rt.consts.has(n)) { warn(`Constant ${n} already defined`); return false; }
+  // true/false/null (any case) and __COMPILER_HALT_OFFSET__ can't be defined
+  if (rt.consts.has(n) || /^(true|false|null)$/i.test(n) || n === '__COMPILER_HALT_OFFSET__') { warn(`Constant ${n} already defined`); return false; }
   rt.consts.set(n, cp(value));
   if (value !== null && typeof value === 'object') rt.constRoots.push(value);
   return true;

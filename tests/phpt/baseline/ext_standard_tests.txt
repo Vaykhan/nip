@@ -315,6 +315,7 @@ ext/standard/tests/array/array_values.phpt
 ext/standard/tests/array/array_values_basic.phpt
 ext/standard/tests/array/array_values_variation2.phpt
 ext/standard/tests/array/array_values_variation3.phpt
+ext/standard/tests/array/array_values_variation4.phpt
 ext/standard/tests/array/array_values_variation5.phpt
 ext/standard/tests/array/array_values_variation6.phpt
 ext/standard/tests/array/array_values_variation7.phpt
@@ -429,6 +430,7 @@ ext/standard/tests/array/bug70250.phpt
 ext/standard/tests/array/bug70668.phpt
 ext/standard/tests/array/bug70808.phpt
 ext/standard/tests/array/bug70910.phpt
+ext/standard/tests/array/bug71220.phpt
 ext/standard/tests/array/bug71334.phpt
 ext/standard/tests/array/bug71603.phpt
 ext/standard/tests/array/bug71660.phpt
@@ -524,6 +526,7 @@ ext/standard/tests/array/natcasesort_variation2.phpt
 ext/standard/tests/array/natcasesort_variation4.phpt
 ext/standard/tests/array/natcasesort_variation5.phpt
 ext/standard/tests/array/natcasesort_variation6.phpt
+ext/standard/tests/array/natcasesort_variation7.phpt
 ext/standard/tests/array/natcasesort_variation8.phpt
 ext/standard/tests/array/natcasesort_variation9.phpt
 ext/standard/tests/array/natsort_basic.phpt
@@ -577,6 +580,7 @@ ext/standard/tests/array/sort_variation8.phpt
 ext/standard/tests/array/uasort_basic1.phpt
 ext/standard/tests/array/uasort_basic2.phpt
 ext/standard/tests/array/uasort_object1.phpt
+ext/standard/tests/array/uasort_object2.phpt
 ext/standard/tests/array/uasort_variation10.phpt
 ext/standard/tests/array/uasort_variation11.phpt
 ext/standard/tests/array/uasort_variation4.phpt
@@ -588,6 +592,7 @@ ext/standard/tests/array/unexpected_array_mod_bug.phpt
 ext/standard/tests/array/unexpected_array_mod_bug_variation1.phpt
 ext/standard/tests/array/usort_basic.phpt
 ext/standard/tests/array/usort_object1.phpt
+ext/standard/tests/array/usort_object2.phpt
 ext/standard/tests/array/usort_stability.phpt
 ext/standard/tests/array/usort_variation10.phpt
 ext/standard/tests/array/usort_variation4.phpt
@@ -600,8 +605,10 @@ ext/standard/tests/array/var_export3.phpt
 ext/standard/tests/bug49244.phpt
 ext/standard/tests/bug64370_var2.phpt
 ext/standard/tests/bug71827.phpt
+ext/standard/tests/bug75220.phpt
 ext/standard/tests/class_object/class_exists_basic_001.phpt
 ext/standard/tests/class_object/class_exists_variation_003.phpt
+ext/standard/tests/class_object/forward_static_call_003.phpt
 ext/standard/tests/class_object/get_class_methods_basic_002.phpt
 ext/standard/tests/class_object/get_class_methods_basic_003.phpt
 ext/standard/tests/class_object/get_class_methods_variation_002.phpt
@@ -609,6 +616,7 @@ ext/standard/tests/class_object/get_class_variation_002.phpt
 ext/standard/tests/class_object/get_class_vars_variation2.phpt
 ext/standard/tests/class_object/get_declared_classes_variation1.phpt
 ext/standard/tests/class_object/get_declared_interfaces_variation1.phpt
+ext/standard/tests/class_object/get_declared_traits_basic_001.phpt
 ext/standard/tests/class_object/get_object_vars_basic_001.phpt
 ext/standard/tests/class_object/get_object_vars_basic_002.phpt
 ext/standard/tests/class_object/get_object_vars_variation_001.phpt
@@ -700,6 +708,7 @@ ext/standard/tests/file/copy_variation6.phpt
 ext/standard/tests/file/copy_variation8.phpt
 ext/standard/tests/file/copy_variation9.phpt
 ext/standard/tests/file/fclose_variation1.phpt
+ext/standard/tests/file/feof_basic.phpt
 ext/standard/tests/file/fflush_basic.phpt
 ext/standard/tests/file/fflush_variation1.phpt
 ext/standard/tests/file/fflush_variation2.phpt
@@ -889,6 +898,7 @@ ext/standard/tests/file/mkdir-001.phpt
 ext/standard/tests/file/mkdir-002.phpt
 ext/standard/tests/file/mkdir-003.phpt
 ext/standard/tests/file/mkdir_rmdir_error.phpt
+ext/standard/tests/file/mkdir_rmdir_variation1.phpt
 ext/standard/tests/file/mkdir_variation5.phpt
 ext/standard/tests/file/pathinfo_basic2.phpt
 ext/standard/tests/file/popen_pclose_basic.phpt
@@ -914,6 +924,7 @@ ext/standard/tests/file/rename_variation9.phpt
 ext/standard/tests/file/rmdir_variation3.phpt
 ext/standard/tests/file/statcache-corruption.phpt
 ext/standard/tests/file/stream_get_line.phpt
+ext/standard/tests/file/stream_rfc2397_001.phpt
 ext/standard/tests/file/stream_rfc2397_003.phpt
 ext/standard/tests/file/symlink_link_linkinfo_is_link_variation3.phpt
 ext/standard/tests/file/symlink_link_linkinfo_is_link_variation4.phpt
@@ -1085,6 +1096,7 @@ ext/standard/tests/general_functions/proc_nice_variation2.phpt
 ext/standard/tests/general_functions/register_tick_function_error.phpt
 ext/standard/tests/general_functions/strval.phpt
 ext/standard/tests/general_functions/unregister_tick_function_error.phpt
+ext/standard/tests/general_functions/var_dump_64bit.phpt
 ext/standard/tests/general_functions/var_export_basic1.phpt
 ext/standard/tests/general_functions/var_export_basic2.phpt
 ext/standard/tests/general_functions/var_export_basic3.phpt
@@ -1284,6 +1296,7 @@ ext/standard/tests/serialize/004.phpt
 ext/standard/tests/serialize/006.phpt
 ext/standard/tests/serialize/__serialize_001.phpt
 ext/standard/tests/serialize/__serialize_002.phpt
+ext/standard/tests/serialize/__serialize_003.phpt
 ext/standard/tests/serialize/__serialize_004.phpt
 ext/standard/tests/serialize/bug23298.phpt
 ext/standard/tests/serialize/bug24063.phpt
@@ -1300,13 +1313,16 @@ ext/standard/tests/serialize/bug64354_1.phpt
 ext/standard/tests/serialize/bug64354_2.phpt
 ext/standard/tests/serialize/bug68594.phpt
 ext/standard/tests/serialize/bug69139.phpt
+ext/standard/tests/serialize/bug69210.phpt
 ext/standard/tests/serialize/bug73052.phpt
 ext/standard/tests/serialize/bug73154.phpt
 ext/standard/tests/serialize/bug76300.phpt
 ext/standard/tests/serialize/bug78438.phpt
 ext/standard/tests/serialize/overwrite_untyped_ref.phpt
 ext/standard/tests/serialize/serialization_error_002.phpt
+ext/standard/tests/serialize/serialization_objects_001.phpt
 ext/standard/tests/serialize/serialization_objects_003.phpt
+ext/standard/tests/serialize/serialization_objects_011.phpt
 ext/standard/tests/serialize/serialization_objects_incomplete.phpt
 ext/standard/tests/serialize/serialization_precision_001.phpt
 ext/standard/tests/serialize/serialization_precision_002.phpt
@@ -1318,6 +1334,7 @@ ext/standard/tests/serialize/typed_property_ref_overwrite.phpt
 ext/standard/tests/serialize/unserializeS.phpt
 ext/standard/tests/serialize/unserialize_neg_iv_edge_cases.phpt
 ext/standard/tests/serialize/unserialize_ref_to_overwritten_declared_prop.phpt
+ext/standard/tests/serialize/unserialize_subclasses.phpt
 ext/standard/tests/setrawcookie_basic_001.phpt
 ext/standard/tests/streams/bug51056.phpt
 ext/standard/tests/streams/bug53427.phpt

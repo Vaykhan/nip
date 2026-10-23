@@ -249,7 +249,10 @@ export class Parser {
         case 'break': case 'continue': {
           this.p++;
           let n = 1;
-          if (this.tok.t === 'int') n = this.next().v;
+          if (this.tok.t === 'int') {
+            n = this.next().v;
+            if (n < 1) this.fatal(`'${kw}' operator accepts only positive integers`);
+          } else if (!this.isOp(';') && this.tok.t !== 'eof') this.fatal(`'${kw}' operator with non-integer operand is no longer supported`);
           this.semi();
           return { k: kw === 'break' ? 'Break' : 'Continue', n, l };
         }

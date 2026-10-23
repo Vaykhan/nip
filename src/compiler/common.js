@@ -1,7 +1,7 @@
 // Compiler shared pieces: control signals, warnings, array/string element reads.
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
-import { Flt, INT_LIKE, normKey, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
+import { Flt, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
 import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
@@ -99,28 +99,15 @@ export function keyRepr(k) { return typeof k === 'string' ? `"${k}"` : String(k)
 // ---------------------------------------------------------------- array/string reads
 export function readIndex(base, key, quiet) {
   if (base instanceof PHPArray) {
-    const k = normKey(key);
+    const k = normKey(key, quiet ? KEY_ISSET : 0);
     const i = base.index(k);
     if (i === undefined) { if (!quiet) warn(`Undefined array key ${keyRepr(k)}`); return quiet ? undefined : null; }
     const v = base.v[i];
     return v instanceof Ref ? v.v : v;
   }
   if (typeof base === 'string') {
-    let idx;
-    if (typeof key === 'number') idx = key;
-    else if (typeof key === 'string') {
-      const n = numericStr(key);
-      if (n === null || !INT_LIKE.test(key)) {
-        if (quiet) return undefined;
-        const m = NUM_LEAD.exec(key);
-        if (m && /^\s*[+-]?\d+/.test(key)) { warn(`Illegal string offset "${key}"`); idx = toInt(key); }
-        else throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
-      } else idx = toInt(n);
-    } else if (key === null || key === undefined) { if (quiet) return undefined; throwError('TypeError', 'Cannot access offset of type null on string'); }
-    else if (typeof key === 'boolean') { idx = key ? 1 : 0; if (!quiet) warn('String offset cast occurred'); }
-    else if (key instanceof Flt) { idx = floatToInt(key.v); if (!quiet) warn('String offset cast occurred'); }
-    else if (typeof key === 'bigint') idx = key;
-    else { if (quiet) return undefined; throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`); }
+    let idx = strOffsetKey(key, quiet);
+    if (idx === undefined) return undefined;
     const off = idx; // PHP reports the integer offset, before negative offsets are resolved
     if (typeof idx === 'bigint') idx = -1; // beyond 2^53: out of range for any string
     else if (idx < 0) idx += base.length;
@@ -141,13 +128,33 @@ export function readIndex(base, key, quiet) {
   return quiet ? undefined : null;
 }
 
+// a string offset as an integer (zend_check_string_offset): integer strings, with a warning
+// when followed by other characters; floats, bools and null with a warning. isset: undefined when
+// it isn't one (without warnings).
+const INT_LEAD = /^[ \t\n\r\v\f]*[+-]?\d+/;
+export function strOffsetKey(key, isset) {
+  if (typeof key === 'number' || typeof key === 'bigint') return key;
+  if (typeof key === 'string') {
+    if (INT_LIKE.test(key)) return toInt(key);
+    const m = NUM_LEAD.exec(key);
+    if (isset || !m || !INT_LEAD.test(key) || /[.eE]/.test(m[0])) {
+      if (isset) return undefined;
+      throwError('TypeError', 'Cannot access offset of type string on string');
+    }
+    warn(`Illegal string offset "${key}"`);
+    return toInt(key);
+  }
+  if (key === null || key === undefined || typeof key === 'boolean' || key instanceof Flt) {
+    if (!isset) warn('String offset cast occurred');
+    return key instanceof Flt ? floatToInt(key.v) : key ? 1 : 0;
+  }
+  if (isset) return undefined;
+  throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
+}
 export let strOffsetChar = null;
 export function strSetOffset(s, key, v) {
-  let idx = typeof key === 'number' ? key : toInt(key);
-  if (typeof key === 'string' && !INT_LIKE.test(key)) {
-    if (/^\s*[+-]?\d/.test(key)) warn(`Illegal string offset "${key}"`);
-    else throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
-  }
+  let idx = strOffsetKey(key, false);
+  if (typeof idx === 'bigint') idx = Number(idx);
   if (idx < 0) idx += s.length;
   if (idx < 0) { warn(`Illegal string offset ${toStr(key)}`); return s; }
   let c = toStr(v);

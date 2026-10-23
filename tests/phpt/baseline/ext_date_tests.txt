@@ -146,6 +146,7 @@ ext/date/tests/bug67118_2.phpt
 ext/date/tests/bug68503.phpt
 ext/date/tests/bug68549-dst-transition-DateTime-setTimestamp.phpt
 ext/date/tests/bug68549-dst-transition-DateTime-setTimezone.phpt
+ext/date/tests/bug68669.phpt
 ext/date/tests/bug69587.phpt
 ext/date/tests/bug69806.phpt
 ext/date/tests/bug70266.phpt
@@ -198,6 +199,7 @@ ext/date/tests/default-timezone-2.phpt
 ext/date/tests/format-negative-timestamp.phpt
 ext/date/tests/gh10447.phpt
 ext/date/tests/gmdate_basic.phpt
+ext/date/tests/gmdate_variation11.phpt
 ext/date/tests/gmdate_variation12_64bits.phpt
 ext/date/tests/gmdate_variation3.phpt
 ext/date/tests/gmdate_variation5.phpt

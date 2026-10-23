@@ -1,6 +1,6 @@
 // Compilation of assignable expressions (variables, $a[...], properties, static props, list()).
 
-import { cp, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
 import { toBool, toStr, typeOf } from '../convert.js';
 import {
   isLvalNode, keyRepr, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
@@ -233,7 +233,7 @@ function indexOps(P, I) {
     unset(f) {
       const cur = P.getq(f);
       if (cur === undefined || cur === null) return;
-      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f)); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
+      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f), KEY_UNSET); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
       if (cur instanceof PHPObject) { if (cur.cls.ancestors.has('arrayaccess')) callMethodName(cur, 'offsetUnset', [I(f)]); else throwError('Error', `Cannot use object of type ${cur.cls.name} as array`); return; }
       if (typeof cur === 'string') throwError('Error', 'Cannot unset string offsets');
     },

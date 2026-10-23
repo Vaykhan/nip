@@ -215,7 +215,14 @@ export class PHPArray {
   }
 }
 
-export function normKey(k) {
+// ctx: KEY_ISSET (isset/empty/??) or KEY_UNSET for the wording of the illegal offset error
+export const KEY_ISSET = 1, KEY_UNSET = 2;
+function illegalOffset(k, ctx) {
+  const t = k instanceof PHPObject ? k.cls.name : 'array';
+  if (ctx === KEY_ISSET) throwError('TypeError', `Cannot access offset of type ${t} in isset or empty`);
+  throwError('TypeError', `Cannot ${ctx === KEY_UNSET ? 'unset' : 'access'} offset of type ${t} on array`);
+}
+export function normKey(k, ctx) {
   switch (typeof k) {
     case 'number': return k;
     case 'string': {
@@ -241,11 +248,7 @@ export function normKey(k) {
         return floatToInt(t);
       }
       if (k instanceof PHPResource) { warn(`Resource ID#${k.id} used as offset, casting to integer (${k.id})`); return k.id; }
-      if (k instanceof PHPArray) throwError('TypeError', 'Illegal offset type');
-      if (k instanceof PHPObject) {
-        if (k.cls.isEnum) throwError('TypeError', `Cannot access offset of type ${k.cls.name} on array`);
-        throwError('TypeError', `Cannot access offset of type ${k.cls.name} on array`);
-      }
+      if (k instanceof PHPArray || k instanceof PHPObject) illegalOffset(k, ctx);
   }
   return k;
 }
