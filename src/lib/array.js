@@ -278,12 +278,14 @@ def('array_shift', (array) => {
   return v;
 }, R1);
 def('array_unshift', (array, ...values) => {
-  const a = A(deref(array));
+  A(deref(array));
+  const a = refArr(array);
   const out = new PHPArray();
   for (const v of values) out.push(cp(v));
   for (const [k, v] of a.rawEntries()) { if (typeof k === 'string') out.setRaw(k, v); else out.push(v); }
-  array.v = out;
-  return out.size;
+  a.replaceWith(out, values.length);
+  a.pos = 0;
+  return a.size;
 }, R1);
 def('array_reverse', (array, preserve_keys = false) => {
   const ent = A(array).entries().reverse(); const out = new PHPArray(); const pk = toBool(preserve_keys);

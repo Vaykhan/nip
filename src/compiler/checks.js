@@ -3,7 +3,9 @@
 // NIP compiles function bodies lazily, so errors PHP finds while compiling must be looked for
 // here, right after parsing, to be reported for code that never runs and before any output.
 
-import { FatalSig } from '../values.js';
+import { FatalSig, Flt, PHPArray } from '../values.js';
+import { cExpr } from './expr.js';
+import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
 
@@ -44,7 +46,17 @@ export function checkProgram(ast) {
         for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
         for (const c of n.consts) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
         for (const c of n.cases) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
-        for (const p of n.props) checkConstExpr(p.def, false);
+        for (const p of n.props) {
+          checkConstExpr(p.def, false);
+          if (p.type && p.hasDef && p.def) {
+            const lit = literalValue(p.def), ts = typeStr(p.type, null, true);
+            if (lit === null && !p.type.nullable && !p.type.alts.some((a) => a === 'mixed' || a === 'null')) {
+              if (p.type.alts.some((a) => typeof a === 'object')) fail(`Cannot use null as default value for property ${n.name}::$${p.name} of type ${ts}`, p);
+              fail(`Default value for property of type ${ts} may not be null. Use the nullable type ?${ts} to allow null default value`, p);
+            }
+            if (lit !== NOT_LITERAL && lit !== null && !validDefault(p.type, lit)) fail(`Cannot use ${literalType(lit)} as default value for property ${n.name}::$${p.name} of type ${ts}`, p);
+          }
+        }
         const outer = curClass;
         curClass = n;
         try { for (const key in n) if (key !== 'l') visit(n[key], READ); } finally { curClass = outer; }
@@ -101,7 +113,12 @@ export function checkProgram(ast) {
         for (const x of n.names) if (x === 'this') fail('Cannot use $this as global variable', n);
         break;
       case 'StaticVar':
-        for (const v of n.vars) if (v.name === 'this') fail('Cannot use $this as static variable', n);
+        for (const v of n.vars) {
+          if (v.name === 'this') fail('Cannot use $this as static variable', n);
+          if (!scope.statics) scope.statics = new Set();
+          if (scope.statics.has(v.name)) fail(`Duplicate declaration of static variable $${v.name}`, n);
+          scope.statics.add(v.name);
+        }
         break;
       case 'Label':
         if (scope.labels.has(n.name)) fail(`Label '${n.name}' already defined`, n);
@@ -334,7 +351,14 @@ export function checkProgram(ast) {
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
     for (const u of fn.uses || []) if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
     if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
-    for (const p of fn.params) { checkAttrs(p.attrs, T_PARAMETER); checkConstExpr(p.def, true); }
+    for (const p of fn.params) {
+      checkAttrs(p.attrs, T_PARAMETER);
+      checkConstExpr(p.def, true);
+      if (p.type && p.def) {
+        const lit = literalValue(p.def);
+        if (lit !== NOT_LITERAL && lit !== null && !validDefault(p.type, lit)) fail(`Cannot use ${literalType(lit)} as default value for parameter $${p.name} of type ${typeStr(p.type, null, true)}`, p.def.l ? p.def : fn);
+      }
+    }
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
     checkGotos(scope, !fn.params.length && !fn.isGen ? fn.body : null);
     scope = outer; path = outerPath; fnCtx = outerCtx;
@@ -368,6 +392,44 @@ export function checkProgram(ast) {
 // statements that compile to no opcodes of their own
 const NO_OPCODES = new Set(['Label', 'FuncDecl']);
 
+// the value of a default that is a literal (possibly folded: -1, 1 + 1.5, [1, 2]), else NOT_LITERAL
+const NOT_LITERAL = Symbol('not literal');
+function isLiteralTree(n) {
+  if (!n || typeof n !== 'object') return false;
+  switch (n.k) {
+    case 'Lit': return true;
+    case 'Const': return ['true', 'false', 'null'].includes(n.name.replace(/^\\/, '').toLowerCase());
+    case 'Neg': case 'Plus': case 'Not': case 'BitNot': return isLiteralTree(n.e);
+    case 'Bin': return isLiteralTree(n.a) && isLiteralTree(n.b);
+    case 'Arr': return n.items.every((it) => it && !it.spread && (!it.key || isLiteralTree(it.key)) && isLiteralTree(it.v));
+  }
+  return false;
+}
+function literalValue(n) {
+  if (!isLiteralTree(n)) return NOT_LITERAL;
+  try { return cExpr(n)(new Frame(null, null, null, null)); } catch (e) { return NOT_LITERAL; }
+}
+function literalType(v) {
+  if (typeof v === 'boolean') return 'bool';
+  if (typeof v === 'number' || typeof v === 'bigint') return 'int';
+  if (v instanceof Flt) return 'float';
+  if (typeof v === 'string') return 'string';
+  if (v instanceof PHPArray) return 'array';
+  return 'null';
+}
+// zend_is_valid_default_value
+function validDefault(type, v) {
+  const alts = type.alts.map((a) => (typeof a === 'string' ? a.toLowerCase() : a));
+  if (alts.includes('mixed')) return true;
+  switch (literalType(v)) {
+    case 'bool': return alts.includes('bool') || alts.includes(v ? 'true' : 'false');
+    case 'int': return alts.includes('int') || alts.includes('float');
+    case 'float': return alts.includes('float');
+    case 'string': return alts.includes('string');
+    case 'array': return alts.includes('array') || alts.includes('iterable');
+  }
+  return true;
+}
 function newScope() { return { labels: new Map(), gotos: [] }; }
 
 const BUILTIN_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'object', 'callable', 'iterable', 'mixed', 'void', 'never', 'null', 'false', 'true', 'static', 'self', 'parent']);

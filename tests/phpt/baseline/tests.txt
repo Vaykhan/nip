@@ -68,6 +68,7 @@ tests/classes/constants_comments_001.phpt
 tests/classes/constants_error_001.phpt
 tests/classes/constants_error_002.phpt
 tests/classes/constants_error_003.phpt
+tests/classes/constants_error_005.phpt
 tests/classes/constants_error_006.phpt
 tests/classes/constants_scope_001.phpt
 tests/classes/constants_visibility_001.phpt

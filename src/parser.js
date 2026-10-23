@@ -31,7 +31,7 @@ export class Parser {
     this.toks = toks; this.p = 0; this.file = file;
     this.st = shared || { ns: '', uses: new Map(), useFns: new Map(), useConsts: new Map(), fnStack: [], clsStack: [], anonCount: 0, strict: false };
   }
-  get tok() { return this.toks[this.p]; }
+  get tok() { const t = this.toks[this.p]; if (t.t === 'error') throw new ParseErr(t.v, t.l); return t; }
   peek(o = 1) { return this.toks[this.p + o] || this.toks[this.toks.length - 1]; }
   next() { return this.toks[this.p++]; }
   error(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l); }

@@ -123,6 +123,7 @@ ext/spl/tests/bug71028.phpt
 ext/spl/tests/bug71153.phpt
 ext/spl/tests/bug71202.phpt
 ext/spl/tests/bug71204.phpt
+ext/spl/tests/bug71412.phpt
 ext/spl/tests/bug71735.phpt
 ext/spl/tests/bug71838.phpt
 ext/spl/tests/bug73209.phpt

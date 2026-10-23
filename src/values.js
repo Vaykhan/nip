@@ -94,6 +94,16 @@ export class PHPArray {
     this.k = []; this.v = []; this.map = null;
     this.nf = null;      // next free integer key (null = no int keys yet)
     this.holes = 0; this.cow = false; this.pos = 0; this.iters = 0; this.fe = 0;
+    this.itList = null; // positions of by-reference foreach loops over this array (PHP's hash iterators)
+  }
+  // when entries move to new indexes without holes, iterator positions follow them
+  _remapIters(shift = 0) {
+    if (this.itList === null || this.itList.length === 0) return;
+    for (const it of this.itList) {
+      let live = 0;
+      for (let i = 0; i < it.pos && i < this.k.length; i++) if (this.k[i] !== undefined) live++;
+      it.pos = live + shift;
+    }
   }
   get size() { return this.map === null ? this.k.length : this.map.size; }
   static from(list) { const a = new PHPArray(); const n = list.length; for (let i = 0; i < n; i++) { a.k.push(i); a.v.push(list[i]); } a.nf = n ? n : null; return a; }
@@ -163,6 +173,7 @@ export class PHPArray {
   }
   compact() {
     if (!this.holes) return;
+    this._remapIters();
     const k = [], v = [], map = new Map(); let newPos = -1;
     for (let i = 0; i < this.k.length; i++) {
       if (i === this.pos) newPos = k.length;
@@ -171,6 +182,11 @@ export class PHPArray {
     }
     if (newPos < 0) newPos = k.length;
     this.k = k; this.v = v; this.map = map; this.holes = 0; this.pos = newPos;
+  }
+  // take over another array's contents (functions that rebuild an array in place)
+  replaceWith(o, shiftIters = 0) {
+    this._remapIters(shiftIters);
+    this.k = o.k; this.v = o.v; this.map = o.map; this.nf = o.nf; this.holes = o.holes; this.pos = o.pos;
   }
   clone() {
     const b = new PHPArray();
@@ -193,6 +209,7 @@ export class PHPArray {
   curKey() { this._skip(); return this.pos < this.k.length ? this.k[this.pos] : null; }
   curVal() { this._skip(); if (this.pos >= this.k.length) return false; const v = this.v[this.pos]; return v instanceof Ref ? v.v : v; }
   reindex() { // renumber integer keys 0..n-1 keeping string keys
+    this._remapIters();
     const ent = this.rawEntries(); this.k = []; this.v = []; this.map = null; this.nf = null; this.holes = 0; this.pos = 0;
     for (const [k, v] of ent) { if (typeof k === 'string') this.setRaw(k, v); else this.push(v); }
   }

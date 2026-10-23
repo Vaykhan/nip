@@ -105,7 +105,7 @@ def('unregister_tick_function', (callback) => {
   return null;
 });
 def('assert', (assertion, description = null) => {
-  if (rt.ini.get('zend.assertions') !== '1') return true;
+  if (!/^(1|on|true|yes)$/i.test(String(rt.ini.get('assert.active') ?? '1'))) return true;
   if (toBool(assertion)) return true;
   if (description instanceof PHPObject) throw new ThrowSig(description);
   throwError('AssertionError', description === null ? 'assert(false)' : toStr(description));
@@ -127,7 +127,7 @@ def('phpversion', (extension = null) => (extension === null ? PHP_VERSION : (['c
 def('php_uname', (mode = 'a') => { const m = S(mode); if (m === 's') return osMod.type(); if (m === 'n') return osMod.hostname(); if (m === 'r') return osMod.release(); if (m === 'm') return osMod.machine ? osMod.machine() : process.arch; if (m === 'v') return osMod.version ? osMod.version() : ''; return `${osMod.type()} ${osMod.hostname()} ${osMod.release()} ${osMod.version ? osMod.version() : ''} ${process.arch}`; });
 def('php_ini_loaded_file', () => false);
 def('php_ini_scanned_files', () => false);
-def('zend_version', () => '4.3.0');
+def('zend_version', () => '4.3.' + PHP_VERSION.split('.')[2]);
 def('extension_loaded', (extension) => ['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl', 'hash', 'random', 'reflection', 'tokenizer', 'iconv', 'filter'].includes(S(extension).toLowerCase()));
 def('get_included_files', () => PHPArray.from([...rt.mainFile ? [rt.mainFile] : [], ...rt.included]));
 alias('get_required_files', 'get_included_files');

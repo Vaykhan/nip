@@ -36,11 +36,31 @@ changes to the embedding API.
 - Reflection reports PHP's real parameter names, types, defaults and (tentative) return types
   for methods of internal classes (`src/runtime/arginfo.js`, generated from PHP).
 - `ArrayObject::ARRAY_AS_PROPS` and `ArrayIterator::ARRAY_AS_PROPS`.
+- `-d` values are read like PHP's INI parser does: `E_ALL & ~E_NOTICE` and other constant
+  expressions, `On`/`Off`/`Yes`/`No`/`None`, quotes and `${ENV}` variables.
+- PHP's lexer errors for unbalanced brackets ("Unclosed '{' on line 3", "Unmatched ')'", ...)
+  and for invalid array offsets in strings (`"$a['x']"`).
+- More compile-time errors: invalid default values for typed parameters and properties,
+  duplicate static variables.
+- A PCRE2-compatible regex engine for `preg_*` (replacing the translation to JS `RegExp`):
+  recursion, subroutine calls, conditionals, `\K`, backtracking verbs, atomic groups and
+  possessive quantifiers, branch reset, duplicate names, Unicode properties and case folding,
+  PCRE2's compile error messages and offsets, and PHP's handling of empty matches, invalid
+  UTF-8 and the backtrack/recursion/JIT stack limits.
 - Development: unit tests (`node:test`), ESLint, a mutation fuzzer with a reproducer
   minimizer (`scripts/fuzz.js`), php-src baselines that CI enforces
   (`tests/phpt/baseline/`), and a release workflow.
 
 ### Fixed
+- `foreach` by reference follows the array like PHP's hash iterators: through `array_shift()`,
+  `array_unshift()` and compaction, and when the variable is given another array. `foreach`
+  over an object visits properties added during the loop.
+- `assert()` doesn't evaluate its argument unless `zend.assertions=1`; called dynamically, it
+  checks `assert.active` only.
+- The exit status is 0 when a user exception handler handled an uncaught exception.
+- `f($b =& $a)` passes the new reference to a by-reference parameter.
+- `zend_version()` reports 4.3.6.
+- A `?>` followed by a lone `\r` now swallows it, like PHP.
 - `Closure`, `Generator`, `WeakReference` and `Fiber` objects refuse dynamic properties.
 - Internal errors found by fuzzing: by-reference destructuring of objects and strings,
   string offsets beyond 2^53, output-buffer callbacks throwing during shutdown.

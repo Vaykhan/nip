@@ -25,7 +25,21 @@ export function lex(src, file) {
   // The last /** doc comment */ stays pending (as in PHP) until a declaration takes it or a "}"
   // ends it; tokens lexed meanwhile share one slot object, see Parser.takeDoc
   let doc = null;
+  // brackets are matched here, as PHP's lexer does: the first mismatch becomes an error token,
+  // reported when the parser gets to it (so earlier syntax errors win)
+  const brackets = [];
+  let bracketError = false;
+  const bracketErr = (msg) => { bracketError = true; toks.push({ t: 'error', v: msg, l: line }); };
+  const unclosed = (b) => `Unclosed '${b.c}'${b.l !== line ? ` on line ${b.l}` : ''}`;
   const push = (t, v, extra) => {
+    if (t === 'op' && !bracketError) {
+      if (v === '(' || v === '[' || v === '{' || v === '#[') brackets.push({ c: v === '#[' ? '[' : v, l: line });
+      else if (v === ')' || v === ']' || v === '}') {
+        const b = brackets.pop();
+        if (!b) bracketErr(`Unmatched '${v}'`);
+        else if ({ '(': ')', '[': ']', '{': '}' }[b.c] !== v) bracketErr(`${unclosed(b)} does not match '${v}'`);
+      }
+    }
     const tk = { t, v, l: line };
     if (extra) Object.assign(tk, extra);
     if (doc !== null) { tk.doc = doc; if (t === 'op' && v === '}') doc = null; }
@@ -60,7 +74,8 @@ export function lex(src, file) {
     return false;
   }
   if (src.startsWith('#!')) { const e = src.indexOf('\n'); i = e < 0 ? n : e + 1; line = 2; }
-  if (!htmlMode()) { push('eof', null); return toks; }
+  const end = () => { if (!bracketError && brackets.length) bracketErr(unclosed(brackets[brackets.length - 1])); push('eof', null); return toks; };
+  if (!htmlMode()) return end();
 
   while (i < n) {
     const c = src.charCodeAt(i);
@@ -88,7 +103,8 @@ export function lex(src, file) {
     if (ch === '?' && src[i + 1] === '>') {
       push('op', ';', { close: true });
       i += 2;
-      if (src[i] === '\n') { i++; line++; } else if (src[i] === '\r' && src[i + 1] === '\n') { i += 2; line++; }
+      // one newline after ?> belongs to the tag: \n, \r\n or \r
+      if (src[i] === '\n') { i++; line++; } else if (src[i] === '\r') { i += src[i + 1] === '\n' ? 2 : 1; line++; }
       if (!htmlMode()) break;
       continue;
     }
@@ -217,8 +233,7 @@ export function lex(src, file) {
     if (OPS1.includes(ch)) { push('op', ch); i++; continue; }
     err(`syntax error, unexpected character 0x${c.toString(16).toUpperCase().padStart(2, '0')}`);
   }
-  push('eof', null);
-  return toks;
+  return end();
 
   function pushInt(digits, base) {
     if (digits === '') digits = '0';
@@ -283,6 +298,17 @@ export function lex(src, file) {
             else if (mm[2] !== undefined) code += /^-?(0|[1-9]\d*)$/.test(mm[2]) ? '[' + mm[2] + ']' : "['" + mm[2] + "']";
             else code += "['" + mm[3] + "']";
             k += mm[0].length;
+          } else {
+            // what PHP's lexer accepts after "$var[" in a string: a name, a number, a variable, then "]"
+            const key = /^\[(\$[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*|-?\d+|[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*)/.exec(raw.slice(k, k + 200));
+            const expect = '"-" or identifier or variable or number';
+            if (key) {
+              const after = raw[k + key[0].length];
+              err(`syntax error, unexpected ${after === undefined ? (mode === '"' ? 'double-quote mark' : 'string content ""') : after === '-' || after === '[' ? `token "${after}"` : 'string content ""'}, expecting "]"`);
+            }
+            if (raw[k + 1] === ']') err(`syntax error, unexpected token "]", expecting ${expect}`);
+            if (raw[k + 1] === '-') { const id = /^[A-Za-z_]\w*/.exec(raw.slice(k + 2)); err(id ? `syntax error, unexpected identifier "${id[0]}", expecting number` : 'syntax error, unexpected string content "", expecting number'); }
+            err(`syntax error, unexpected string content "", expecting ${expect}`);
           }
         } else if ((raw[k] === '-' && raw[k + 1] === '>' && isIdStart(raw.charCodeAt(k + 2))) || (raw[k] === '?' && raw[k + 1] === '-' && raw[k + 2] === '>' && isIdStart(raw.charCodeAt(k + 3)))) {
           const opLen = raw[k] === '?' ? 3 : 2;

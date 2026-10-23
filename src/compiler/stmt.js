@@ -195,13 +195,30 @@ const STMT = {
         const subj0 = LE.getq(f);
         if (subj0 instanceof PHPObject) return foreachObject(f, subj0, K, V, B, true, isList);
         if (subj0 !== undefined && subj0 !== null && !(subj0 instanceof PHPArray)) { warn(`foreach() argument must be of type array|object, ${valueName(subj0)} given`); return; }
-        const arr = LE.arr(f);
+        let arr = LE.arr(f);
         if (!(arr instanceof PHPArray)) return foreachObject(f, arr, K, V, B, true, isList);
-        arr.iters++;
+        // like PHP's hash iterators: the position is the next index to look at, and it follows
+        // the entries when functions like array_shift() renumber the array
+        const it = { pos: 0 };
+        const attach = (a) => { a.iters++; (a.itList || (a.itList = [])).push(it); };
+        const detach = (a) => { a.iters--; const l = a.itList; l.splice(l.indexOf(it), 1); };
+        attach(arr);
         try {
-          for (let i = 0; i < arr.k.length; i++) {
+          for (;;) {
+            // the variable may have been given another array
+            const cur = LE.getq(f);
+            if (cur !== arr) {
+              if (!(cur instanceof PHPArray)) break;
+              detach(arr);
+              arr = LE.arr(f);
+              it.pos = arr.pos;
+              attach(arr);
+            }
+            let i = it.pos;
+            while (i < arr.k.length && arr.k[i] === undefined) i++;
+            if (i >= arr.k.length) break;
+            it.pos = i + 1;
             const key = arr.k[i];
-            if (key === undefined) continue;
             let slot = arr.v[i];
             if (!(slot instanceof Ref)) { slot = new Ref(slot); arr.v[i] = slot; }
             V.bind(f, slot);
@@ -213,7 +230,7 @@ const STMT = {
               return r;
             }
           }
-        } finally { arr.iters--; }
+        } finally { detach(arr); }
         return;
       }
       const subj = E(f);
@@ -447,8 +464,9 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     }
     return;
   }
-  // plain object: visible properties
-  const keys = [...obj.props.keys()];
+  // plain object: visible properties, from the live property table (properties added meanwhile
+  // are visited too, as in PHP)
+  const keys = obj.props.keys();
   for (const k of keys) {
     if (!obj.props.has(k)) continue;
     let name = k;

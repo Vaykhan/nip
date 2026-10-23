@@ -50,7 +50,8 @@ From CommonJS, `require('@vaykhan/nip')` loads the single-file build (`dist/nip.
   interface and enum rules, `readonly` rules, type declarations, `goto` targets, ...).
 - **Library:** about 600 functions:
   - strings, `mb_*`, arrays and sorting, math, the `sprintf` family
-  - PCRE (`preg_*`), JSON, `serialize`, `var_dump`/`print_r`/`var_export`
+  - PCRE (`preg_*`) on NIP's own PCRE2-compatible engine (recursion, conditionals, `\K`,
+    backtracking verbs, atomic groups, UTF-8 mode), JSON, `serialize`, `var_dump`/`print_r`
   - dates (`date`, `strtotime`, time zones, `DateTime` and friends)
   - files and streams, output buffering, error handlers, `filter_var`
   - hashing, `password_hash`/`crypt` (real bcrypt, compatible with PHP), `mt_rand` matching
@@ -87,13 +88,14 @@ CI fails when a test listed in `tests/phpt/baseline/` stops passing.
   - network streams and sockets (HTTP URLs in `file_get_contents` shell out to `curl`)
   - `ext/intl`, PDO/mysqli, GD, sessions
   - a web server interface
-- Some compile-time errors PHP reports for *invalid* code are not detected yet, most notably
-  incompatible method signatures and constant expression rules. Valid programs are unaffected.
+- Some rarer compile-time errors PHP reports for *invalid* code are not detected yet. Valid
+  programs are unaffected.
 - Fibers can't suspend from callbacks called by builtin functions (`array_map`, `usort`, ...)
   or from inside generators. Code running inside a fiber is about 4× slower.
 - Builtin functions have no parameter or return types in Reflection.
-- Regex: recursion `(?R)`, conditionals, `\K` and `(?J)` are unsupported. Possessive
-  quantifiers and atomic groups are approximated.
+- Regex: NIP has its own PCRE2-compatible engine. It approximates PCRE2's JIT stack and match
+  limits rather than counting them exactly, and patterns in UTF-8 mode run about 2× slower than
+  in the earlier JS RegExp translation (byte-mode patterns use V8's RegExp when that's exact).
 - Object handle numbers (`#N` in `var_dump`) are never reused; PHP reuses freed ones.
 - Performance: about 1.5× slower than PHP 8.3 on array/string/object-heavy loops and about 5×
   slower on call-heavy recursion. Startup takes about 110 ms (PHP: about 20 ms).

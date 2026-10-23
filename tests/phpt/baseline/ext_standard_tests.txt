@@ -435,6 +435,7 @@ ext/standard/tests/array/bug71660.phpt
 ext/standard/tests/array/bug72031.phpt
 ext/standard/tests/array/bug72116.phpt
 ext/standard/tests/array/bug72622.phpt
+ext/standard/tests/array/bug74345.phpt
 ext/standard/tests/array/bug74361.phpt
 ext/standard/tests/array/bug74361_2.phpt
 ext/standard/tests/array/bug75433.phpt
@@ -699,7 +700,6 @@ ext/standard/tests/file/copy_variation6.phpt
 ext/standard/tests/file/copy_variation8.phpt
 ext/standard/tests/file/copy_variation9.phpt
 ext/standard/tests/file/fclose_variation1.phpt
-ext/standard/tests/file/feof_basic.phpt
 ext/standard/tests/file/fflush_basic.phpt
 ext/standard/tests/file/fflush_variation1.phpt
 ext/standard/tests/file/fflush_variation2.phpt

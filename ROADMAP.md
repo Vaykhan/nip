@@ -82,11 +82,11 @@ Everything a modern framework relies on in the language itself.
       are freed. Blocked on exact liveness: the cycle collector's roots don't include values
       held only in JS temporaries, so reusing a handle could give two live objects the same
       `spl_object_id()`. Needs reference counting for objects (or roots for temporaries) first.
-- [ ] **Own regex engine.** A backtracking matcher that implements PCRE2 semantics on byte
-      strings: recursion `(?R)`, conditionals, `\K`, possessive quantifiers, atomic groups,
-      `(?J)`, callouts, exact offsets. Translating to JS `RegExp` can't cover these, and real
-      apps (routers, template engines, parsers) use them. Keep the translation as a fast path
-      for patterns it handles exactly.
+- [x] **Own regex engine** (`src/lib/regex.js`): a backtracking matcher with PCRE2 semantics on
+      byte strings: recursion, conditionals, `\K`, possessive quantifiers, atomic groups,
+      backtracking verbs, branch reset, `(?J)`, exact offsets and PCRE2's error messages.
+      Byte-mode patterns whose semantics JS `RegExp` reproduces exactly still run on V8.
+      Follow-ups: a `RegExp` fast path for UTF-8 mode, and callouts.
 - [ ] Then PHP 8.4 (property hooks, asymmetric visibility, `new` without parentheses,
       `array_find` and friends, lazy objects) and PHP 8.5 (pipe operator `|>`, clone with,
       `array_first`/`array_last`, `#[\NoDiscard]`), behind a `-d nip.php_version=` switch.
@@ -203,5 +203,5 @@ Phases overlap. This order unlocks the most value earliest:
 3. The sync bridge, which unblocks networking and databases.
 4. SAPI layer, `nip serve` and PDO SQLite: the first real web apps run.
 5. Compiled variables and cheaper calls, the largest performance gap.
-6. The regex engine and XML support, for library compatibility.
+6. ~~The regex engine~~ and XML support, for library compatibility.
 7. PHP 8.4/8.5 features, FastCGI, sandboxing, portable core.

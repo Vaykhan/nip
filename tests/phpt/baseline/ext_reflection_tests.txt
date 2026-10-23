@@ -103,6 +103,7 @@ ext/reflection/tests/ReflectionFunction_isGenerator_basic.phpt
 ext/reflection/tests/ReflectionFunction_isVariadic_basic.phpt
 ext/reflection/tests/ReflectionMethod_006.phpt
 ext/reflection/tests/ReflectionMethod_basic1.phpt
+ext/reflection/tests/ReflectionMethod_basic2.phpt
 ext/reflection/tests/ReflectionMethod_basic3.phpt
 ext/reflection/tests/ReflectionMethod_constructor_basic.phpt
 ext/reflection/tests/ReflectionMethod_constructor_error1.phpt
@@ -247,6 +248,8 @@ ext/reflection/tests/gh9409.phpt
 ext/reflection/tests/gh9470.phpt
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_getDefaultValue_Internal.phpt
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefaultValueAvailable_Internal.phpt
+ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefaultValueConstant_Internal.phpt
+ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_toString_Internal.phpt
 ext/reflection/tests/internal_parameter_default_value/check_all.phpt
 ext/reflection/tests/parameters_002.phpt
 ext/reflection/tests/readonly_class.phpt

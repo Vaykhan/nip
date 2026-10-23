@@ -36,7 +36,7 @@ function handleTopLevel(e) {
   if (sig) {
     if (rt.exceptionHandlers.length) {
       const h = rt.exceptionHandlers.pop();
-      try { callValue(h, [sig.obj]); return 255; } catch (e2) { return handleTopLevel(e2); }
+      try { callValue(h, [sig.obj]); return 0; } catch (e2) { return handleTopLevel(e2); }
     }
     rt.flush();
     if (sig.obj.cls.lname === 'parseerror') writeErr(`Parse error: ${toStr(deref(sig.obj.props.get('message')))} in ${deref(sig.obj.props.get('file'))} on line ${deref(sig.obj.props.get('line'))}`);
@@ -44,6 +44,43 @@ function handleTopLevel(e) {
     return 255;
   }
   throw e;
+}
+
+// A value as PHP's INI parser reads it (-d, php.ini): On/Off/Yes/No/True/False/None/Null,
+// quoted strings, ${ENV} variables, and values starting with a constant: the constant's value, or
+// an expression of constants and numbers with | & ^ ~ ! and parentheses
+function iniValue(raw) {
+  let v = String(raw).trim();
+  if (/^(on|yes|true)$/i.test(v)) return '1';
+  if (/^(off|no|false|none|null)$/i.test(v)) return '';
+  v = v.replace(/\$\{([^}]*)\}/g, (m, name) => process.env[name] ?? '');
+  if (/^"[^"]*"/.test(v) || /^'[^']*'$/.test(v)) return v.replace(/"([^"]*)"/g, '$1').replace(/^'(.*)'$/, '$1');
+  if (!/^[A-Za-z_]/.test(v)) return v;
+  const tokens = v.match(/\s+|[A-Za-z_][A-Za-z0-9_]*|\d+|[|&^~!()]|./g) || [];
+  const operand = (t) => (/^\d+$/.test(t) ? Number(t) : rt.consts.has(t) ? rt.consts.get(t) : undefined);
+  // expression?
+  const ts = tokens.filter((t) => !/^\s+$/.test(t));
+  let pos = 0;
+  const unary = () => {
+    const t = ts[pos];
+    if (t === '~') { pos++; return ~unary(); }
+    if (t === '!') { pos++; return unary() ? 0 : 1; }
+    if (t === '(') { pos++; const r = binary(); if (ts[pos++] !== ')') throw 0; return r; }
+    const o = t === undefined ? undefined : operand(t);
+    if (typeof o !== 'number') throw 0;
+    pos++;
+    return o;
+  };
+  const binary = () => {
+    let r = unary();
+    while (ts[pos] === '|' || ts[pos] === '&' || ts[pos] === '^') {
+      const op = ts[pos++], b = unary();
+      r = op === '|' ? r | b : op === '&' ? r & b : r ^ b;
+    }
+    return r;
+  };
+  try { const r = binary(); if (pos === ts.length) return String(r); } catch (e) { /* not an expression */ }
+  return tokens.map((t) => (/^[A-Za-z_]/.test(t) && rt.consts.has(t) ? toStr(rt.consts.get(t)) : t)).join('');
 }
 
 // disable_functions (startup-only ini): listed builtins behave as if they didn't exist
@@ -57,7 +94,7 @@ function disableFunctions(list) {
 export function runScript(code, file, argv, opts = {}) {
   boot();
   resetRuntime();
-  if (opts.ini) for (const [k, v] of Object.entries(opts.ini)) { if (!(k in INI_DEFAULTS)) rt.ini.set(k, v); callNative(rt.fns.get('ini_set'), [k, v]); }
+  if (opts.ini) for (const [k, raw] of Object.entries(opts.ini)) { const v = iniValue(raw); if (!(k in INI_DEFAULTS)) rt.ini.set(k, v); callNative(rt.fns.get('ini_set'), [k, v]); }
   disableFunctions(rt.ini.get('disable_functions'));
   if (opts.capture) rt.capture = [];
   try { rt.ttyOut = !opts.capture && tty.isatty(1); } catch (e) { rt.ttyOut = false; }

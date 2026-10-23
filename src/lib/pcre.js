@@ -1,506 +1,504 @@
-// PCRE (preg_*): PHP regex patterns translated to JS RegExp.
+// PCRE (preg_*): PHP's regex functions on top of NIP's own regex engine (regex.js), following
+// ext/pcre/php_pcre.c: pattern delimiters and modifiers, the match loops (including how empty
+// matches are retried), result arrays and error codes.
 
 import { PHPArray, Ref } from '../values.js';
-import { toStr } from '../convert.js';
-import { isValidUtf8, utf8Decode, utf8Encode } from '../utf8.js';
+import { toStr, typeOf } from '../convert.js';
 import { rt } from '../runtime/state.js';
-import { warn } from '../runtime/errors.js';
-import { callableFn } from '../runtime/callables.js';
+import { throwError, warn } from '../runtime/errors.js';
+import { callableFn, isCallable } from '../runtime/callables.js';
 import { A, def, I, S } from './core.js';
+import { compileRegex, RegexLimitError, RegexSyntaxError } from './regex.js';
+
+const PREG_PATTERN_ORDER = 1, PREG_SET_ORDER = 2, PREG_OFFSET_CAPTURE = 256, PREG_UNMATCHED_AS_NULL = 512;
+const PREG_SPLIT_NO_EMPTY = 1, PREG_SPLIT_DELIM_CAPTURE = 2, PREG_SPLIT_OFFSET_CAPTURE = 4;
+const E_INTERNAL = 1, E_BACKTRACK = 2, E_RECURSION = 3, E_BAD_UTF8 = 4, E_BAD_UTF8_OFFSET = 5, E_JIT_STACK = 6;
 
 let pregLastError = 0;
 export function resetPcreState() { pregLastError = 0; }
 const PREG_ERR_MSG = { 0: 'No error', 1: 'Internal error', 2: 'Backtrack limit exhausted', 3: 'Recursion limit exhausted', 4: 'Malformed UTF-8 characters, possibly incorrectly encoded', 5: 'The offset did not correspond to the beginning of a valid UTF-8 code point', 6: 'JIT stack limit exhausted' };
-const reCache = new Map();
-let regexModifiersSupported = false;
-try { new RegExp('(?i:a)'); regexModifiersSupported = true; } catch (e) { regexModifiersSupported = false; }
-const POSIX_CLASSES = { alpha: 'A-Za-z', digit: '0-9', alnum: 'A-Za-z0-9', upper: 'A-Z', lower: 'a-z', space: ' \\t\\n\\r\\f\\v', blank: ' \\t', punct: '!-\\/:-@\\[-`{-~', xdigit: '0-9A-Fa-f', word: '\\w', cntrl: '\\x00-\\x1f\\x7f', print: '\\x20-\\x7e', graph: '\\x21-\\x7e', ascii: '\\x00-\\x7f' };
-const UNICODE_GC = /^(L|Lu|Ll|Lt|Lm|Lo|M|Mn|Mc|Me|N|Nd|Nl|No|P|Pc|Pd|Ps|Pe|Pi|Pf|Po|S|Sm|Sc|Sk|So|Z|Zs|Zl|Zp|C|Cc|Cf|Cs|Co|Cn|L&|Any)$/;
 
+// ------------------------------------------------------------------ compiling
+const reCache = new Map();
 function pregCompile(pattern) {
   let c = reCache.get(pattern);
   if (c !== undefined) return c;
   c = pregCompile0(pattern);
+  if (c === null) { pregLastError = E_INTERNAL; return null; } // not cached: the warning repeats, as in PHP
   if (reCache.size > 4096) reCache.clear();
   reCache.set(pattern, c);
   return c;
 }
+const BRACKETS = { '(': ')', '[': ']', '{': '}', '<': '>' };
 function pregCompile0(pat) {
   const fn = rt.nativeName || 'preg_match';
   let i = 0;
-  while (i < pat.length && /\s/.test(pat[i])) i++;
+  while (i < pat.length && /[ \t\n\r\v\f]/.test(pat[i])) i++;
   if (i >= pat.length) { warn(`${fn}(): Empty regular expression`); return null; }
   const d = pat[i];
   if (/[a-zA-Z0-9\\]/.test(d) || d === '\0') { warn(`${fn}(): Delimiter must not be alphanumeric, backslash, or NUL`); return null; }
-  const close = { '(': ')', '[': ']', '{': '}', '<': '>' }[d] || d;
+  const close = BRACKETS[d] || d;
   let j = -1;
   if (close === d) {
-    for (let k = i + 1; k < pat.length; k++) { if (pat[k] === '\\') { k++; continue; } if (pat[k] === d) { j = k; break; } }
+    for (let k = i + 1; k < pat.length; k++) { if (pat[k] === '\\' && k + 1 < pat.length) { k++; continue; } if (pat[k] === d) { j = k; break; } }
   } else {
     let depth = 1;
     for (let k = i + 1; k < pat.length; k++) {
-      if (pat[k] === '\\') { k++; continue; }
+      if (pat[k] === '\\' && k + 1 < pat.length) { k++; continue; }
+      if (pat[k] === close && --depth <= 0) { j = k; break; }
       if (pat[k] === d) depth++;
-      else if (pat[k] === close) { depth--; if (depth === 0) { j = k; break; } }
     }
   }
-  if (j < 0) { warn(`${fn}(): No ending ${close === d ? '' : 'matching '}delimiter '${close}' found`); return null; }
-  let body = pat.slice(i + 1, j);
-  const mods = pat.slice(j + 1).replace(/[\r\n ]+$/, '');
-  const fl = { i: false, m: false, s: false, x: false, u: false, U: false, D: false, A: false, n: false };
-  for (const m of mods) {
-    if (m in fl) fl[m] = true;
-    else if (m === 'S' || m === 'X' || m === 'J') continue;
-    else { warn(`${fn}(): Unknown modifier '${m}'`); return null; }
-  }
-  if (close !== d) { /* bracket delimiters: inner delimiter chars are literal */ }
-  else if (d !== '/') body = body.split('\\' + d).join(/[.*+?^${}()|[\]\\/]/.test(d) ? '\\' + d : d);
-  let unicode = fl.u;
-  if (!unicode && /\\[pPX]/.test(body)) unicode = true;
-  let src;
-  const names = [null];
-  try { src = translatePcre(unicode ? utf8Decode(body) : body, fl, names, unicode); }
-  catch (e) { if (e instanceof PcreErr) { warn(`${fn}(): Compilation failed: ${e.msg} at offset ${e.off}`); return null; } throw e; }
-  let jsFlags = 'g';
-  if (fl.i) jsFlags += 'i';
-  if (fl.m) jsFlags += 'm';
-  if (fl.s) jsFlags += 's';
-  if (unicode) jsFlags += 'u';
-  if (fl.A) src = '(?:' + src + ')';
-  let re, reD;
-  try { re = new RegExp(src, jsFlags); }
-  catch (e) { warn(`${fn}(): Compilation failed: ${e.message.replace(/^Invalid regular expression: /, '')} at offset 0`); return null; }
-  return { re, src, flags: jsFlags, names, unicode, anchored: fl.A, getD() { return reD || (reD = new RegExp(src, jsFlags + 'd')); } };
-}
-class PcreErr { constructor(msg, off) { this.msg = msg; this.off = off; } }
-function translatePcre(p, fl, names, unicode) {
-  groupStack.length = 0; pendingClose.length = 0; globalNeedsI.flag = false;
-  let out = '';
-  let i = 0;
-  const n = p.length;
-  let groupCount = 0;
-  const esc = (ch) => (/[\^$\\.*+?()[\]{}|/-]/.test(ch) ? '\\' + ch : ch);
-  const litChar = (ch) => {
-    const c = ch.codePointAt(0);
-    if (/[\^$\\.*+?()[\]{}|/]/.test(ch)) return '\\' + ch;
-    if (c < 32 || (c >= 127 && c < 256 && !unicode)) return '\\x' + c.toString(16).padStart(2, '0');
-    return ch;
-  };
-  // handle leading inline flags (?i) etc
-  let m;
-  while ((m = /^\(\?([imsxUnJ]*)(?:-([imsx]*))?\)/.exec(p.slice(i)))) {
-    for (const f of m[1]) { if (f === 'i') fl.i = true; else if (f === 'm') fl.m = true; else if (f === 's') fl.s = true; else if (f === 'x') fl.x = true; else if (f === 'U') fl.U = true; }
-    for (const f of m[2] || '') { if (f === 'i') fl.i = false; else if (f === 'm') fl.m = false; else if (f === 's') fl.s = false; else if (f === 'x') fl.x = false; }
-    i += m[0].length;
-  }
-  const parseEscape = (inClass) => {
-    // p[i] === '\\'
-    const e = p[i + 1];
-    if (e === undefined) throw new PcreErr('\\ at end of pattern', i);
-    i += 2;
-    switch (e) {
-      case 'w': if (unicode) return inClass ? '\\p{L}\\p{N}_' : '[\\p{L}\\p{N}_]'; return '\\w';
-      case 'W': if (unicode && !inClass) return '[^\\p{L}\\p{N}_]'; return '\\W';
-      case 'd': if (unicode) return '\\p{Nd}'; return '\\d';
-      case 'D': if (unicode) return '\\P{Nd}'; return '\\D';
-      case 'b': if (unicode && !inClass) return '(?:(?<=[\\p{L}\\p{N}_])(?![\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?=[\\p{L}\\p{N}_]))'; return '\\b';
-      case 'B': if (unicode && !inClass) return '(?:(?<=[\\p{L}\\p{N}_])(?=[\\p{L}\\p{N}_])|(?<![\\p{L}\\p{N}_])(?![\\p{L}\\p{N}_]))'; return '\\B';
-      case 's': case 'S': case 'n': case 'r': case 't': case 'f': return '\\' + e;
-      case 'v': return inClass ? '\\n\\x0B\\f\\r\\x85\\u2028\\u2029' : '[\\n\\x0B\\f\\r\\x85\\u2028\\u2029]';
-      case 'V': return '[^\\n\\x0B\\f\\r\\x85\\u2028\\u2029]';
-      case 'h': return inClass ? '\\t \\xA0' : '[\\t \\xA0]';
-      case 'H': return '[^\\t \\xA0]';
-      case 'R': return '(?:\\r\\n|\\n|\\x0B|\\f|\\r|\\x85)';
-      case 'A': return '(?<![\\s\\S])';
-      case 'z': return '(?![\\s\\S])';
-      case 'Z': return '(?=\\n?(?![\\s\\S]))';
-      case 'G': return '';
-      case 'K': throw new PcreErr('\\K is not supported', i);
-      case 'e': return '\\x1b';
-      case 'a': return '\\x07';
-      case '0': {
-        const mm = /^[0-7]{0,2}/.exec(p.slice(i));
-        i += mm[0].length;
-        return '\\x' + parseInt('0' + mm[0], 8).toString(16).padStart(2, '0');
-      }
-      case 'x': {
-        if (p[i] === '{') { const end = p.indexOf('}', i); const hex = p.slice(i + 1, end); i = end + 1; const cp = parseInt(hex, 16); return unicode ? '\\u{' + cp.toString(16) + '}' : (cp < 256 ? '\\x' + cp.toString(16).padStart(2, '0') : '\\u' + cp.toString(16).padStart(4, '0')); }
-        const mm = /^[0-9a-fA-F]{0,2}/.exec(p.slice(i)); i += mm[0].length;
-        return '\\x' + (mm[0] || '0').padStart(2, '0');
-      }
-      case 'o': { const end = p.indexOf('}', i); const oct = p.slice(i + 1, end); i = end + 1; return '\\u{' + parseInt(oct, 8).toString(16) + '}'; }
-      case 'c': { const ch = p[i++]; return '\\c' + ch.toUpperCase(); }
-      case 'p': case 'P': {
-        let name;
-        if (p[i] === '{') { const end = p.indexOf('}', i); name = p.slice(i + 1, end); i = end + 1; }
-        else { name = p[i]; i++; }
-        let negate = e === 'P';
-        if (name[0] === '^') { negate = !negate; name = name.slice(1); }
-        if (name === 'L&') name = 'LC';
-        if (name === 'Any') return negate ? '[^\\s\\S]' : '[\\s\\S]';
-        if (name === 'Xan') return negate ? '[^\\p{L}\\p{N}]' : (inClass ? '\\p{L}\\p{N}' : '[\\p{L}\\p{N}]');
-        if (name === 'Xwd') return negate ? '[^\\p{L}\\p{N}_]' : (inClass ? '\\p{L}\\p{N}_' : '[\\p{L}\\p{N}_]');
-        if (name === 'Xsp' || name === 'Xps') return negate ? '\\S' : '\\s';
-        const prop = UNICODE_GC.test(name) || name === 'LC' ? name : 'Script=' + name;
-        return (negate ? '\\P{' : '\\p{') + prop + '}';
-      }
-      case 'X': return '(?:\\P{M}\\p{M}*)';
-      case 'Q': {
-        const end = p.indexOf('\\E', i);
-        const lit = end < 0 ? p.slice(i) : p.slice(i, end);
-        i = end < 0 ? n : end + 2;
-        return lit.split('').map(inClass ? (ch) => (/[\]\\^-]/.test(ch) ? '\\' + ch : ch) : litChar).join('');
-      }
-      case 'E': return '';
-      case 'g': {
-        let ref;
-        if (p[i] === '{') { const end = p.indexOf('}', i); ref = p.slice(i + 1, end); i = end + 1; }
-        else if (p[i] === '<' || p[i] === "'") { const cl = p[i] === '<' ? '>' : "'"; const end = p.indexOf(cl, i + 1); ref = p.slice(i + 1, end); i = end + 1; throw new PcreErr('subroutine calls are not supported', i); }
-        else { const mm = /^-?\d+/.exec(p.slice(i)); ref = mm[0]; i += mm[0].length; }
-        if (/^-?\d+$/.test(ref)) { let num = parseInt(ref, 10); if (num < 0) num = groupCount + 1 + num; return '\\' + num; }
-        return '\\k<' + ref + '>';
-      }
-      case 'k': {
-        const op = p[i]; const cl = op === '{' ? '}' : op === '<' ? '>' : "'";
-        const end = p.indexOf(cl, i + 1); const name = p.slice(i + 1, end); i = end + 1;
-        return '\\k<' + name + '>';
-      }
+  if (j < 0) { warn(close === d ? `${fn}(): No ending delimiter '${d}' found` : `${fn}(): No ending matching delimiter '${close}' found`); return null; }
+  const body = pat.slice(i + 1, j);
+  const o = { caseless: false, multiline: false, dotall: false, extended: false, anchored: false, dollarEndOnly: false, ungreedy: false, utf: false, ucp: false, dupnames: false, noAutoCapture: false };
+  let evalMod = false;
+  for (const m of pat.slice(j + 1)) {
+    switch (m) {
+      case 'i': o.caseless = true; break;
+      case 'm': o.multiline = true; break;
+      case 'n': o.noAutoCapture = true; break;
+      case 's': o.dotall = true; break;
+      case 'x': o.extended = true; break;
+      case 'A': o.anchored = true; break;
+      case 'D': o.dollarEndOnly = true; break;
+      case 'S': case 'X': case ' ': case '\n': case '\r': break;
+      case 'U': o.ungreedy = true; break;
+      case 'u': o.utf = true; o.ucp = true; break;
+      case 'J': o.dupnames = true; break;
+      case 'e': evalMod = true; break;
       default:
-        if (e >= '1' && e <= '9') {
-          const mm = /^\d*/.exec(p.slice(i)); i += mm[0].length;
-          if (inClass) return '\\x' + parseInt(e + mm[0], 8).toString(16).padStart(2, '0');
-          return '\\' + e + mm[0];
-        }
-        if (/[a-zA-Z]/.test(e)) {
-          if (inClass && e === 'N') throw new PcreErr('\\N is not supported in a class', i);
-          if (e === 'N') return '[^\\n]';
-          return e; // unknown alpha escape: literal
-        }
-        if (inClass) return /[\]\\^\-[]/.test(e) ? '\\' + e : litChar(e);
-        return litChar(e);
+        warn(m === '\0' ? `${fn}(): NUL is not a valid modifier` : `${fn}(): Unknown modifier '${m}'`);
+        return null;
     }
-  };
-  while (i < n) {
-    const ch = p[i];
-    if (fl.x) {
-      if (/\s/.test(ch)) { i++; continue; }
-      if (ch === '#') { while (i < n && p[i] !== '\n') i++; continue; }
-    }
-    if (ch === '\\') { out += parseEscape(false); continue; }
-    if (ch === '[') {
-      let cls = '[';
-      i++;
-      if (p[i] === '^') { cls += '^'; i++; }
-      if (p[i] === ']') { cls += '\\]'; i++; }
-      while (i < n && p[i] !== ']') {
-        if (p[i] === '[' && p[i + 1] === ':') {
-          const end = p.indexOf(':]', i);
-          if (end > 0) {
-            let name = p.slice(i + 2, end); let neg = false;
-            if (name[0] === '^') { neg = true; name = name.slice(1); }
-            const pc = POSIX_CLASSES[name];
-            if (!pc) throw new PcreErr('unknown POSIX class name', i);
-            if (neg) { if (name === 'digit') cls += '\\D'; else if (name === 'space') cls += '\\S'; else if (name === 'word') cls += '\\W'; else throw new PcreErr('negated POSIX classes are not supported', i); }
-            else cls += pc;
-            i = end + 2; continue;
-          }
-        }
-        if (p[i] === '\\') { cls += parseEscape(true); continue; }
-        if (p[i] === '[') { cls += '\\['; i++; continue; }
-        const c2 = p[i];
-        const cc = c2.codePointAt(0);
-        cls += (cc < 32 || (cc >= 127 && cc < 256 && !unicode)) ? '\\x' + cc.toString(16).padStart(2, '0') : c2;
-        i += c2.length;
-      }
-      if (i >= n) throw new PcreErr('missing terminating ] for character class', i);
-      i++;
-      out += cls + ']';
+  }
+  if (evalMod) { warn(`${fn}(): The /e modifier is no longer supported, use preg_replace_callback instead`); return null; }
+  // (*UTF) at the start of the pattern switches UTF mode on, like the u modifier (without UCP)
+  if (/^(\(\*[A-Z_]+(=\d+)?\))*\(\*UTF8?\)/.test(body)) o.utf = true;
+  let cps, offs;
+  if (o.utf) {
+    const dec = decodeUtf8(body);
+    if (dec.error) { warn(`${fn}(): Compilation failed: UTF-8 error: ${dec.error} at offset ${dec.at}`); return null; }
+    cps = dec.units; offs = dec.offs;
+  } else {
+    cps = new Array(body.length); offs = new Array(body.length + 1);
+    for (let k = 0; k < body.length; k++) { cps[k] = body.charCodeAt(k); offs[k] = k; }
+    offs[body.length] = body.length;
+  }
+  let re;
+  try { re = compileRegex(cps, offs, o); }
+  catch (e) {
+    if (e instanceof RegexSyntaxError) { warn(`${fn}(): Compilation failed: ${e.msg} at offset ${e.offset}`); return null; }
+    throw e;
+  }
+  // group number -> name (the last name given to a number wins, as in php_pcre.c)
+  const names = new Array(re.ncap + 1).fill(null);
+  for (const { name, num } of re.names) names[num] = name;
+  return { re, utf: o.utf, ncap: re.ncap, names, hasNames: re.names.length > 0 };
+}
+
+// ------------------------------------------------------------------ subjects
+// UTF-8 decoding with PCRE2's error messages; units are code points, offs their byte offsets.
+// Lenient decoding (for subjects) turns each invalid byte into a unit no character matches,
+// and lists their offsets in `bad`.
+function utf8Error(s, i) {
+  const b = s.charCodeAt(i);
+  let need, cp;
+  if (b >= 0x80 && b < 0xc0) return ['isolated byte with 0x80 bit set'];
+  if (b >= 0xf8) return [b < 0xfc ? '5-byte character is not allowed (RFC 3629)' : b < 0xfe ? '6-byte character is not allowed (RFC 3629)' : 'illegal byte (0xfe or 0xff)'];
+  if (b >= 0xf0) { need = 3; cp = b & 0x07; } else if (b >= 0xe0) { need = 2; cp = b & 0x0f; } else { need = 1; cp = b & 0x1f; }
+  if (i + need >= s.length) return [`${need} byte${need > 1 ? 's' : ''} missing at end`];
+  for (let k = 1; k <= need; k++) {
+    const c = s.charCodeAt(i + k);
+    if ((c & 0xc0) !== 0x80) return [`byte ${k + 1} top bits not 0x80`];
+    cp = (cp << 6) | (c & 0x3f);
+  }
+  if ((need === 1 && cp < 0x80) || (need === 2 && cp < 0x800) || (need === 3 && cp < 0x10000)) return [`overlong ${need + 1}-byte sequence`];
+  if (cp > 0x10ffff) return ['code points greater than 0x10ffff are not defined'];
+  if (cp >= 0xd800 && cp <= 0xdfff) return ['code points 0xd800-0xdfff are not defined'];
+  return [null, cp, need + 1];
+}
+function decodeUtf8(s, lenient) {
+  const units = [], offs = [], bad = [];
+  for (let i = 0; i < s.length;) {
+    const b = s.charCodeAt(i);
+    offs.push(i);
+    if (b < 0x80) { units.push(b); i++; continue; }
+    const [error, cp, len] = utf8Error(s, i);
+    if (error) {
+      if (!lenient) return { error, at: i };
+      units.push(0x110000 + b); bad.push(i); i++;
       continue;
     }
-    if (ch === '(') {
-      if (p[i + 1] === '?') {
-        const rest = p.slice(i + 2, i + 40);
-        let mm;
-        if (rest[0] === '#') { const end = p.indexOf(')', i); i = end + 1; continue; }
-        if ((mm = /^P?<([A-Za-z_][A-Za-z0-9_]*)>/.exec(rest)) || (mm = /^'([A-Za-z_][A-Za-z0-9_]*)'/.exec(rest))) {
-          groupCount++; names[groupCount] = mm[1];
-          out += '(?<' + mm[1] + '>'; i += 2 + mm[0].length; continue;
-        }
-        if ((mm = /^P=([A-Za-z_][A-Za-z0-9_]*)\)/.exec(rest))) { out += '\\k<' + mm[1] + '>'; i += 2 + mm[0].length; continue; }
-        if (/^P>|^R\)|^\d+\)|^[+-]\d+\)|^&/.test(rest)) throw new PcreErr('recursive patterns are not supported', i);
-        if (rest[0] === '>') { out += '(?:'; i += 3; continue; }
-        if (rest[0] === '|') { out += '(?:'; i += 3; continue; }
-        if (rest[0] === ':' || rest[0] === '=' || rest[0] === '!') { out += '(?' + rest[0]; i += 3; continue; }
-        if (rest.startsWith('<=') || rest.startsWith('<!')) { out += '(?' + rest.slice(0, 2); i += 4; continue; }
-        if ((mm = /^([imsxUnJ]*)(?:-([imsx]*))?(:|\))/.exec(rest))) {
-          // inline modifiers
-          const on = mm[1].replace(/[UnJx]/g, ''), off = (mm[2] || '').replace(/x/g, '');
-          if (mm[1].includes('x')) fl.x = true;
-          if (mm[3] === ')') {
-            // applies to rest of group; approximate by wrapping remaining group content
-            if (regexModifiersSupported && (on || off)) {
-              out += '(?' + on + (off ? '-' + off : '') + ':';
-              i += 2 + mm[0].length;
-              // find end of enclosing group -> we close at end of pattern/group via depth tracking
-              pendingClose.push(depthNow());
-              continue;
-            }
-            if (on.includes('i') && !fl.i) globalNeedsI.flag = true;
-            i += 2 + mm[0].length; continue;
-          }
-          if (regexModifiersSupported && (on || off)) out += '(?' + on + (off ? '-' + off : '') + ':';
-          else out += '(?:';
-          if (!regexModifiersSupported && on.includes('i')) globalNeedsI.flag = true;
-          i += 2 + mm[0].length;
-          groupStack.push(false);
+    units.push(cp);
+    i += len;
+  }
+  offs.push(s.length);
+  return { units, offs, bad };
+}
+// a byte string subject: the code units are only built when the regex engine runs (not the JS
+// RegExp fast path)
+class ByteSubject {
+  constructor(s) { this.s = s; this.u = null; this.utf = false; this.checked = true; }
+  get units() {
+    if (this.u === null) { const s = this.s, u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); this.u = u; }
+    return this.u;
+  }
+}
+// A subject prepared for matching: code units, and for UTF the byte offset of each unit and
+// the unit index of each byte offset (-1 inside a character). The last one is reused.
+let lastSubj = null, lastPrep = null, lastUtf = false;
+function prepare(c, s) {
+  if (s === lastSubj && c.utf === lastUtf) return lastPrep;
+  let prep;
+  if (!c.utf) {
+    prep = new ByteSubject(s);
+  } else {
+    const dec = decodeUtf8(s, true);
+    const idx = new Int32Array(s.length + 1).fill(-1);
+    dec.offs.forEach((b, k) => { idx[b] = k; });
+    prep = { units: Int32Array.from(dec.units), s, utf: true, offs: dec.offs, idx, lastBad: dec.bad.length ? dec.bad[dec.bad.length - 1] : -1 };
+  }
+  lastSubj = s; lastPrep = prep; lastUtf = c.utf;
+  return prep;
+}
+const toByte = (prep, u) => (prep.utf ? prep.offs[u] : u);
+const execOpts = {};
+let callLimits = null; // limits() for the running preg_* call
+// the pcre.* ini settings, read again when they change
+let limB, limR, limJ, limitsVal = null;
+function limits() {
+  const b = rt.ini.get('pcre.backtrack_limit'), r = rt.ini.get('pcre.recursion_limit'), j = rt.ini.get('pcre.jit');
+  if (limitsVal === null || b !== limB || r !== limR || j !== limJ) {
+    limB = b; limR = r; limJ = j;
+    const backtrack = Math.max(1, parseInt(b || '1000000', 10) || 1000000), recursion = Math.max(1, parseInt(r || '100000', 10) || 100000);
+    const jit = /^(1|on|true|yes)$/i.test(String(j ?? '1'));
+    // the JS RegExp fast path can't enforce lower limits
+    limitsVal = { backtrack, recursion, jit, fast: backtrack >= 1000000 && (jit || recursion >= 100000) };
+  }
+  return limitsVal;
+}
+// one match attempt from byte offset `off`: { count, ov (byte offsets, -1 unset), mark }, null
+// for no match, or false after an error (pregLastError is set)
+function matchAt(c, prep, off, opts) {
+  let start = off;
+  if (prep.utf) {
+    if (prep.lastBad >= 0 && prep.lastBad >= off - 1) { pregLastError = E_BAD_UTF8; return false; }
+    start = prep.idx[off];
+    if (start < 0) { pregLastError = E_BAD_UTF8_OFFSET; return false; }
+  }
+  let r;
+  const lim = callLimits || (callLimits = limits());
+  execOpts.backtrackLimit = lim.backtrack; execOpts.recursionLimit = lim.recursion;
+  execOpts.notEmptyAtStart = !!(opts && opts.notEmptyAtStart); execOpts.anchored = !!(opts && opts.anchored);
+  // php_pcre.c uses the JIT except for the anchored retry after an empty match, and for the
+  // first match in UTF mode (which checks the subject)
+  execOpts.jit = lim.jit && !execOpts.anchored && !(prep.utf && !prep.checked);
+  try {
+    r = prep.utf ? c.re.exec(prep.units, start, execOpts) : c.re.execStr(prep.s, () => prep.units, start, execOpts, lim.fast);
+  } catch (e) {
+    if (e instanceof RegexLimitError) { pregLastError = e.kind === 'recursion' ? E_RECURSION : e.kind === 'jit' ? E_JIT_STACK : E_BACKTRACK; return false; }
+    if (e instanceof RangeError) { pregLastError = E_JIT_STACK; return false; }
+    throw e;
+  }
+  prep.checked = true;
+  if (!r) return null;
+  const ov = new Array(r.caps.length);
+  let count = 1;
+  for (let g = 0; g < r.caps.length; g += 2) {
+    if (r.caps[g + 1] >= 0 && r.caps[g] >= 0) { ov[g] = toByte(prep, r.caps[g]); ov[g + 1] = toByte(prep, r.caps[g + 1]); count = g / 2 + 1; }
+    else { ov[g] = -1; ov[g + 1] = -1; }
+  }
+  return { count, ov, mark: r.mark };
+}
+const checkSubject = (c, s) => prepare(c, s);
+// the length of the character at byte offset `off` (to step over it after an empty match)
+const unitLen = (prep, off) => {
+  if (!prep.utf) return 1;
+  const u = prep.idx[off];
+  return prep.offs[u + 1] - off;
+};
+
+// ------------------------------------------------------------------ result arrays
+function matchValue(s, st, en, asNull) { return st < 0 ? (asNull ? null : '') : s.slice(st, en); }
+function offsetPair(s, st, en, asNull) { return PHPArray.from([st < 0 ? (asNull ? null : '') : s.slice(st, en), st]); }
+// populate_subpat_array: groups up to the last one that matched (all with UNMATCHED_AS_NULL)
+function subpatArray(c, s, m, flags) {
+  const offCap = (flags & PREG_OFFSET_CAPTURE) !== 0, asNull = (flags & PREG_UNMATCHED_AS_NULL) !== 0;
+  const out = new PHPArray();
+  const n = asNull ? c.ncap + 1 : m.count;
+  for (let g = 0; g < n; g++) {
+    const st = g < m.count ? m.ov[2 * g] : -1, en = g < m.count ? m.ov[2 * g + 1] : -1;
+    const v = offCap ? offsetPair(s, st, en, asNull) : matchValue(s, st, en, asNull);
+    if (c.names[g] !== null && (st >= 0 || !out.has(c.names[g]))) out.set(c.names[g], offCap ? v.clone() : v);
+    out.push(v);
+  }
+  if (m.mark !== null && m.mark !== undefined) out.set('MARK', m.mark);
+  return out;
+}
+const negOffset = (off, len) => (off < 0 ? (-off <= len ? len + off : 0) : off);
+
+// ------------------------------------------------------------------ preg_match / preg_match_all
+function matchImpl(name, pattern, subject, matches, flags, offset, global) {
+  callLimits = null;
+  const c = pregCompile(S(pattern));
+  if (!c) return false;
+  pregLastError = 0;
+  const s = S(subject);
+  let fl = I(flags), order = 0;
+  if (fl & 0xff) order = fl & 0xff;
+  if ((global && (order < PREG_PATTERN_ORDER || order > PREG_SET_ORDER) && order !== 0) || (!global && order !== 0)) {
+    throwError('ValueError', `${name}(): Argument #4 ($flags) must be a PREG_* constant`);
+  }
+  if (global && order === 0) order = PREG_PATTERN_ORDER;
+  const offCap = (fl & PREG_OFFSET_CAPTURE) !== 0, asNull = (fl & PREG_UNMATCHED_AS_NULL) !== 0;
+  if (matches instanceof Ref) matches.v = new PHPArray();
+  let off = negOffset(I(offset), s.length);
+  if (off > s.length) { pregLastError = E_INTERNAL; return false; }
+  const prep = checkSubject(c, s);
+  if (!prep) return false;
+  const sets = global && order === PREG_PATTERN_ORDER ? Array.from({ length: c.ncap + 1 }, () => new PHPArray()) : null;
+  const setList = global && order === PREG_SET_ORDER ? new PHPArray() : null;
+  let marks = null, matched = 0, opts = null;
+  for (;;) {
+    const m = matchAt(c, prep, off, opts);
+    if (m === false) return false;
+    if (m === null) {
+      if (opts) {
+        // no non-empty match at the position of an empty one: step over a character
+        opts = null;
+        if (off < s.length) { off += unitLen(prep, off); continue; }
+      }
+      break;
+    }
+    if (m.ov[1] < m.ov[0]) { warn(`${name}(): Get subpatterns list failed`); if (matches instanceof Ref) matches.v = new PHPArray(); return false; }
+    matched++;
+    if (!global) { if (matches instanceof Ref) matches.v = subpatArray(c, s, m, fl); break; }
+    if (sets) {
+      for (let g = 0; g <= c.ncap; g++) {
+        const st = g < m.count ? m.ov[2 * g] : -1, en = g < m.count ? m.ov[2 * g + 1] : -1;
+        sets[g].push(offCap ? offsetPair(s, st, en, asNull) : matchValue(s, st, en, asNull));
+      }
+      if (m.mark !== null && m.mark !== undefined) { if (!marks) marks = new PHPArray(); marks.set(matched - 1, m.mark); }
+    } else setList.push(subpatArray(c, s, m, fl));
+    off = m.ov[1];
+    // after an empty match, look for a non-empty one at the same place first
+    opts = m.ov[1] === m.ov[0] ? { notEmptyAtStart: true, anchored: true } : null;
+    if (off > s.length) break;
+  }
+  if (global && matches instanceof Ref) {
+    if (sets) {
+      const out = new PHPArray();
+      for (let g = 0; g <= c.ncap; g++) {
+        if (c.names[g] !== null) out.set(c.names[g], sets[g].clone());
+        out.push(sets[g]);
+      }
+      if (marks) out.set('MARK', marks);
+      matches.v = out;
+    } else matches.v = setList;
+  }
+  return matched;
+}
+def('preg_match', (pattern, subject, matches = undefined, flags = 0, offset = 0) => matchImpl('preg_match', pattern, subject, matches, flags, offset, false), { refs: [false, false, true] });
+def('preg_match_all', (pattern, subject, matches = undefined, flags = 0, offset = 0) => matchImpl('preg_match_all', pattern, subject, matches, flags, offset, true), { refs: [false, false, true] });
+
+// ------------------------------------------------------------------ preg_replace and friends
+// a replacement string with \n, $n and ${n} references (n up to 99); \\ is a backslash
+function parseReplacement(rep) {
+  const parts = [];
+  let lit = '';
+  for (let i = 0; i < rep.length;) {
+    const ch = rep[i];
+    if ((ch === '\\' || ch === '$') && i + 1 < rep.length) {
+      if (ch === '\\' && rep[i + 1] === '\\') { lit += '\\'; i += 2; continue; }
+      let j = i + 1, brace = false;
+      if (ch === '$' && rep[j] === '{') { brace = true; j++; }
+      if (rep[j] >= '0' && rep[j] <= '9') {
+        let n = rep.charCodeAt(j++) - 48;
+        if (rep[j] >= '0' && rep[j] <= '9') n = n * 10 + rep.charCodeAt(j++) - 48;
+        if (!brace || rep[j] === '}') {
+          if (brace) j++;
+          if (lit) { parts.push(lit); lit = ''; }
+          parts.push(n);
+          i = j;
           continue;
         }
-        throw new PcreErr('unrecognized character after (? or (?-', i + 2);
       }
-      if (p[i + 1] === '*') throw new PcreErr('(*VERB) not supported', i);
-      if (fl.n) { out += '(?:'; i++; groupStack.push(false); continue; }
-      groupCount++;
-      out += '(';
-      i++;
-      groupStack.push(true);
-      continue;
     }
-    if (ch === ')') {
-      // close any pending inline-modifier groups opened at this depth
-      while (pendingClose.length && pendingClose[pendingClose.length - 1] === depthNow()) { out += ')'; pendingClose.pop(); }
-      groupStack.pop();
-      out += ')'; i++;
-      continue;
-    }
-    if (ch === '*' || ch === '+' || ch === '?' || ch === '{') {
-      let q = ch;
-      if (ch === '{') {
-        const mm = /^\{(\d*)(?:,(\d*))?\}/.exec(p.slice(i));
-        if (!mm || (mm[1] === '' && mm[2] === undefined)) { out += '\\{'; i++; continue; }
-        q = mm[1] === '' ? '{0,' + mm[2] + '}' : mm[0];
-        i += mm[0].length;
-      } else i++;
-      let lazy = false;
-      if (p[i] === '?') { lazy = true; i++; }
-      else if (p[i] === '+') { i++; } // possessive -> greedy (approximation)
-      if (fl.U) lazy = !lazy;
-      out += q + (lazy ? '?' : '');
-      continue;
-    }
-    if (ch === '.') { out += fl.s ? '.' : (unicode ? '[^\\n]' : '[^\\n]'); i++; continue; }
-    if (ch === '$') { out += fl.m ? '(?=\\n|(?![\\s\\S]))' : (fl.D ? '(?![\\s\\S])' : '(?=\\n?(?![\\s\\S]))'); i++; continue; }
-    if (ch === '^') { out += fl.m ? '(?<=^|\\n)' : '(?<![\\s\\S])'; i++; continue; }
-    if (ch === '}' || ch === ']') { out += '\\' + ch; i++; continue; }
-    if (ch === '/') { out += '\\/'; i++; continue; }
-    const cc = ch.codePointAt(0);
-    if (cc < 32 || (cc >= 127 && cc < 256 && !unicode)) { out += '\\x' + cc.toString(16).padStart(2, '0'); i++; continue; }
-    out += ch; i += ch.length;
+    lit += ch; i++;
   }
-  while (pendingClose.length) { out += ')'; pendingClose.pop(); }
-  if (groupStack.length) throw new PcreErr('missing closing parenthesis', n);
-  if (globalNeedsI.flag) { fl.i = true; globalNeedsI.flag = false; }
-  void esc;
-  return out;
-  function depthNow() { return groupStack.length; }
+  if (lit) parts.push(lit);
+  return parts;
 }
-const groupStack = [];
-const pendingClose = [];
-const globalNeedsI = { flag: false };
-
-// helper converting JS string indexes to byte offsets in unicode mode
-function offsetMapper(ustr, unicode) {
-  if (!unicode) return (idx) => idx;
-  let lastIdx = 0, lastByte = 0;
-  return (idx) => {
-    if (idx < lastIdx) { lastIdx = 0; lastByte = 0; }
-    lastByte += Buffer.byteLength(ustr.slice(lastIdx, idx), 'utf8');
-    lastIdx = idx;
-    return lastByte;
-  };
-}
-function byteToIndex(ustr, byteOff) {
-  if (byteOff <= 0) return 0;
-  const b = Buffer.from(ustr, 'utf8').subarray(0, byteOff);
-  return b.toString('utf8').length;
-}
-function pregSubject(c, subject) {
-  if (!c.unicode) return subject;
-  if (!isValidUtf8(subject)) { pregLastError = 4; return null; }
-  return utf8Decode(subject);
-}
-const enc = (c, s) => (c.unicode && s !== undefined && s !== null ? utf8Encode(s) : s);
-function buildMatchArray(c, m, flags, omap, trimTrailing) {
-  const offCap = (flags & 256) !== 0, unNull = (flags & 512) !== 0;
-  const out = new PHPArray();
-  let last = m.length - 1;
-  if (trimTrailing && !unNull) while (last > 0 && m[last] === undefined) last--;
-  for (let g = 0; g <= last; g++) {
-    let v = m[g];
-    let val = v === undefined ? (unNull ? null : '') : enc(c, v);
-    if (offCap) {
-      const off = v === undefined ? -1 : omap(m.indices[g][0]);
-      val = PHPArray.from([val, off]);
-    }
-    const name = c.names[g];
-    if (name) out.set(name, val instanceof PHPArray ? val.clone() : val);
-    out.set(g, val);
+function expand(parts, s, m) {
+  let out = '';
+  for (const p of parts) {
+    if (typeof p === 'string') out += p;
+    else if (p < m.count && m.ov[2 * p] >= 0) out += s.slice(m.ov[2 * p], m.ov[2 * p + 1]);
   }
   return out;
 }
-def('preg_match', (pattern, subject, matches = undefined, flags = 0, offset = 0) => {
-  const c = pregCompile(S(pattern)); if (!c) return false;
-  pregLastError = 0;
-  const subj = pregSubject(c, S(subject)); if (subj === null) return false;
-  const fl = I(flags);
-  const re = (fl & 256) ? c.getD() : c.re;
-  let off = I(offset); if (off < 0) off = Math.max(0, S(subject).length + off);
-  re.lastIndex = c.unicode ? byteToIndex(subj, off) : off;
-  const m = re.exec(subj);
-  if (!m || (c.anchored && m.index !== re.lastIndex - m[0].length && m.index !== (c.unicode ? byteToIndex(subj, off) : off))) { if (matches instanceof Ref) matches.v = new PHPArray(); return 0; }
-  if (matches instanceof Ref) matches.v = buildMatchArray(c, m, fl, offsetMapper(subj, c.unicode), true);
-  return 1;
-}, { refs: [false, false, true] });
-function* pregIter(c, subj, re, off) {
-  re.lastIndex = off;
-  let m;
-  while ((m = re.exec(subj))) {
-    if (c.anchored && m.index !== off) break;
-    yield m;
-    if (m[0] === '') { re.lastIndex = m.index + (c.unicode && subj.codePointAt(m.index) > 0xffff ? 2 : 1); if (re.lastIndex > subj.length) break; }
-    off = re.lastIndex;
-  }
-}
-def('preg_match_all', (pattern, subject, matches = undefined, flags = 0, offset = 0) => {
-  const c = pregCompile(S(pattern)); if (!c) return false;
-  pregLastError = 0;
-  const subj = pregSubject(c, S(subject)); if (subj === null) return false;
-  let fl = I(flags);
-  const order = (fl & 2) ? 2 : 1;
-  const re = (fl & 256) ? c.getD() : c.re;
-  const omap = offsetMapper(subj, c.unicode);
-  let off = I(offset); if (off < 0) off = Math.max(0, S(subject).length + off);
-  const all = [...pregIter(c, subj, re, c.unicode ? byteToIndex(subj, off) : off)];
-  if (matches instanceof Ref) {
-    if (order === 2) {
-      matches.v = PHPArray.from(all.map((m) => buildMatchArray(c, m, fl, omap, true)));
-    } else {
-      const ngroups = new RegExp(c.src + '|', c.flags.replace('g', '')).exec('').length;
-      const out = new PHPArray();
-      for (let g = 0; g < ngroups; g++) {
-        const list = new PHPArray();
-        for (const m of all) {
-          const v = m[g];
-          let val = v === undefined ? ((fl & 512) ? null : '') : enc(c, v);
-          if (fl & 256) val = PHPArray.from([val, v === undefined ? -1 : omap(m.indices[g][0])]);
-          list.push(val);
-        }
-        if (c.names[g]) out.set(c.names[g], list.clone());
-        out.set(g, list);
-      }
-      matches.v = out;
+// replace in one subject string: null after an error
+function replaceOne(c, s, repFn, limit, counter) {
+  const prep = checkSubject(c, s);
+  if (!prep) return null;
+  let out = '', lastEnd = 0, off = 0, opts = null;
+  for (;;) {
+    if (limit === 0) break;
+    const m = matchAt(c, prep, off, opts);
+    if (m === false) return null;
+    if (m === null) {
+      if (opts) { opts = null; if (off < s.length) { off += unitLen(prep, off); continue; } }
+      break;
     }
+    if (m.ov[1] < m.ov[0]) { pregLastError = E_INTERNAL; return null; }
+    out += s.slice(lastEnd, m.ov[0]) + repFn(m);
+    counter.n++;
+    if (limit > 0) limit--;
+    lastEnd = off = m.ov[1];
+    opts = m.ov[1] === m.ov[0] ? { notEmptyAtStart: true, anchored: true } : null;
   }
-  return all.length;
-}, { refs: [false, false, true] });
-function expandReplacement(rep, m, c) {
-  return rep.replace(/\\(\d{1,2})|\$(\d{1,2})|\$\{(\d{1,2})\}|\\\\/g, (all, a, b, d) => {
-    if (all === '\\\\') return '\\';
-    const g = parseInt(a || b || d, 10);
-    const v = m[g];
-    return v === undefined ? '' : enc(c, v);
-  });
+  return out + s.slice(lastEnd);
 }
-function pregReplaceOne(c, subj, repFn, limit, counter) {
-  const u = pregSubject(c, subj); if (u === null) return null;
-  let out = '', last = 0, n = 0;
-  for (const m of pregIter(c, u, c.re, 0)) {
-    if (limit >= 0 && n >= limit) break;
-    out += enc(c, u.slice(last, m.index)) + repFn(m);
-    last = m.index + m[0].length;
-    n++;
-  }
-  counter.n += n;
-  return out + enc(c, u.slice(last));
+function arrayOrString(name, n, pname, v) {
+  if (v instanceof PHPArray || typeof v === 'string' || v === null || typeof v !== 'object' || (v.cls && v.cls.methods.has('__tostring'))) return;
+  throwError('TypeError', `${name}(): Argument #${n} ($${pname}) must be of type array|string, ${typeOf(v)} given`);
 }
-function pregReplaceImpl(pattern, replacement, subject, limit, count, isCb, flags) {
+function replaceImpl(name, pattern, replacement, subject, limit, count, isCb, flags) {
+  callLimits = null;
+  arrayOrString(name, 1, 'pattern', pattern);
+  if (!isCb) arrayOrString(name, 2, 'replacement', replacement);
+  arrayOrString(name, 3, 'subject', subject);
   pregLastError = 0;
-  const lim = I(limit);
+  const lim = limit === null ? -1 : I(limit);
   const counter = { n: 0 };
-  const pats = pattern instanceof PHPArray ? pattern.values().map(toStr) : [S(pattern)];
-  const reps = !isCb && replacement instanceof PHPArray ? replacement.values().map(toStr) : null;
+  let pats, reps = null;
+  if (pattern instanceof PHPArray) pats = pattern.values().map(toStr);
+  else pats = [S(pattern)];
+  if (!isCb) {
+    if (replacement instanceof PHPArray) {
+      if (!(pattern instanceof PHPArray)) throwError('TypeError', `${name}(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given`);
+      reps = replacement.values().map((v) => parseReplacement(toStr(v)));
+    }
+  }
+  const single = !isCb && !reps ? parseReplacement(toStr(replacement)) : null;
+  const cb = isCb ? callableFn(replacement) : null;
   const doOne = (s) => {
     s = toStr(s);
     for (let i = 0; i < pats.length; i++) {
-      const c = pregCompile(pats[i]); if (!c) return null;
+      const c = pregCompile(pats[i]);
+      if (!c) return null;
       let fn;
-      if (isCb) { const cb = callableFn(replacement); fn = (m) => toStr(cb(buildMatchArray(c, m, flags || 0, (x) => x, true))); }
-      else { const rep = reps ? (i < reps.length ? reps[i] : '') : toStr(replacement); fn = (m) => expandReplacement(rep, m, c); }
-      s = pregReplaceOne(c, s, fn, lim, counter);
-      if (s === null) return null;
+      if (isCb) fn = (m) => toStr(cb(subpatArray(c, s, m, flags || 0)));
+      else { const parts = reps ? (i < reps.length ? reps[i] : []) : single; fn = (m) => expand(parts, s, m); }
+      const r = replaceOne(c, s, fn, lim, counter);
+      if (r === null) return null;
+      s = r;
     }
     return s;
   };
   let r;
-  if (subject instanceof PHPArray) { r = new PHPArray(); for (const [k, v] of subject.entries()) { const x = doOne(v); if (x !== null) r.set(k, x); } }
-  else r = doOne(subject);
+  if (subject instanceof PHPArray) {
+    r = new PHPArray();
+    for (const [k, v] of subject.entries()) {
+      const before = counter.n;
+      const x = doOne(v);
+      if (x !== null && (name !== 'preg_filter' || counter.n > before)) r.set(k, x);
+    }
+  } else {
+    r = doOne(subject);
+    if (name === 'preg_filter' && counter.n === 0) r = null;
+  }
   if (count instanceof Ref) count.v = counter.n;
   return r;
 }
-def('preg_replace', (pattern, replacement, subject, limit = -1, count = undefined) => pregReplaceImpl(pattern, replacement, subject, limit, count, false), { refs: [false, false, false, false, true] });
-def('preg_filter', (pattern, replacement, subject, limit = -1, count = undefined) => pregReplaceImpl(pattern, replacement, subject, limit, count, false), { refs: [false, false, false, false, true] });
-def('preg_replace_callback', (pattern, callback, subject, limit = -1, count = undefined, flags = 0) => pregReplaceImpl(pattern, callback, subject, limit, count, true, I(flags)), { refs: [false, false, false, false, true] });
+def('preg_replace', (pattern, replacement, subject, limit = -1, count = undefined) => replaceImpl('preg_replace', pattern, replacement, subject, limit, count, false), { refs: [false, false, false, false, true] });
+def('preg_filter', (pattern, replacement, subject, limit = -1, count = undefined) => replaceImpl('preg_filter', pattern, replacement, subject, limit, count, false), { refs: [false, false, false, false, true] });
+def('preg_replace_callback', (pattern, callback, subject, limit = -1, count = undefined, flags = 0) => replaceImpl('preg_replace_callback', pattern, callback, subject, limit, count, true, I(flags)), { refs: [false, false, false, false, true] });
 def('preg_replace_callback_array', (pattern, subject, limit = -1, count = undefined, flags = 0) => {
-  let s = subject; let total = 0;
-  for (const [p, cb] of A(pattern).entries()) { const cnt = new Ref(0); s = pregReplaceImpl(String(p), cb, s, limit, cnt, true, I(flags)); total += cnt.v; }
+  let s = subject, total = 0;
+  for (const [p, cb] of A(pattern).entries()) {
+    if (typeof p !== 'string') throwError('TypeError', 'preg_replace_callback_array(): Argument #1 ($pattern) must contain only string patterns as keys');
+    if (!isCallable(cb)) throwError('TypeError', 'preg_replace_callback_array(): Argument #1 ($pattern) must contain only valid callbacks');
+    const cnt = new Ref(0);
+    s = replaceImpl('preg_replace_callback_array', p, cb, s, limit, cnt, true, I(flags));
+    total += cnt.v;
+    if (s === null) break;
+  }
   if (count instanceof Ref) count.v = total;
   return s;
 }, { refs: [false, false, false, true] });
+
+// ------------------------------------------------------------------ preg_split
 def('preg_split', (pattern, subject, limit = -1, flags = 0) => {
-  const c = pregCompile(S(pattern)); if (!c) return false;
+  callLimits = null;
+  const c = pregCompile(S(pattern));
+  if (!c) return false;
   pregLastError = 0;
-  const raw = S(subject);
-  const subj = pregSubject(c, raw); if (subj === null) return false;
-  let lim = limit === null ? -1 : I(limit); if (lim === 0) lim = -1;
+  const s = S(subject);
+  let lim = limit === null ? -1 : I(limit);
+  if (lim === 0) lim = -1;
   const fl = I(flags);
-  const noEmpty = (fl & 1) !== 0, delim = (fl & 2) !== 0, offCap = (fl & 4) !== 0;
-  const omap = offsetMapper(subj, c.unicode);
+  const noEmpty = (fl & PREG_SPLIT_NO_EMPTY) !== 0, delim = (fl & PREG_SPLIT_DELIM_CAPTURE) !== 0, offCap = (fl & PREG_SPLIT_OFFSET_CAPTURE) !== 0;
   const out = new PHPArray();
-  const add = (s, idx) => {
-    if (noEmpty && s === '') return;
-    const v = enc(c, s);
-    out.push(offCap ? PHPArray.from([v, omap(idx)]) : v);
-  };
-  let last = 0;
-  const re = c.getD();
-  for (const m of pregIter(c, subj, re, 0)) {
-    if (lim > 0 && out.size >= lim - 1) break;
-    if (m[0] === '' && m.index === last && (m.index === 0 || m.index >= subj.length)) { if (m.index >= subj.length) break; continue; }
-    if (m[0] === '' && m.index === last && noEmpty) continue;
-    add(subj.slice(last, m.index), last);
-    if (delim) for (let g = 1; g < m.length; g++) if (m[g] !== undefined && !(noEmpty && m[g] === '')) add(m[g], m.indices[g][0]);
-    last = m.index + m[0].length;
+  const add = (st, en) => out.push(offCap ? PHPArray.from([st < 0 ? '' : s.slice(st, en), st]) : st < 0 ? '' : s.slice(st, en));
+  const prep = checkSubject(c, s);
+  if (!prep) return false;
+  let lastMatch = 0, off = 0, opts = null;
+  while (lim === -1 || lim > 1) {
+    const m = matchAt(c, prep, off, opts);
+    if (m === false) return false;
+    if (m === null) {
+      if (opts) { opts = null; if (off < s.length) { off += unitLen(prep, off); continue; } }
+      break;
+    }
+    opts = null;
+    if (m.ov[1] < m.ov[0]) { pregLastError = E_INTERNAL; return false; }
+    if (!noEmpty || m.ov[0] !== lastMatch) {
+      add(lastMatch, m.ov[0]);
+      if (lim !== -1) lim--;
+    }
+    if (delim) {
+      for (let g = 1; g < m.count; g++) {
+        const st = m.ov[2 * g], en = m.ov[2 * g + 1];
+        if (!noEmpty || st !== en) add(st, en);
+      }
+    }
+    off = lastMatch = m.ov[1];
+    if (m.ov[1] === m.ov[0]) {
+      if (lim !== -1 && lim <= 1) break;
+      opts = { notEmptyAtStart: true, anchored: true };
+    }
   }
-  add(subj.slice(last), last);
+  if (!noEmpty || lastMatch < s.length) add(lastMatch, s.length);
   return out;
 });
+
+// ------------------------------------------------------------------ the rest
 def('preg_quote', (str, delimiter = null) => {
   const d = delimiter === null ? '' : S(delimiter);
-  return S(str).replace(/[\s\S]/g, (ch) => {
-    if (ch === '\0') return '\\000';
-    if ('.\\+*?[^]$(){}=!<>|:-#/'.includes(ch) && (ch !== '/' || d === '/') ) return '\\' + ch;
-    if (d && ch === d) return '\\' + ch;
-    return ch;
-  });
+  const dc = d ? d[0] : '';
+  let out = '';
+  for (const ch of S(str)) {
+    if (ch === '\0') out += '\\000';
+    else if ('.\\+*?[^]$(){}=!<>|:-#/'.includes(ch) && ch !== '/') out += '\\' + ch;
+    else if (dc && ch === dc) out += '\\' + ch;
+    else out += ch;
+  }
+  return out;
 });
 def('preg_grep', (pattern, array, flags = 0) => {
-  const c = pregCompile(S(pattern)); if (!c) return false;
+  callLimits = null;
+  const c = pregCompile(S(pattern));
+  if (!c) return false;
+  pregLastError = 0;
   const inv = (I(flags) & 1) !== 0;
   const out = new PHPArray();
-  for (const [k, v] of A(array).entries()) {
-    const s = pregSubject(c, toStr(v)); if (s === null) continue;
-    c.re.lastIndex = 0;
-    const hit = c.re.test(s);
-    if (hit !== inv) out.set(k, v);
+  for (const [k, raw] of A(array).rawEntries()) {
+    const v = raw instanceof Ref ? raw.v : raw;
+    const m = matchAt(c, prepare(c, toStr(v)), 0, null);
+    if (m === false) break;
+    if ((m !== null) !== inv) { if (raw instanceof Ref) out.setRaw(k, raw); else out.set(k, v); }
   }
   return out;
 });

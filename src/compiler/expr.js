@@ -621,10 +621,13 @@ export function isRefParam(fn, i) {
 }
 function compileArgs(argNodes) {
   if (argNodes.length === 0) return () => [];
-  const items = argNodes.map((a) => ({
-    E: cExpr(a.e), L: isLvalNode(a.e) ? cLval(a.e) : null, spread: !!a.spread, name: a.name || null,
-    tempRef: !isLvalNode(a.e) && ['Call', 'MCall', 'SCall', 'New', 'Include', 'Eval'].includes(a.e.k),
-  }));
+  const items = argNodes.map((a) => {
+    const E = cExpr(a.e);
+    let L = isLvalNode(a.e) ? cLval(a.e) : null;
+    // f($b =& $a) passes the reference that was just made
+    if (!L && a.e.k === 'AssignRef' && isLvalNode(a.e.t)) { const T = cLval(a.e.t); L = { ref: (f) => { E(f); return T.ref(f); } }; }
+    return { E, L, spread: !!a.spread, name: a.name || null, tempRef: !L && ['Call', 'MCall', 'SCall', 'New', 'Include', 'Eval'].includes(a.e.k) };
+  });
   const simple = items.every((it) => !it.spread && !it.name);
   if (simple) {
     const n = items.length;
@@ -700,9 +703,14 @@ function compileArgs(argNodes) {
   };
 }
 
-function compileNamedCall(n) {
+function compileNamedCall(n, plain) {
   const name = n.f, fb = n.fb;
   const lname = name.toLowerCase(), lfb = fb ? fb.toLowerCase() : null;
+  // assert(): unless zend.assertions=1 the call (and its arguments) is skipped
+  if ((lfb || lname) === 'assert' && n.args !== 'fcc' && !plain) {
+    const inner = compileNamedCall(n, true);
+    return (f) => (rt.ini.get('zend.assertions') === '1' ? inner(f) : true);
+  }
   // compile-time special forms that need the caller's frame
   const special = FRAME_FUNCS[lfb || lname];
   if (special) {
