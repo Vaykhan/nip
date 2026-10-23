@@ -1,7 +1,5 @@
 # NIP — Nip is php
 
-A PHP 8.3 interpreter in a single Node.js file.
-
 `nip.js` is a self-contained PHP interpreter written in plain Node.js (no npm dependencies,
 Node ≥ 18; developed and tested on Node 22). It targets PHP 8.3 semantics and is checked
 differentially against the real `php` binary.
