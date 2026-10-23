@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
@@ -14,8 +13,8 @@ jobs:
       matrix:
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
       - name: Test sources
@@ -24,7 +23,7 @@ jobs:
         run: node scripts/build.js
       - name: Test bundle
         run: node tests/run.js --bundle --verbose
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: matrix.node == 24
         with:
           name: nip.cjs
@@ -37,11 +36,11 @@ jobs:
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
       - name: Install PHP
         run: command -v php || (sudo apt-get update && sudo apt-get install -y php8.3-cli)
-      - run: php --version
+      - run: php --version && echo "::notice title=php::$(php -r 'echo PHP_VERSION;')"
       - run: node tests/run.js --php --verbose
