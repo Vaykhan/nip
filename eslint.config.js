@@ -21,6 +21,7 @@ export default [
       'no-fallthrough': 'error',
       'no-shadow-restricted-names': 'error',
       'prefer-const': 'off',
+      'require-yield': 'off', // generator wrappers around non-yielding code are intentional
     },
   },
 ];

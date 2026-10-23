@@ -6,7 +6,7 @@ import { looseEq, strictEq } from '../compare.js';
 import { hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, matchRepr } from './expr.js';
-import { cStmt, iterateObject } from './stmt.js';
+import { cStmt, GOTO, gotoTargets, iterateObject } from './stmt.js';
 import { rt } from '../runtime/state.js';
 import { throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { valueName } from '../runtime/functions.js';
@@ -15,8 +15,11 @@ import { GenThrow } from '../runtime/generators.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
 // wraps a non-yielding body so it can be driven like a generator
-// eslint-disable-next-line require-yield
-function genWrap(fn) { return function* (f) { return fn(f); }; }
+function genWrap(fn) {
+  const g = function* (f) { return fn(f); };
+  if (fn.labels) { g.labels = fn.labels; g.enter = function* (f, label) { return fn.enter(f, label); }; }
+  return g;
+}
 
 function cExprG(n) {
   if (!hasYield(n)) return genWrap(cExpr(n));
@@ -117,11 +120,46 @@ function cExprG(n) {
 let genTempCounter = 0;
 
 export function cStmtsG(list) {
-  const fns = list.map(cStmtG).filter(Boolean);
+  const fns = [], nodes = [];
+  for (const s of list) { const c = cStmtG(s); if (c) { fns.push(c); nodes.push(s); } }
+  const targets = gotoTargets(fns, nodes);
+  if (targets) return labelledStmtsG(fns, nodes, targets);
   return function* (f) {
     for (let i = 0; i < fns.length; i++) { const r = yield* fns[i](f); if (r !== undefined) return r; }
     return undefined;
   };
+}
+// generator-mode version of labelledStmts() in stmt.js
+function labelledStmtsG(fns, nodes, targets) {
+  const n = fns.length;
+  const exec = function* (f, label) {
+    let i = 0;
+    for (;;) {
+      let r;
+      if (label !== null) {
+        const j = targets.get(label);
+        r = nodes[j].k === 'Label' ? undefined : yield* fns[j].enter(f, label);
+        i = j + 1; label = null;
+      } else {
+        if (i >= n) return undefined;
+        r = yield* fns[i++](f);
+      }
+      if (r !== undefined) {
+        if (r.t === GOTO && targets.has(r.label)) { label = r.label; continue; }
+        return r;
+      }
+    }
+  };
+  const run = function* (f) { return yield* exec(f, null); };
+  run.labels = new Set(targets.keys());
+  run.enter = exec;
+  return run;
+}
+function exposeLabelsG(fn, parts, enter) {
+  const labels = new Set();
+  for (const p of parts) if (p && p.labels) for (const l of p.labels) labels.add(l);
+  if (labels.size) { fn.labels = labels; fn.enter = enter; }
+  return fn;
 }
 function cBodyG(n) { return n.k === 'Block' ? cStmtsG(n.body) : cStmtsG([n]); }
 
@@ -141,11 +179,12 @@ function cStmtG(n) {
       const conds = [cExprG(n.c), ...n.elifs.map((e) => cExprG(e.c))];
       const bodies = [cBodyG(n.then), ...n.elifs.map((e) => cBodyG(e.body))];
       const els = n.els ? cBodyG(n.els) : null;
-      return function* (f) {
+      const parts = [...bodies, els];
+      return exposeLabelsG(function* (f) {
         rt.line = l;
         for (let i = 0; i < conds.length; i++) if (toBool(yield* conds[i](f))) return yield* bodies[i](f);
         if (els) return yield* els(f);
-      };
+      }, parts, function* (f, label) { return yield* parts.find((p) => p && p.labels && p.labels.has(label)).enter(f, label); });
     }
     case 'While': {
       const C = cExprG(n.c), B = cBodyG(n.body);
@@ -229,19 +268,24 @@ function cStmtG(n) {
     }
     case 'Switch': {
       const E = cExprG(n.e);
-      const flat = []; const starts = []; let defIdx = -1;
+      const flat = [], flatNodes = []; const starts = []; let defIdx = -1;
       for (const c of n.cases) {
         starts.push({ T: c.test ? cExprG(c.test) : null, at: flat.length });
         if (!c.test) defIdx = starts.length - 1;
-        for (const s of c.body) { const cs = cStmtG(s); if (cs) flat.push(cs); }
+        for (const s of c.body) { const cs = cStmtG(s); if (cs) { flat.push(cs); flatNodes.push(s); } }
       }
+      const targets = gotoTargets(flat, flatNodes);
       return function* (f) {
         const v = yield* E(f);
         let start = -1;
         for (const s of starts) if (s.T && looseEq(v, yield* s.T(f))) { start = s.at; break; }
         if (start < 0) { if (defIdx < 0) return; start = starts[defIdx].at; }
         for (let i = start; i < flat.length; i++) {
-          const r = yield* flat[i](f);
+          let r = yield* flat[i](f);
+          while (r !== undefined && r.t === GOTO && targets && targets.has(r.label)) {
+            i = targets.get(r.label);
+            r = flatNodes[i].k === 'Label' ? undefined : yield* flat[i].enter(f, r.label);
+          }
           if (r !== undefined) {
             if (r.t === 1 || r.t === 2) { if (r.n > 1) return r.t === 1 ? mkBreak(r.n - 1) : mkCont(r.n - 1); return; }
             return r;
@@ -253,10 +297,17 @@ function cStmtG(n) {
       const B = cBodyG(n.body);
       const catches = n.catches.map((c) => ({ types: c.types.map((t) => t.toLowerCase()), v: c.v, B: cBodyG(c.body) }));
       const F = n.fin ? cBodyG(n.fin) : null;
-      return function* (f) {
+      const run = function* (f, label) { // label: see the Try statement in stmt.js
         let res;
         try {
-          res = yield* B(f);
+          const c = label === undefined ? null : catches.find((x) => x.B.labels && x.B.labels.has(label));
+          if (c) {
+            if (!F) return yield* c.B.enter(f, label);
+            try { res = yield* c.B.enter(f, label); }
+            finally { const fr = yield* F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+            return res;
+          }
+          res = label === undefined ? yield* B(f) : yield* B.enter(f, label);
         } catch (e) {
           const sig = toThrowSig(e);
           if (!sig) throw e;
@@ -278,6 +329,7 @@ function cStmtG(n) {
         if (F) { const fr = yield* F(f); if (fr !== undefined) return fr; }
         return res;
       };
+      return exposeLabelsG(function* (f) { return yield* run(f, undefined); }, [B, ...catches.map((c) => c.B)], run);
     }
   }
   // fallback: statements that only contain yields in expressions

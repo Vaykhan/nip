@@ -1,6 +1,6 @@
 // NIP public API.
 //
-//   import { run, runFile } from 'nip';
+//   import { run, runFile } from '@vaykhan/nip';
 //   const { output, exitCode } = run('<?php echo "hi";');      // output is captured by default
 //   runFile('script.php', { argv: ['script.php'] });            // output goes to stdout
 //

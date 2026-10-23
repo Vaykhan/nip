@@ -98,12 +98,14 @@ export function readIndex(base, key, quiet) {
         else throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
       } else idx = toInt(n);
     } else if (key === null || key === undefined) { if (quiet) return undefined; throwError('TypeError', 'Cannot access offset of type null on string'); }
-    else if (typeof key === 'boolean') { idx = key ? 1 : 0; }
+    else if (typeof key === 'boolean') { idx = key ? 1 : 0; if (!quiet) warn('String offset cast occurred'); }
     else if (key instanceof Flt) { idx = floatToInt(key.v); if (!quiet) warn('String offset cast occurred'); }
-    else if (typeof key === 'bigint') idx = Number(key);
+    else if (typeof key === 'bigint') idx = key;
     else { if (quiet) return undefined; throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`); }
-    if (idx < 0) idx += base.length;
-    if (idx < 0 || idx >= base.length) { if (!quiet) warn(`Uninitialized string offset ${toStr(key)}`); return quiet ? undefined : ''; }
+    const off = idx; // PHP reports the integer offset, before negative offsets are resolved
+    if (typeof idx === 'bigint') idx = -1; // beyond 2^53: out of range for any string
+    else if (idx < 0) idx += base.length;
+    if (idx < 0 || idx >= base.length) { if (!quiet) warn(`Uninitialized string offset ${off}`); return quiet ? undefined : ''; }
     return base[idx];
   }
   if (base instanceof PHPObject) {

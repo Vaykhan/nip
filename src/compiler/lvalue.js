@@ -364,7 +364,6 @@ function lvList(n) {
     if (!it) return null;
     return { K: it.key ? cExpr(it.key) : null, L: cLval(it.v), byRef: it.byRef };
   });
-  const keyed = items.some((it) => it && it.K);
   const assign = (f, v, srcLv) => {
     let idx = 0;
     for (const it of items) {
@@ -372,7 +371,15 @@ function lvList(n) {
       const key = it.K ? it.K(f) : idx++;
       if (it.byRef) {
         if (!srcLv) throwError('Error', 'Cannot assign reference to non referenceable value');
+        if (typeof v === 'string' && v !== '') throwError('Error', 'Cannot create references to/from string offsets');
         const c = srcLv.arr(f);
+        if (c instanceof PHPObject) {
+          if (!c.cls.ancestors.has('arrayaccess')) throwError('Error', `Cannot use object of type ${c.cls.name} as array`);
+          const val = callMethodName(c, 'offsetGet', [key]);
+          notice(`Indirect modification of overloaded element of ${c.cls.name} has no effect`);
+          it.L.bind(f, new Ref(cp(val)));
+          continue;
+        }
         const k = normKey(key);
         let slot = c.getRaw(k);
         if (!(slot instanceof Ref)) { slot = new Ref(slot === undefined ? null : slot); c.setRaw(k, slot); }
@@ -390,7 +397,6 @@ function lvList(n) {
       else it.L.set(f, cp(val));
     }
   };
-  void keyed;
   const bad = () => throwError('Error', 'Cannot use list() in this context');
   return { listAssign: assign, set: (f, v) => assign(f, v, null), get: bad, getq: bad, ref: bad, bind: bad, arr: bad, unset: bad, modify: bad, hasRef: items.some((it) => it && it.byRef) };
 }
@@ -406,8 +412,11 @@ export function cClassRef(c) {
       if (!f.cls.parent) throwError('Error', 'Cannot use "parent" when current class scope has no parent');
       return f.cls.parent;
     };
-    let cached = null;
-    return () => cached || (cached = lookupClass(c));
+    let cached = null, cachedEpoch = -1; // see compileNamedCall
+    return () => {
+      if (cachedEpoch !== rt.epoch || !cached) { cached = lookupClass(c); cachedEpoch = rt.epoch; }
+      return cached;
+    };
   }
   const E = cExpr(c);
   return (f) => {

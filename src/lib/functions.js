@@ -15,7 +15,7 @@ import {
 import { A, def, S } from './core.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
-def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
+def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); if (rt.disabledFns && rt.disabledFns.has(n.toLowerCase())) return false; return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
 def('call_user_func', (callback, ...args) => callValue(callback, args));
 def('call_user_func_array', (callback, args) => {
   const a = A(args);

@@ -82,6 +82,7 @@ export function captureTrace(withArgs) {
   const st = rt.stack;
   for (let i = st.length - 1; i >= 0; i--) {
     const s = st[i];
+    if (s.hidden) continue; // marks engine-internal callers (see runScript's shutdown)
     const fr = new PHPArray();
     const calledFromNative = i > 0 && st[i - 1].native === true;
     if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }

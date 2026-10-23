@@ -6,6 +6,7 @@ import { FatalSig, ParseErr, ThrowSig } from '../values.js';
 import { lex } from '../lexer.js';
 import { parsePHP, Parser } from '../parser.js';
 import { RETURN } from '../compiler/common.js';
+import { checkProgram } from '../compiler/checks.js';
 import { cStmts } from '../compiler/stmt.js';
 import { rt } from './state.js';
 import { makeException, throwError, warn } from './errors.js';
@@ -19,6 +20,8 @@ export function compileSource(src, file) {
     if (e instanceof ParseErr) throw new FatalSig(e.msg, e.line, file, e.kind || 'Parse error');
     throw e;
   }
+  try { checkProgram(ast); }
+  catch (e) { if (e instanceof FatalSig && !e.file) e.file = file; throw e; }
   return { ast, body: null, file };
 }
 export function hoistDecls(ast, f) {
@@ -84,6 +87,8 @@ export function doEval(code, f, st) {
       ex.props.set('file', file); ex.props.set('line', e.line);
       throw new ThrowSig(ex);
     }
+    try { checkProgram(ast); }
+    catch (e) { if (e instanceof FatalSig && !e.file) e.file = file; throw e; }
     prog = { ast, body: cStmts(ast), file };
     if (evalCache.size > 1000) evalCache.clear();
     evalCache.set(key, prog);
@@ -110,8 +115,11 @@ export function doInclude(path, kind, f) {
   const real = fs.realpathSync(resolved);
   if (kind.endsWith('_once') && rt.included.has(real)) return true;
   rt.included.add(real);
-  let prog = rt.progCache.get(real);
-  if (!prog) { prog = compileSource(fs.readFileSync(real, 'latin1'), real); rt.progCache.set(real, prog); }
+  // compiled includes are cached across runs and revalidated by mtime and size (like opcache.validate_timestamps)
+  const st = fs.statSync(real);
+  let cached = rt.progCache.get(real), prog;
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) prog = cached.prog;
+  else { prog = compileSource(fs.readFileSync(real, 'latin1'), real); rt.progCache.set(real, { prog, mtimeMs: st.mtimeMs, size: st.size }); }
   const prevFile = rt.file, prevLine = rt.line;
   const nf = new NativeFrame({ name: kind, isMethod: false }, [real]); nf.native = false;
   rt.stack.push(nf);

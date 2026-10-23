@@ -14,8 +14,10 @@ import { gcCheck } from '../runtime/gc.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
 export function cStmts(list) {
-  const fns = [];
-  for (const s of list) { const c = cStmt(s); if (c) fns.push(c); }
+  const fns = [], nodes = [];
+  for (const s of list) { const c = cStmt(s); if (c) { fns.push(c); nodes.push(s); } }
+  const targets = gotoTargets(fns, nodes);
+  if (targets) return labelledStmts(fns, nodes, targets);
   const n = fns.length;
   if (n === 0) return () => undefined;
   if (n === 1) return fns[0];
@@ -26,6 +28,53 @@ export function cStmts(list) {
   };
 }
 function cBody(n) { return n.k === 'Block' ? cStmts(n.body) : cStmts([n]); }
+
+// goto support. A `goto` returns a GOTO signal that travels up like `break`. A statement list
+// that contains the label (directly, or inside an if/else branch, block, try or catch body it
+// can enter) resumes there. Compiled statements containing enterable labels carry `.labels` (a
+// Set) and `.enter(f, label)`, which runs the statement starting at the label. Loops, switch
+// and finally don't expose their labels: PHP rejects jumps into them at compile time.
+export const GOTO = 4;
+export function gotoTargets(fns, nodes) {
+  let map = null;
+  for (let i = 0; i < fns.length; i++) {
+    const labels = nodes[i].k === 'Label' ? [nodes[i].name] : fns[i].labels;
+    if (labels) for (const name of labels) (map || (map = new Map())).set(name, i);
+  }
+  return map;
+}
+function labelledStmts(fns, nodes, targets) {
+  const n = fns.length;
+  const exec = (f, label) => {
+    let i = 0;
+    for (;;) {
+      let r;
+      if (label !== null) {
+        const j = targets.get(label);
+        r = nodes[j].k === 'Label' ? undefined : fns[j].enter(f, label);
+        i = j + 1; label = null;
+      } else {
+        if (i >= n) return undefined;
+        r = fns[i++](f);
+      }
+      if (r !== undefined) {
+        if (r.t === GOTO && targets.has(r.label)) { label = r.label; continue; }
+        return r;
+      }
+    }
+  };
+  const run = (f) => exec(f, null);
+  run.labels = new Set(targets.keys());
+  run.enter = exec;
+  return run;
+}
+// gives an if/try statement the labels of its enterable parts (each a compiled body or null)
+function exposeLabels(fn, parts, enter) {
+  const labels = new Set();
+  for (const p of parts) if (p && p.labels) for (const l of p.labels) labels.add(l);
+  if (labels.size) { fn.labels = labels; fn.enter = enter; }
+  return fn;
+}
 
 export function cStmt(n) {
   if (!n) return null;
@@ -53,16 +102,18 @@ const STMT = {
     const bodies = [cBody(n.then), ...n.elifs.map((e) => cBody(e.body))];
     const els = n.els ? cBody(n.els) : null;
     const l = n.l;
+    const parts = [...bodies, els];
+    const enter = (f, label) => parts.find((p) => p && p.labels && p.labels.has(label)).enter(f, label);
     if (conds.length === 1) {
       const C = conds[0], T = bodies[0];
-      if (els) return (f) => { rt.line = l; return toBool(C(f)) ? T(f) : els(f); };
-      return (f) => { rt.line = l; if (toBool(C(f))) return T(f); };
+      if (els) return exposeLabels((f) => { rt.line = l; return toBool(C(f)) ? T(f) : els(f); }, parts, enter);
+      return exposeLabels((f) => { rt.line = l; if (toBool(C(f))) return T(f); }, parts, enter);
     }
-    return (f) => {
+    return exposeLabels((f) => {
       rt.line = l;
       for (let i = 0; i < conds.length; i++) if (toBool(conds[i](f))) return bodies[i](f);
       if (els) return els(f);
-    };
+    }, parts, enter);
   },
   While(n) {
     const C = cExpr(n.c), B = cBody(n.body), l = n.l;
@@ -179,14 +230,15 @@ const STMT = {
   },
   Switch(n) {
     const E = cExpr(n.e);
-    const flat = [];
+    const flat = [], flatNodes = [];
     const starts = [];
     let defIdx = -1;
     for (const c of n.cases) {
       starts.push({ T: c.test ? cExpr(c.test) : null, at: flat.length });
       if (!c.test) defIdx = starts.length - 1;
-      for (const s of c.body) { const cs = cStmt(s); if (cs) flat.push(cs); }
+      for (const s of c.body) { const cs = cStmt(s); if (cs) { flat.push(cs); flatNodes.push(s); } }
     }
+    const targets = gotoTargets(flat, flatNodes); // gotos between labels inside the switch
     const l = n.l;
     return (f) => {
       rt.line = l;
@@ -195,7 +247,11 @@ const STMT = {
       for (let i = 0; i < starts.length; i++) { const s = starts[i]; if (s.T && looseEq(v, s.T(f))) { start = s.at; break; } }
       if (start < 0) { if (defIdx < 0) return; start = starts[defIdx].at; }
       for (let i = start; i < flat.length; i++) {
-        const r = flat[i](f);
+        let r = flat[i](f);
+        while (r !== undefined && r.t === GOTO && targets && targets.has(r.label)) {
+          i = targets.get(r.label);
+          r = flatNodes[i].k === 'Label' ? undefined : flat[i].enter(f, r.label);
+        }
         if (r !== undefined) {
           if (r.t === 1 || r.t === 2) { if (r.n > 1) return r.t === 1 ? mkBreak(r.n - 1) : mkCont(r.n - 1); return; }
           return r;
@@ -226,10 +282,18 @@ const STMT = {
     const B = cBody(n.body);
     const catches = n.catches.map((c) => ({ types: c.types.map((t) => t.toLowerCase()), v: c.v, B: cBody(c.body) }));
     const F = n.fin ? cBody(n.fin) : null;
-    return (f) => {
+    // label: entering the try body (or a catch body, see below) at a goto label
+    const run = (f, label) => {
       let res;
       try {
-        res = B(f);
+        if (label !== undefined && catches.some((c) => c.B.labels && c.B.labels.has(label))) {
+          const c = catches.find((x) => x.B.labels && x.B.labels.has(label));
+          if (!F) return c.B.enter(f, label);
+          try { res = c.B.enter(f, label); }
+          finally { const fr = F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+          return res;
+        }
+        res = label === undefined ? B(f) : B.enter(f, label);
       } catch (e) {
         const sig = toThrowSig(e);
         if (!sig) throw e;
@@ -255,7 +319,10 @@ const STMT = {
       if (F) { const fr = F(f); if (fr !== undefined) return fr; }
       return res;
     };
+    return exposeLabels((f) => run(f, undefined), [B, ...catches.map((c) => c.B)], run);
   },
+  Label() { return () => undefined; },
+  Goto(n) { const sig = { t: GOTO, label: n.label }; return () => sig; },
   Global(n) {
     const names = n.names.map((x) => (typeof x === 'string' ? x : cExpr(x.e)));
     return (f) => {

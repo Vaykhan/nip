@@ -697,15 +697,17 @@ function compileNamedCall(n) {
     };
   }
   const A = compileArgs(n.args);
-  let cached = null;
+  // the resolved function is cached per call site; rt.epoch changes on every run, since compiled
+  // code (includes, eval) is reused across runs but function tables are not
+  let cached = null, cachedEpoch = -1;
   return (f) => {
     let fn = cached;
-    if (fn === null) {
+    if (cachedEpoch !== rt.epoch) {
       fn = rt.fns.get(lname);
       if (fn === undefined && lfb) fn = rt.fns.get(lfb);
       if (fn === undefined) fn = lazyFn(lfb || lname);
       if (fn === undefined) { const sp = FRAME_FUNCS[lfb || lname]; if (sp) return sp(f, A(f, null)); throwError('Error', `Call to undefined function ${fb || name}()`); }
-      cached = fn;
+      cached = fn; cachedEpoch = rt.epoch;
     }
     const args = A(f, fn);
     if (fn.native) return callNative(fn, args);

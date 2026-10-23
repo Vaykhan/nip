@@ -19,6 +19,9 @@ const BIN_BP = {
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '.=', '%=', '**=', '&=', '|=', '^=', '<<=', '>>=', '??=']);
 const RESERVED_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'callable', 'iterable', 'object', 'mixed', 'void', 'null', 'never', 'false', 'true', 'self', 'parent', 'static']);
 const MAGIC = new Set(['__line__', '__file__', '__dir__', '__function__', '__class__', '__method__', '__namespace__', '__trait__']);
+// keywords that can't be goto labels where a statement starts
+const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare']);
+
 export const LVAL_KINDS = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'List']);
 
 export class Parser {
@@ -125,7 +128,8 @@ export class Parser {
     if (t.t === 'id') {
       const kw = t.v.toLowerCase();
       const nx = this.peek();
-      // label for goto: "name:" (unsupported, skip)
+      // goto label: "name:" at the start of a statement
+      if (nx.t === 'op' && nx.v === ':' && !LABEL_RESERVED.has(kw)) { this.p += 2; return { k: 'Label', name: t.v, l }; }
       switch (kw) {
         case 'echo': {
           this.p++;
@@ -331,7 +335,12 @@ export class Parser {
           this.p = this.toks.length - 1;
           return null;
         }
-        case 'goto': this.error("'goto' is not supported");
+        case 'goto': {
+          this.p++;
+          const label = this.ident();
+          this.semi();
+          return { k: 'Goto', label, l };
+        }
       }
     }
     const e = this.parseExpr();
@@ -640,7 +649,7 @@ export class Parser {
       if (!it) return null;
       let v = it.v;
       if (v.k === 'Arr') v = this.toList(v);
-      return { key: it.key, v, byRef: it.byRef };
+      return { key: it.key, v, byRef: it.byRef, spread: it.spread };
     });
     return { k: 'List', items, l: arr.l };
   }

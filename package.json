@@ -1,5 +1,5 @@
 {
-  "name": "nip",
+  "name": "@vaykhan/nip",
   "version": "0.1.0",
   "description": "NIP (Nip is php): a PHP 8.3 interpreter written in pure JavaScript for Node.js",
   "keywords": [
@@ -8,6 +8,10 @@
     "php8",
     "runtime"
   ],
+  "homepage": "https://github.com/Vaykhan/nip#readme",
+  "bugs": {
+    "url": "https://github.com/Vaykhan/nip/issues"
+  },
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
@@ -30,6 +34,10 @@
   ],
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "node scripts/build.js",

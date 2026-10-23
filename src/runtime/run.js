@@ -7,7 +7,7 @@ import { utf8Encode } from '../utf8.js';
 import { Frame } from '../compiler/common.js';
 import { rt } from './state.js';
 import { toThrowSig, writeErr } from './errors.js';
-import { callNative } from './functions.js';
+import { callNative, NativeFrame } from './functions.js';
 import { callValue } from './callables.js';
 import { gcShutdown } from './gc.js';
 import { compileSource, runProgram } from './program.js';
@@ -45,10 +45,19 @@ function handleTopLevel(e) {
   throw e;
 }
 
+// disable_functions (startup-only ini): listed builtins behave as if they didn't exist
+function disableFunctions(list) {
+  rt.disabledFns = null;
+  if (!list) return;
+  rt.disabledFns = new Set(String(list).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean));
+  for (const name of rt.disabledFns) rt.fns.delete(name);
+}
+
 export function runScript(code, file, argv, opts = {}) {
   boot();
   resetRuntime();
   if (opts.ini) for (const [k, v] of Object.entries(opts.ini)) { if (!(k in INI_DEFAULTS)) rt.ini.set(k, v); callNative(rt.fns.get('ini_set'), [k, v]); }
+  disableFunctions(rt.ini.get('disable_functions'));
   if (opts.capture) rt.capture = [];
   try { rt.ttyOut = !opts.capture && tty.isatty(1); } catch (e) { rt.ttyOut = false; }
   const args = PHPArray.from(argv.map((a) => utf8Encode(a)));
@@ -79,7 +88,16 @@ export function runScript(code, file, argv, opts = {}) {
   try {
     gcShutdown();
   } catch (e) { exitCode = handleTopLevel(e); }
-  while (rt.obStack.length) { const ob = rt.obStack.pop(); obEmit(obApply(ob, ob.buf, 8)); }
+  // flush remaining output buffers; a callback that throws loses its buffer. An exception handled
+  // by a user exception handler at this point doesn't change the exit status (as in PHP).
+  while (rt.obStack.length) {
+    const ob = rt.obStack.pop();
+    const internal = new NativeFrame({ name: '', isMethod: false }, []); internal.hidden = true;
+    rt.stack.push(internal);
+    try { obEmit(obApply(ob, ob.buf, 8)); }
+    catch (e) { const handled = rt.exceptionHandlers.length > 0 && toThrowSig(e); const code = handleTopLevel(e); if (!handled) exitCode = code; }
+    finally { rt.stack.pop(); }
+  }
   rt.flush();
   const out = rt.capture ? rt.capture.join('') : null;
   rt.capture = null;

@@ -8,7 +8,8 @@ node bin/nip.js -l script.php             # syntax check
 node bin/nip.js -d precision=17 file.php  # set ini values
 ```
 
-Once installed as a package (`npm install github:Vaykhan/nip`), the command is `nip`.
+Installed as a package (`npm install -g @vaykhan/nip`, or `npm install github:Vaykhan/nip` for the latest
+code), the command is `nip`.
 
 NIP is written in pure JavaScript, with no PHP binary, WebAssembly or dependencies. It checks
 its behaviour against the real `php` binary and aims for identical output, including
@@ -19,13 +20,13 @@ plan to get there.
 ## Embedding
 
 ```js
-import { run, runFile } from 'nip';
+import { run, runFile } from '@vaykhan/nip';
 
 const { output, exitCode } = run('<?php echo "hi";');   // output is captured by default
 runFile('script.php', { argv: ['script.php', 'x'] });   // output goes to stdout
 ```
 
-From CommonJS, `require('nip')` loads the single-file build (`dist/nip.cjs`, created by
+From CommonJS, `require('@vaykhan/nip')` loads the single-file build (`dist/nip.cjs`, created by
 `npm run build` or on install). Options: `file`, `argv`, `capture`, `ini` (an object of ini settings).
 
 ## What's supported

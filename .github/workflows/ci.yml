@@ -43,6 +43,22 @@ jobs:
           name: nip.cjs
           path: dist/nip.cjs
 
+  fuzz:
+    # a short, fixed-seed run, so failures are reproducible; longer runs: scripts/fuzz.js locally
+    name: Fuzz (fixed seed)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: node scripts/fuzz.js --iterations 3000 --seed 1
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: fuzz-reproducers
+          path: fuzz-out/
+
   php-diff:
     # Compares directly with the system PHP (8.3.6 on the ubuntu-24.04 image).
     name: Differential test vs php 8.3

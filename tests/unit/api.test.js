@@ -39,3 +39,23 @@ test('runFile() runs a script from disk with capture', () => {
     assert.deepEqual(runFile(path.join(dir, 'main.php'), { capture: true }), { output: '42', exitCode: 0 });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runFile() recompiles an included file that changed since the last run', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nip-unit-'));
+  try {
+    const lib = path.join(dir, 'lib.php'), main = path.join(dir, 'main.php');
+    fs.writeFileSync(lib, '<?php function v() { return 1; }');
+    fs.writeFileSync(main, '<?php require __DIR__ . "/lib.php"; echo v();');
+    assert.equal(runFile(main, { capture: true }).output, '1');
+    fs.writeFileSync(lib, '<?php function v() { return 22; }');
+    assert.equal(runFile(main, { capture: true }).output, '22');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('disable_functions removes builtins for that run only', () => {
+  const code = '<?php var_dump(function_exists("strlen"), function_exists("date_create")); try { strlen("x"); } catch (Error $e) { echo $e->getMessage(), "\n"; }';
+  assert.equal(run(code, { ini: { disable_functions: 'strlen,date_create' } }).output,
+    'bool(false)\nbool(false)\nCall to undefined function strlen()\n');
+  assert.equal(run('<?php echo strlen("abc");').output, '3');
+});
+

@@ -27,7 +27,7 @@ function loadLazy(src) {
   return true;
 }
 export function lazyClass(ln) { const src = lazyClassSrc.get(ln); if (src && loadLazy(src)) return rt.classes.get(ln) || null; return null; }
-export function lazyFn(ln) { const src = lazyFnSrc.get(ln); if (src && loadLazy(src)) return rt.fns.get(ln); return undefined; }
+export function lazyFn(ln) { if (rt.disabledFns && rt.disabledFns.has(ln)) return undefined; const src = lazyFnSrc.get(ln); if (src && loadLazy(src)) return rt.fns.get(ln); return undefined; }
 export function boot() {
   if (booted) return;
   booted = true;
@@ -53,6 +53,7 @@ export function boot() {
   snapshot = { fns: new Map(rt.fns), classes: new Map(rt.classes), consts: new Map(rt.consts) };
 }
 export function resetRuntime() {
+  rt.epoch++;
   rt.fns = new Map(snapshot.fns); rt.classes = new Map(snapshot.classes); rt.consts = new Map(snapshot.consts);
   rt.userFnNames = new Set(); rt.globals = Object.create(null); rt.stack = []; rt.depth = 0; rt.silence = 0;
   rt.errorHandlers = []; rt.exceptionHandlers = []; rt.shutdownFns = []; rt.autoloaders = []; rt.included = new Set();
