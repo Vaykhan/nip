@@ -404,9 +404,12 @@ function propOrder(cls) {
     out.push({ name, info, isStatic });
   };
   if (cls.decl) {
-    for (const p of cls.decl.props) add(p.name, p.static);
+    // promoted constructor parameters count as declared where the constructor is
+    const own = cls.decl.props.map((p) => [p.seq, p.name, p.static]);
     const ctor = cls.decl.methods.find((m) => lc(m.fn.name) === '__construct');
-    if (ctor) for (const p of ctor.fn.params) if (p.promote) add(p.name, false);
+    if (ctor) for (const p of ctor.fn.params) if (p.promote) own.push([ctor.seq, p.name, false]);
+    own.sort((a, b) => a[0] - b[0]);
+    for (const [, name, isStatic] of own) add(name, isStatic);
   }
   if (cls.parent) for (const p of propOrder(cls.parent)) add(p.name, p.isStatic);
   for (const [name] of cls.props) add(name, false);
@@ -422,9 +425,8 @@ function constOrder(cls) {
     seen.add(name); out.push([name, e]);
   };
   if (cls.decl) {
-    const own = [...cls.decl.consts.map((c) => [c.l, 0, c.name]), ...cls.decl.cases.map((c) => [c.l, 1, c.name])];
-    own.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    for (const [, , name] of own) add(name);
+    const own = [...cls.decl.consts, ...cls.decl.cases].sort((a, b) => a.seq - b.seq);
+    for (const c of own) add(c.name);
   }
   if (cls.parent) for (const [name] of constOrder(cls.parent)) add(name);
   for (const [name] of cls.consts) add(name);

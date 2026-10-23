@@ -24,6 +24,14 @@ const CASES = [
   ['goto a; foreach ([1] as $v) { a: }', "'goto' into loop or switch statement is disallowed"],
   ['goto a; try { } finally { a: }', 'jump into a finally block is disallowed'],
   ['try { } finally { goto a; } a: ;', 'jump out of a finally block is disallowed'],
+  ['function f(self $x) {}', 'Cannot use "self" when no class scope is active'],
+  ['function f(): static {}', 'Cannot use "static" when no class scope is active'],
+  ['echo 1; function f() { return new self; }', 'Cannot use "self" when no class scope is active'],
+  ['class A { function m(parent $x) {} }', 'Cannot use "parent" when current class scope has no parent'],
+  ['class P { function m() {} } class C extends P { #[\\Override] function n() {} }', 'C::n() has #[\\Override] attribute, but no matching parent method exists'],
+  ['#[Attribute] function f() {}', 'Attribute "Attribute" cannot target function (allowed targets: class)'],
+  ['#[Attribute] #[Attribute] class A {}', 'Attribute "Attribute" must not be repeated'],
+  ['class C { #[Override] public $p; }', 'Attribute "Override" cannot target property (allowed targets: method)'],
 ];
 
 for (const [code, msg] of CASES) {
@@ -39,6 +47,8 @@ const VALID = [
   '$a = []; foreach ([1] as $a[]); [$a[]] = [1]; $r = &$a[];',
   'function f(&$x) {} $a = []; f($a[]); sort($a);',
   'goto a; if (0) { a: } goto b; try { b: } catch (Exception $e) {} while (0) { goto c; c: }',
+  '$f = function (self $x): static {}; class A { function m() { return fn(self $s) => parent::class ?? 1; } } trait T { function t(parent $p) {} }',
+  'class P { function m() {} } class C extends P { #[\\Override] function m() {} } interface I { function i(); } class D implements I { #[\\Override] function i() {} }',
 ];
 for (const code of VALID) {
   test(`compiles: ${code}`, () => {

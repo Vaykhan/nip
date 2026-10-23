@@ -16,14 +16,30 @@ export function checkProgram(ast) {
   // goto: labels and gotos of the current function, and the loops/switches/finally blocks
   // enclosing the statement being visited
   let scope = newScope(), path = [];
+  const methods = new WeakSet(); // function nodes that are methods (attribute target "method")
+  // the function being checked: null at the top level (which may run inside a class via
+  // include), else { cls: enclosing ClassDecl or null, closure }
+  let fnCtx = null, curClass = null;
 
   function visit(n, ctx) {
     if (!n || typeof n !== 'object' || seen.has(n)) return;
     if (Array.isArray(n)) { for (const x of n) visit(x, ctx); return; }
     seen.add(n);
     if (!n.k && Array.isArray(n.params) && Array.isArray(n.body)) { visitFunction(n); return; }
+    if (typeof n.cls === 'string' && CLASS_REF_NODES.has(n.k)) checkClassRef(n.cls, n, fnCtx);
     switch (n.k) {
       case 'Lit': return;
+      case 'ClassDecl': {
+        checkAttrs(n.attrs, T_CLASS);
+        for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD); methods.add(m.fn); }
+        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
+        for (const c of n.consts) checkAttrs(c.attrs, T_CLASS_CONSTANT);
+        for (const c of n.cases) checkAttrs(c.attrs, T_CLASS_CONSTANT);
+        const outer = curClass;
+        curClass = n;
+        try { for (const key in n) if (key !== 'l') visit(n[key], READ); } finally { curClass = outer; }
+        return;
+      }
       case 'Index':
         if (n.i === null) {
           if (n.o && n.o.k === 'Var' && n.o.name === 'GLOBALS') fail('Cannot append to $GLOBALS', n);
@@ -94,14 +110,51 @@ export function checkProgram(ast) {
     });
   }
 
+  // the attribute classes of the engine are validated at compile time; user ones only by
+  // ReflectionAttribute::newInstance()
+  function checkAttrs(attrs, target) {
+    if (!attrs) return;
+    const seen = new Set();
+    for (const a of attrs) {
+      const ln = (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase();
+      const known = ENGINE_ATTRS[ln];
+      if (!known) continue;
+      if (!(known.flags & target)) {
+        const allowed = TARGET_NAMES.filter(([b]) => known.flags & b).map(([, t]) => t).join(', ');
+        fail(`Attribute "${known.name}" cannot target ${TARGET_NAMES.find(([b]) => b === target)[1]} (allowed targets: ${allowed})`, a);
+      }
+      if (seen.has(ln)) fail(`Attribute "${known.name}" must not be repeated`, a);
+      seen.add(ln);
+    }
+  }
+  // self/static/parent need a class: a compile error in named functions outside classes
+  // (closures may be bound to one later)
+  function checkClassRef(name, n, ctx) {
+    const ln = name.toLowerCase();
+    if (!ctx || ctx.closure || (ln !== 'self' && ln !== 'static' && ln !== 'parent')) return;
+    if (!ctx.cls) fail(`Cannot use "${ln}" when no class scope is active`, n);
+    if (ln === 'parent' && ctx.cls && ctx.cls.kind !== 'trait' && !ctx.cls.parent) fail('Cannot use "parent" when current class scope has no parent', n);
+  }
+  function checkType(t, n, ctx) {
+    for (const a of t.alts) {
+      if (typeof a === 'string') checkClassRef(a, n, ctx);
+      else for (const x of a.inter) checkClassRef(x, n, ctx);
+    }
+  }
   function within(kind, fn) { path.push({ kind }); try { fn(); } finally { path.pop(); } }
   function visitFunction(fn) {
-    const outer = scope, outerPath = path;
+    const outer = scope, outerPath = path, outerCtx = fnCtx;
+    const closure = fn.name === '{closure}';
+    fnCtx = { cls: methods.has(fn) ? curClass : closure && fnCtx ? fnCtx.cls : closure ? curClass : null, closure };
+    for (const p of fn.params) if (p.type) checkType(p.type, fn, fnCtx);
+    if (fn.ret) checkType(fn.ret, fn, fnCtx);
     scope = newScope(); path = [];
     scope.byRef = !!fn.byRef;
+    if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
+    for (const p of fn.params) checkAttrs(p.attrs, T_PARAMETER);
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
     checkGotos(scope, !fn.params.length && !fn.isGen ? fn.body : null);
-    scope = outer; path = outerPath;
+    scope = outer; path = outerPath; fnCtx = outerCtx;
   }
   // body: the statements, when a leading goto would be the function's first opcode
   function checkGotos(sc, body) {
@@ -133,3 +186,14 @@ export function checkProgram(ast) {
 const NO_OPCODES = new Set(['Label', 'FuncDecl']);
 
 function newScope() { return { labels: new Map(), gotos: [] }; }
+
+const CLASS_REF_NODES = new Set(['CConst', 'ClassName', 'New', 'SCall', 'SProp', 'Instanceof']);
+const T_CLASS = 1, T_FUNCTION = 2, T_METHOD = 4, T_PROPERTY = 8, T_CLASS_CONSTANT = 16, T_PARAMETER = 32;
+const TARGET_NAMES = [[T_CLASS, 'class'], [T_FUNCTION, 'function'], [T_METHOD, 'method'], [T_PROPERTY, 'property'], [T_CLASS_CONSTANT, 'class constant'], [T_PARAMETER, 'parameter']];
+const ENGINE_ATTRS = {
+  attribute: { name: 'Attribute', flags: T_CLASS },
+  override: { name: 'Override', flags: T_METHOD },
+  allowdynamicproperties: { name: 'AllowDynamicProperties', flags: T_CLASS },
+  returntypewillchange: { name: 'ReturnTypeWillChange', flags: T_METHOD },
+  sensitiveparameter: { name: 'SensitiveParameter', flags: T_PARAMETER },
+};

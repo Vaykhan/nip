@@ -571,7 +571,7 @@ export class Parser {
       const name = this.ident();
       let e = null; if (this.accept('=')) e = this.parseExpr();
       this.semi();
-      cd.cases.push({ name, e, l, attrs, doc });
+      cd.cases.push({ name, e, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
     const mods = { vis: null, static: false, abstract: false, final: false, readonly: cd.flags.readonly, var: false };
@@ -591,7 +591,7 @@ export class Parser {
       do {
         const doc = this.takeDoc(this.tok);
         const name = this.ident(); this.expect('=');
-        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l, type, attrs, doc });
+        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l, type, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
       } while (this.accept(','));
       this.semi();
       return;
@@ -602,7 +602,7 @@ export class Parser {
       const doc = this.takeDoc(nameTok);
       const fn = this.parseFunctionRest(nameTok.v, byRef, l, { cls: cd.name });
       fn.cls = cd.name; fn.attrs = attrs; fn.doc = doc;
-      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', final: mods.final, l });
+      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', final: mods.final, l, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
     // property
@@ -613,7 +613,7 @@ export class Parser {
       const doc = this.takeDoc(v);
       let def; let hasDef = false;
       if (this.accept('=')) { def = this.parseExpr(); hasDef = true; }
-      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', type, readonly: mods.readonly, l, attrs, doc });
+      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', type, readonly: mods.readonly, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
     } while (this.accept(','));
     if (this.isOp('{')) this.error('Property hooks are not supported');
     this.semi();

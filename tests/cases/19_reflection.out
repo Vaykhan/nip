@@ -1,0 +1,23 @@
+noreply@example.com -> a@b.c
+mail to a@b.c
+GET /users => UserController::index
+GET|HEAD /users/{id} => UserController::show
+GET /u/{id} => UserController::show
+user 7
+balance private=true promoted=true type=int value=5
+after set: 99
+initialized: false, attrs: Inject
+props: private $balance protected $owner public static $count public $logger
+statics: {"count":0}
+#0 $a: ReflectionUnionType string|int nullable=false optional=false variadic=false
+#1 $b: ReflectionNamedType ?Account nullable=true optional=true variadic=false
+#2 $rest: ReflectionUnionType Account|array nullable=false optional=true variadic=true
+returns: ?iterable
+backed: string, cases: Hearts=H,Spades=S
+constants: Hearts,Spades,Wild, final: true
+{closure} params=1 result=12 vars={"factor":3,"calls":1}
+ReflectionException: Class "Nope" does not exist
+ReflectionException: Method Mailer::nope() does not exist
+ReflectionException: Property UserController::$x does not exist
+Trying to invoke non static method Container::get() without an object
+[exit 0]

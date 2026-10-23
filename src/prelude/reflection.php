@@ -8,12 +8,12 @@ class ReflectionException extends Exception {
 class Reflection {
   public static function getModifierNames(int $modifiers): array {
     $names = [];
-    if ($modifiers & (64 | 16)) $names[] = 'abstract';
+    if ($modifiers & 64) $names[] = 'abstract';
     if ($modifiers & 32) $names[] = 'final';
     if ($modifiers & 1) $names[] = 'public';
     elseif ($modifiers & 4) $names[] = 'private';
     elseif ($modifiers & 2) $names[] = 'protected';
-    if ($modifiers & 16 && !($modifiers & 64)) $names[] = 'static';
+    if ($modifiers & 16) $names[] = 'static';
     if ($modifiers & (128 | 65536)) $names[] = 'readonly';
     return $names;
   }

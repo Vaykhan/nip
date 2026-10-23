@@ -6,7 +6,7 @@ import { isNum, looseEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from './state.js';
-import { initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
+import { deprecated, initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr, valueName } from './functions.js';
 import { callValue } from './callables.js';
 import { gcCheck, gcCollect } from './gc.js';
@@ -52,6 +52,8 @@ export function nipProps(o) {
   return r instanceof PHPArray ? r : new PHPArray();
 }
 
+// whether an attribute list has the attribute (a lowercase, fully qualified name without leading \)
+export function hasAttr(attrs, lname) { return !!attrs && attrs.some((a) => (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase() === lname); }
 export function lookupClass(name, quiet) {
   if (name instanceof PHPClass) return name;
   let n = name[0] === '\\' ? name.slice(1) : name;
@@ -173,6 +175,13 @@ export function declareClass(decl, f) {
       cls.methods = own;
     }
     if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
+    cls.allowDynamic = (!!cls.parent && cls.parent.allowDynamic) || hasAttr(decl.attrs, 'allowdynamicproperties'); // inherited
+    cls.noDynamic = cls.readonly;
+    for (const m of cls.methods.values()) {
+      if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto) {
+        throw new FatalSig(`${cls.name}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
+      }
+    }
     cls.hasDestructor = cls.methods.has('__destruct');
     if (!decl.anon) { rt.classes.set(lname, cls); decl.declared = true; }
   } finally { rt.line = savedLine; rt.file = savedFile; }
@@ -484,8 +493,7 @@ export function writeProp(obj, name, v, f) {
   } else if (!obj.props.has(name)) {
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
-    if (obj.cls.isEnum) throwError('Error', `Cannot create dynamic property ${obj.cls.name}::$${name}`);
-    if (obj.cls.noDynamic) throwError('Error', `Cannot create dynamic property ${obj.cls.name}::$${name}`);
+    newDynamicProp(obj, name);
   }
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
@@ -506,8 +514,16 @@ function resolvePropKey(obj, name, f, forWrite) {
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
-  const [key] = resolvePropKey(obj, name, f, true);
+  const [key, info] = resolvePropKey(obj, name, f, true);
+  if (!info && !obj.props.has(key)) newDynamicProp(obj, name);
   obj.props.set(key, ref);
+}
+// PHP 8.2: creating an undeclared property is deprecated unless the class (or a parent) has
+// #[AllowDynamicProperties]; readonly classes and enums don't allow it at all
+function newDynamicProp(obj, name) {
+  const c = obj.cls;
+  if (c.isEnum || c.noDynamic) throwError('Error', `Cannot create dynamic property ${c.name}::$${name}`);
+  if (!c.allowDynamic && rt.file !== PRELUDE_FILE) deprecated(`Creation of dynamic property ${c.anon ? displayName(c) : c.name}::$${name} is deprecated`);
 }
 export function propRef(obj, name, f) {
   const [key, info] = resolvePropKey(obj, name, f, true);
@@ -519,6 +535,7 @@ export function propRef(obj, name, f) {
     const rr = rt.lastRetRef; rt.lastRetRef = null;
     if (r !== undefined) { if (rr !== null && rr !== NOREF) return rr; notice(`Indirect modification of overloaded property ${obj.cls.name}::$${name} has no effect`); return new Ref(r); }
   }
+  if (slot === undefined && !info) newDynamicProp(obj, name);
   const r = new Ref(slot === undefined ? null : slot);
   obj.props.set(key, r);
   return r;
@@ -548,6 +565,7 @@ export function propArr(obj, name, f) {
   if (v === null || v === undefined) {
     if (info && info.type && v === undefined && !info.type.alts.includes('array') && !info.type.alts.includes('mixed') && !info.type.alts.includes('iterable')) throwError('Error', `Typed property ${obj.cls.name}::$${name} must not be accessed before initialization`);
     const na = new PHPArray();
+    if (slot === undefined && !info) newDynamicProp(obj, name);
     if (isRef) slot.v = na; else obj.props.set(key, na);
     return na;
   }

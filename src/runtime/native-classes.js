@@ -28,7 +28,7 @@ function nativeClass(name, opts = {}) {
 function argv0(args, i) { const v = args[i]; return v instanceof Ref ? v.v : (v === undefined ? undefined : v); }
 
 export function bootNativeClasses() {
-  nativeClass('stdClass');
+  nativeClass('stdClass').allowDynamic = true;
   closureClass = nativeClass('Closure', {
     final: true,
     methods: {
@@ -60,7 +60,7 @@ export function bootNativeClasses() {
       },
     },
   });
-  nativeClass('__PHP_Incomplete_Class');
+  nativeClass('__PHP_Incomplete_Class').allowDynamic = true;
   nativeClass('WeakReference', {
     final: true,
     methods: {
