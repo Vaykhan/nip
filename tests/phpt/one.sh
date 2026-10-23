@@ -1,6 +1,6 @@
 #!/bin/bash
 # show a phpt FILE section and both outputs side by side
-NIP="$(cd "$(dirname "$0")/../.." && pwd)/nip.js"
+NIP="$(cd "$(dirname "$0")/../.." && pwd)/bin/nip.js"
 f=$(find ${PHPSRC:-/tmp/php-src} -path "*$1" | head -1)
 d=$(mktemp -d); sed -n '/^--FILE--$/,/^--[A-Z]*--$/p' "$f" | sed '1d;$d' > $d/t.php
 ini=$(sed -n '/^--INI--$/,/^--[A-Z]*--$/p' "$f" | sed '1d;$d' | grep -v '^;' | sed 's/^/-d /' | tr '\n' ' ')

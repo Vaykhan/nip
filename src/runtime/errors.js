@@ -1,0 +1,124 @@
+// Raising warnings/notices/deprecations, throwing PHP exceptions, stack traces.
+
+import { FatalSig, Flt, fmtRepr, isInt, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
+import { toInt } from '../convert.js';
+import {
+  E_COMPILE_WARNING, E_CORE_WARNING, E_DEPRECATED, E_NOTICE, E_PARSE, E_STRICT, E_USER_DEPRECATED,
+  E_USER_NOTICE, E_USER_WARNING, E_WARNING, rt, writeFd
+} from './state.js';
+import { callValue } from './callables.js';
+import { initProps, lookupClass } from './classes.js';
+
+function errorTypeName(type) {
+  switch (type) {
+    case E_WARNING: case E_USER_WARNING: case E_CORE_WARNING: case E_COMPILE_WARNING: return 'Warning';
+    case E_NOTICE: case E_USER_NOTICE: return 'Notice';
+    case E_DEPRECATED: case E_USER_DEPRECATED: return 'Deprecated';
+    case E_STRICT: return 'Strict Standards';
+    case E_PARSE: return 'Parse error';
+    default: return 'Fatal error';
+  }
+}
+
+export function writeErr(msg) {
+  rt.flush();
+  if (rt.displayErrors === 'stdout') rt.echo('\n' + msg + '\n');
+  else if (rt.capture) rt.capture.push('\nPHP ' + msg + '\n');
+  else writeFd(2, Buffer.from('PHP ' + msg.replace(/^(\w[\w ]*?): /, '$1:  ') + '\n', 'latin1'));
+}
+
+export function raise(type, msg) {
+  rt.lastError = { type, message: msg, file: rt.file, line: rt.line };
+  // user error handler
+  if (rt.errorHandlers.length && !rt.inHandler) {
+    const h = rt.errorHandlers[rt.errorHandlers.length - 1];
+    if (h.handler !== null && (h.mask & type)) {
+      rt.inHandler = true;
+      let r;
+      try { r = callValue(h.handler, [type, msg, rt.file, rt.line]); }
+      finally { rt.inHandler = false; }
+      if (r !== false) return;
+    }
+  }
+  if (rt.silence) return;
+  if (!(rt.errorReporting & type)) return;
+  if (rt.displayErrors === '0' || rt.displayErrors === 'off') return;
+  writeErr(`${errorTypeName(type)}: ${msg} in ${rt.file} on line ${rt.line}`);
+}
+export function warn(msg) { raise(E_WARNING, msg); }
+export function notice(msg) { raise(E_NOTICE, msg); }
+export function deprecated(msg) { raise(E_DEPRECATED, msg); }
+
+export function throwError(clsName, msg, code) {
+  const cls = rt.classes.get(clsName.toLowerCase());
+  if (!cls) throw new FatalSig(msg);
+  const obj = new PHPObject(cls);
+  initProps(obj);
+  initThrowable(obj);
+  obj.props.set('message', msg);
+  if (code !== undefined) obj.props.set('code', code);
+  throw new ThrowSig(obj);
+}
+export function makeException(clsName, msg) {
+  const cls = lookupClass(clsName);
+  const obj = new PHPObject(cls);
+  initProps(obj);
+  initThrowable(obj);
+  obj.props.set('message', msg);
+  return obj;
+}
+
+export function toThrowSig(e) {
+  if (e instanceof ThrowSig) return e;
+  if (e instanceof RangeError && /call stack/i.test(e.message)) {
+    try { throwError('Error', 'Maximum call stack size reached. Infinite recursion?'); } catch (s) { return s; }
+  }
+  return null;
+}
+
+// trace capture
+export function captureTrace(withArgs) {
+  const tr = new PHPArray();
+  const st = rt.stack;
+  for (let i = st.length - 1; i >= 0; i--) {
+    const s = st[i];
+    const fr = new PHPArray();
+    const calledFromNative = i > 0 && st[i - 1].native === true;
+    if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }
+    fr.set('function', s.fn.isClosure ? '{closure}' : s.fn.name);
+    if (s.fn.isMethod && (s.cls || s.this)) { fr.set('class', (s.fn.cls || s.cls || s.this.cls).name); fr.set('type', s.this ? '->' : '::'); }
+    if (withArgs !== false) {
+      const a = s.args || [];
+      fr.set('args', PHPArray.from(Array.from(a, (x) => (x instanceof Ref ? x.v : x))));
+    }
+    tr.push(fr);
+  }
+  return tr;
+}
+export function initThrowable(obj) {
+  obj.props.set('file', rt.file);
+  obj.props.set('line', rt.line);
+  obj.trace = captureTrace(iniBool('zend.exception_ignore_args', true) ? false : true);
+}
+function iniBool(k, def) { const v = rt.ini.get(k); if (v === undefined) return def; return /^(1|on|true|yes)$/i.test(String(v)); }
+function traceArgStr(v) {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (isInt(v)) return String(v);
+  if (v instanceof Flt) return fmtRepr(v.v);
+  if (typeof v === 'string') { const max = toInt(rt.ini.get('zend.exception_string_param_max_len') ?? '0'); return "'" + (v.length > max ? v.slice(0, max) + '...' : v) + "'"; }
+  if (v instanceof PHPArray) return 'Array';
+  if (v instanceof PHPObject) return 'Object(' + v.cls.name + ')';
+  return 'Resource id #' + v.id;
+}
+export function traceAsString(trace) {
+  let s = '', i = 0;
+  for (const fr of trace.values()) {
+    const cls = fr.get('class'), type = fr.get('type');
+    const args = fr.get('args');
+    const a = args instanceof PHPArray ? args.values().map(traceArgStr).join(', ') : '';
+    const loc = fr.has('file') ? `${fr.get('file')}(${fr.get('line')})` : '[internal function]';
+    s += `#${i++} ${loc}: ${cls ? cls + type : ''}${fr.get('function')}(${a})\n`;
+  }
+  return s + `#${i} {main}`;
+}

@@ -1,0 +1,91 @@
+Hello World! Worlds World val val three prop deep
+single $name\n
+esc: 	|\|$|A|A|😀|[0m
+heredoc World
+  indented val
+nowdoc $name\n
+6 5 ABC Hello Hello Big World
+005 ababab cba x|x|12
+ell llo ell 2 3
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+heLLo 2
+1122c
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => 
+    [3] => c
+)
+Array
+(
+    [0] => a
+    [1] => b,c
+)
+Array
+(
+    [0] => a
+    [1] => b
+)
+1-2-3 12
+Array
+(
+    [0] => abcd
+    [1] => ef
+)
+a|    b|c    |00042|3.142|ff|FF|10|101|A|%|1.234568e+3|    3.1416|left      |3|#######pad|+5|-5
+hello world
+1,234,568 1,234,567.89 1.234.567,89 0.13
+The quick brown
+fox sat over
+the lazy dog
+A very
+long
+wooooooo
+ooooord.
+a<br />
+b &lt;a href=&#039;x&#039;&gt;T&amp;C&lt;/a&gt; bold text
+Hello-World foo_bar aBC Àbc
+-110 0 0 1 -1
+2 Hello 3 4 3 R163
+Hi ALL Hello everyone
+ab|cd| O\'Re\"il O'R 1\+1=2\?
+5d41402abc4b2a76b9719d911017c592 aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d 907060870 aGVsbG8= hello 616263
+a+b%26c%3Dd%2F%C3%A9 a%20b a b c a=1&b%5B0%5D=1&b%5B1%5D=2
+@example.com user /c ELLO
+Jello abX John Doe
+3 s is a test x
+string(4) "1.00"
+string(2) "12"
+string(5) " -2.3"
+string(1) "1"
+string(0) ""
+string(12) "0.3333333333"
+éllo HÉLLO -é- 2
+int(2)
+string(0) ""
+string(1) "x"
+string(1) "b"
+string(1) "c"
+string(6) "aXc  Y"
+string(32) "........42|42        |  1.230e-4"
+string(3) "3-x"
+string(1) "1"
+string(3) "0.3"
+string(7) "1.0E+25"
+string(1) "7"
+a,b,c,d
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+bool(false)
+[exit 0]

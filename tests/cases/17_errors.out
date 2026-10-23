@@ -1,0 +1,56 @@
+PHP Warning:  Undefined variable $undef1 in {dir}/17_errors.php on line 2
+PHP Warning:  Undefined array key 3 in {dir}/17_errors.php on line 3
+PHP Warning:  Undefined array key "x" in {dir}/17_errors.php on line 3
+PHP Warning:  Uninitialized string offset 10 in {dir}/17_errors.php on line 4
+PHP Warning:  Array to string conversion in {dir}/17_errors.php on line 5
+xArray
+PHP Warning:  Trying to access array offset on null in {dir}/17_errors.php on line 6
+PHP Warning:  Attempt to read property "p" on null in {dir}/17_errors.php on line 6
+PHP Warning:  Trying to access array offset on int in {dir}/17_errors.php on line 7
+13
+PHP Warning:  Undefined property: stdClass::$missing in {dir}/17_errors.php on line 9
+PHP Warning:  A non-numeric value encountered in {dir}/17_errors.php on line 10
+8
+1000 1000 PHP Warning:  A non-numeric value encountered in {dir}/17_errors.php on line 11
+0
+abd
+3
+PHP Warning:  No prop foo in {dir}/17_errors.php on line 14
+PHP Notice:  custom notice in {dir}/17_errors.php on line 16
+PHP Deprecated:  custom deprecated in {dir}/17_errors.php on line 17
+NULL
+---
+string(26) "Undefined variable $undef2"
+#0 {dir}/17_errors.php(24): thrower()
+#1 {dir}/17_errors.php(25): caller()
+#2 {dir}/17_errors.php(25): K->m()
+#3 {dir}/17_errors.php(26): K::s()
+#4 {main}
+6
+int(4)
+1,,,1.5,s
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+PHP Deprecated:  Implicit conversion from float 7.5 to int loses precision in {dir}/17_errors.php on line 31
+float(2)
+int(12)
+int(8)
+int(1)
+float(1.4142135623730951)
+int(-1)
+int(1)
+PHP Fatal error:  Uncaught LogicException: from function in {dir}/17_errors.php:23
+Stack trace:
+#0 {dir}/17_errors.php(24): thrower()
+#1 {dir}/17_errors.php(25): caller()
+#2 {dir}/17_errors.php(25): K->m()
+#3 {dir}/17_errors.php(32): K::s()
+#4 {main}
+  thrown in {dir}/17_errors.php on line 23
+[exit 255]

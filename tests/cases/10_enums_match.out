@@ -1,0 +1,44 @@
+H Hearts Red Clubs null
+4 Diamonds Spades Red
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+enum(Status::Active)
+enum(Suit::Clubs)
+Size M L none
+"Z" is not a valid backing value for enum Suit
+Spades
+{"s":"H","z":3}
+Array
+(
+    [0] => H
+    [1] => D
+    [2] => C
+    [3] => S
+)
+medium
+mid
+closure result
+string(6) "Active"
+string(1) "H"
+string(4) "Suit"
+152
+Cannot modify readonly property Point::$x
+100USD
+Cannot modify readonly property Money::$amount
+3.70
+love
+Array
+(
+    [H] => 1
+)
+int(0)
+object Status
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+[exit 0]
