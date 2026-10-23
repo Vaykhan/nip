@@ -4,7 +4,7 @@ import { Flt, fmtRepr, mkf, normKey, numFromText, PHPArray, PHPObject, Ref } fro
 import { toStr } from '../convert.js';
 import { rt } from '../runtime/state.js';
 import { throwError, warn } from '../runtime/errors.js';
-import { callMethodName, classConst, classExists, initProps, lookupClass } from '../runtime/classes.js';
+import { callMethodName, classConst, classExists, initProps, lookupClass, objectProps } from '../runtime/classes.js';
 import { def, S } from './core.js';
 import { JsonErr } from './json.js';
 import { closureClass } from '../runtime/native-classes.js';
@@ -46,7 +46,7 @@ function serializeVal(v, seen) {
       keys = r instanceof PHPArray ? r.values().map(toStr) : [];
     }
     const entries = [];
-    for (const [k, x] of v.props) {
+    for (const [k, x] of objectProps(v)) {
       let sk = k;
       const plain = k.charCodeAt(0) === 0 ? k.slice(k.indexOf('\0', 1) + 1) : k;
       if (keys && !keys.includes(plain)) continue;

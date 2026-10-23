@@ -9,7 +9,7 @@ import { cExpr } from '../compiler/expr.js';
 import { cStmts } from '../compiler/stmt.js';
 import { cStmtsG } from '../compiler/generator.js';
 import { rt } from './state.js';
-import { deprecated, throwError, warn } from './errors.js';
+import { deprecated, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { findMethod, isCallable } from './callables.js';
 import { gcAfterCall } from './gc.js';
 import { makeGenerator } from './generators.js';
@@ -76,6 +76,8 @@ function throwInCallee(fn, f, cls, msg) {
 function argCountError(fn, given, f) {
   const max = fn.params.some((p) => p.variadic) ? Infinity : fn.params.length;
   const word = fn.required === max ? 'exactly' : 'at least';
+  // prelude functions stand in for internal ones, which word the error differently
+  if (fn.file === PRELUDE_FILE) throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${word} ${fn.required} argument${fn.required === 1 ? '' : 's'}, ${given} given`);
   const top = rt.stack[rt.stack.length - 1];
   const where = top && top.native === true ? '' : ` in ${rt.file} on line ${rt.line}`;
   throwInCallee(fn, f, 'ArgumentCountError', `Too few arguments to function ${fnDisplayName(fn)}(), ${given} passed${where} and ${word} ${fn.required} expected`);
@@ -84,6 +86,10 @@ function argCountError(fn, given, f) {
 function bindParams(fn, f, args) {
   const ps = fn.params, np = ps.length, na = args.length;
   const named = args.named;
+  if (na > np && fn.file === PRELUDE_FILE && !(np && ps[np - 1].variadic)) {
+    // internal functions reject extra arguments
+    throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${fn.required === np ? 'exactly' : 'at most'} ${np} argument${np === 1 ? '' : 's'}, ${na} given`);
+  }
   if (fn.simple === true && na >= np && named === undefined) {
     const vars = f.vars;
     for (let i = 0; i < np; i++) {
@@ -145,12 +151,36 @@ function promoteParam(f, p, v) {
 }
 
 export const FAIL = { fail: true };
-export function typeStr(t) {
-  const one = (a) => (typeof a === 'string' ? a : '(' + a.inter.join('&') + ')');
-  if (t.alts.length === 1 && typeof t.alts[0] === 'object') return t.alts[0].inter.join('&') + (t.nullable ? '|null' : '');
-  const s = t.alts.map(one).join('|');
-  if (t.nullable) return t.alts.length === 1 && t.alts[0] !== 'mixed' ? '?' + s : (t.alts[0] === 'mixed' ? s : s + '|null');
-  return s;
+// Type as PHP prints it (zend_type_to_string): class types in declaration order, then builtin
+// types in a fixed order, then null ("?T" for a single type). In errors, `iterable` is shown as
+// Traversable|array; Reflection keeps it (keepIterable). With a class scope, self/parent are
+// resolved to class names (error messages); without one they stay as written (Reflection).
+const BUILTIN_TYPE_ORDER = ['static', 'callable', 'object', 'array', 'string', 'int', 'float', 'bool', 'false', 'true', 'void', 'never'];
+// the members of a union type in PHP's order: class names (and intersections, as arrays), then
+// builtins; `iterable` stays itself when keepIterable, else becomes Traversable|array
+export function typeParts(t, scope, keepIterable) {
+  const names = [], builtins = new Set();
+  let iterable = false;
+  for (const a of t.alts) {
+    if (typeof a === 'object') names.push(a.inter);
+    else if (a === 'iterable') { if (keepIterable) builtins.add('iterable'); else { iterable = true; builtins.add('array'); } }
+    else if (BUILTIN_TYPE_ORDER.includes(a) || a === 'mixed') builtins.add(a);
+    else if (scope && a === 'self') names.push(scope.name);
+    else if (scope && a === 'parent' && scope.parent) names.push(scope.parent.name);
+    else names.push(a);
+  }
+  if (iterable) names.push('Traversable');
+  const order = keepIterable ? ['iterable', ...BUILTIN_TYPE_ORDER] : BUILTIN_TYPE_ORDER;
+  return names.concat(order.filter((b) => builtins.has(b) && !((b === 'false' || b === 'true') && builtins.has('bool'))));
+}
+export function typeStr(t, scope, keepIterable) {
+  const alts = t.alts;
+  if (alts.length === 1 && typeof alts[0] === 'object' && !t.nullable) return alts[0].inter.join('&');
+  if (alts.includes('mixed')) return 'mixed';
+  const parts = typeParts(t, scope, keepIterable).map((p) => (typeof p === 'string' ? p : '(' + p.join('&') + ')'));
+  let str = parts.join('|');
+  if (t.nullable) str = str && parts.length === 1 && !str.includes('&') ? '?' + str : (str ? str + '|null' : 'null');
+  return str;
 }
 function matchType(alt, v, ctx) {
   switch (alt) {
@@ -228,12 +258,22 @@ export function coerceType(type, v, strict, ctx) {
   return FAIL;
 }
 export function valueName(v) { return v === true ? 'true' : v === false ? 'false' : typeOf(v); }
+// internal functions (and the prelude functions standing in for them) accept null for scalar
+// parameters in coercive mode, with a deprecation (PHP 8.1)
+const NULL_TO_SCALAR = { string: '', int: 0, float: null, bool: false };
+function internalNullArg(fn, p, i) {
+  const alt = p.type.alts.find((a) => a in NULL_TO_SCALAR);
+  if (alt === undefined || p.type.alts.some((a) => typeof a !== 'string' || !(a in NULL_TO_SCALAR))) return undefined;
+  deprecated(`${fnDisplayName(fn)}(): Passing null to parameter #${i + 1} ($${p.name}) of type ${typeStr(p.type, fn.cls)} is deprecated`);
+  return alt === 'float' ? mkf(0) : NULL_TO_SCALAR[alt];
+}
 function coerceParam(fn, p, i, v, strict, f) {
+  if (v === null && !strict && fn.file === PRELUDE_FILE && !p.type.nullable) { const d = internalNullArg(fn, p, i); if (d !== undefined) return d; }
   const r = coerceType(p.type, v, strict, { cls: fn.cls, sc: f ? f.sc : (rt.frame ? rt.frame.sc : null) });
   if (r === FAIL) {
     const top = rt.stack[rt.stack.length - 1];
-    const where = top && top.native === true ? '' : `, called in ${rt.file} on line ${rt.line}`;
-    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${p.name}) must be of type ${typeStr(p.type)}, ${valueName(v)} given${where}`);
+    const where = (top && top.native === true) || fn.file === PRELUDE_FILE ? '' : `, called in ${rt.file} on line ${rt.line}`;
+    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${p.name}) must be of type ${typeStr(p.type, fn.cls)}, ${valueName(v)} given${where}`);
   }
   return r;
 }
@@ -245,12 +285,12 @@ function checkReturn(fn, v, f, none) {
     if (a === 'never') throwError('TypeError', `${fnDisplayName(fn)}(): never-returning function must not implicitly return`);
   }
   const r = coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
-  if (r === FAIL) throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(t)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
+  if (r === FAIL) throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(t, fn.cls)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
   return r;
 }
 export function coercePropType(info, v, clsName, name) {
   const r = coerceType(info.type, v, rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict, { cls: info.cls, sc: info.cls });
-  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type)}`);
+  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type, info.cls)}`);
   return r;
 }
 

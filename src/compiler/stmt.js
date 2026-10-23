@@ -9,7 +9,7 @@ import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
 import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { compilingByRef, declareFunction, valueName } from '../runtime/functions.js';
-import { callMethodName, canAccessMember, declareClass, propAccessible } from '../runtime/classes.js';
+import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
 import { gcCheck } from '../runtime/gc.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
@@ -471,7 +471,7 @@ export function iterateObject(obj, cb) {
   }
   if (obj.cls.ancestors.has('iteratoraggregate')) return iterateObject(callMethodName(obj, 'getIterator', []), cb);
   if (obj.cls.nativeIter) { for (const [k, v] of obj.cls.nativeIter(obj)) if (cb(k, v) === false) return; return; }
-  for (const [k, s] of [...obj.props]) {
+  for (const [k, s] of objectProps(obj)) {
     const info = obj.cls.props.get(k);
     if (info && info.vis !== 'public' && !canAccessMember(info, rt.frame ? rt.frame.cls : null)) continue;
     if (cb(normKey(k), s instanceof Ref ? s.v : s) === false) return;

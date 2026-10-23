@@ -22,7 +22,16 @@ export function lex(src, file) {
   const n = src.length;
   const shortTags = typeof rt !== 'undefined' && rt.ini && /^(1|on|true)$/i.test(String(rt.ini.get('short_open_tag') || ''));
   const err = (m) => { throw new ParseErr(m, line); };
-  const push = (t, v, extra) => { const tk = { t, v, l: line }; if (extra) Object.assign(tk, extra); toks.push(tk); return tk; };
+  // The last /** doc comment */ stays pending (as in PHP) until a declaration takes it or a "}"
+  // ends it; tokens lexed meanwhile share one slot object, see Parser.takeDoc
+  let doc = null;
+  const push = (t, v, extra) => {
+    const tk = { t, v, l: line };
+    if (extra) Object.assign(tk, extra);
+    if (doc !== null) { tk.doc = doc; if (t === 'op' && v === '}') doc = null; }
+    toks.push(tk);
+    return tk;
+  };
   const countNl = (s) => { let c = 0; for (let j = 0; j < s.length; j++) if (s.charCodeAt(j) === 10) c++; return c; };
 
   function htmlMode() {
@@ -60,18 +69,7 @@ export function lex(src, file) {
     if (c === 10) { line++; i++; continue; }
     const ch = src[i];
     // comments
-    if (ch === '#' && src[i + 1] === '[') { // attribute: skip
-      let depth = 0;
-      while (i < n) {
-        const d = src[i];
-        if (d === '[') depth++;
-        else if (d === ']') { depth--; if (depth === 0) { i++; break; } }
-        else if (d === '\n') line++;
-        else if (d === '"' || d === "'") { const q = d; i++; while (i < n && src[i] !== q) { if (src[i] === '\\') i++; if (src[i] === '\n') line++; i++; } }
-        i++;
-      }
-      continue;
-    }
+    if (ch === '#' && src[i + 1] === '[') { push('op', '#['); i += 2; continue; } // attribute group
     if (ch === '#' || (ch === '/' && src[i + 1] === '/')) {
       while (i < n && src[i] !== '\n') {
         if (src[i] === '?' && src[i + 1] === '>') break;
@@ -82,6 +80,7 @@ export function lex(src, file) {
     if (ch === '/' && src[i + 1] === '*') {
       const e = src.indexOf('*/', i + 2);
       const end = e < 0 ? n : e + 2;
+      if (src[i + 2] === '*' && end - i > 4 && /\s/.test(src[i + 3])) doc = { text: src.slice(i, end), used: false };
       line += countNl(src.slice(i, end));
       i = end; continue;
     }

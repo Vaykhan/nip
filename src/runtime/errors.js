@@ -28,14 +28,15 @@ export function writeErr(msg) {
 }
 
 export function raise(type, msg) {
-  rt.lastError = { type, message: msg, file: rt.file, line: rt.line };
+  const [file, line] = userLocation();
+  rt.lastError = { type, message: msg, file, line };
   // user error handler
   if (rt.errorHandlers.length && !rt.inHandler) {
     const h = rt.errorHandlers[rt.errorHandlers.length - 1];
     if (h.handler !== null && (h.mask & type)) {
       rt.inHandler = true;
       let r;
-      try { r = callValue(h.handler, [type, msg, rt.file, rt.line]); }
+      try { r = callValue(h.handler, [type, msg, file, line]); }
       finally { rt.inHandler = false; }
       if (r !== false) return;
     }
@@ -43,7 +44,7 @@ export function raise(type, msg) {
   if (rt.silence) return;
   if (!(rt.errorReporting & type)) return;
   if (rt.displayErrors === '0' || rt.displayErrors === 'off') return;
-  writeErr(`${errorTypeName(type)}: ${msg} in ${rt.file} on line ${rt.line}`);
+  writeErr(`${errorTypeName(type)}: ${msg} in ${file} on line ${line}`);
 }
 export function warn(msg) { raise(E_WARNING, msg); }
 export function notice(msg) { raise(E_NOTICE, msg); }
@@ -83,8 +84,10 @@ export function captureTrace(withArgs) {
   for (let i = st.length - 1; i >= 0; i--) {
     const s = st[i];
     if (s.hidden) continue; // marks engine-internal callers (see runScript's shutdown)
+    const fromPrelude = s.callFile === PRELUDE_FILE;
+    if (fromPrelude && (s.native === true || (s.fn && s.fn.file === PRELUDE_FILE))) continue;
     const fr = new PHPArray();
-    const calledFromNative = i > 0 && st[i - 1].native === true;
+    const calledFromNative = (i > 0 && st[i - 1].native === true) || fromPrelude;
     if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }
     fr.set('function', s.fn.isClosure ? '{closure}' : s.fn.name);
     if (s.fn.isMethod && (s.cls || s.this)) { fr.set('class', (s.fn.cls || s.cls || s.this.cls).name); fr.set('type', s.this ? '->' : '::'); }
@@ -96,9 +99,19 @@ export function captureTrace(withArgs) {
   }
   return tr;
 }
+// Code in src/prelude/*.php runs as if it were internal: errors raised there are reported at
+// the user's call site, and calls between prelude functions don't appear in traces.
+export const PRELUDE_FILE = 'prelude.php';
+export function userLocation() {
+  if (rt.file !== PRELUDE_FILE) return [rt.file, rt.line];
+  const st = rt.stack;
+  for (let i = st.length - 1; i >= 0; i--) if (st[i].callFile && st[i].callFile !== PRELUDE_FILE) return [st[i].callFile, st[i].callLine];
+  return [rt.file, rt.line];
+}
 export function initThrowable(obj) {
-  obj.props.set('file', rt.file);
-  obj.props.set('line', rt.line);
+  const [file, line] = userLocation();
+  obj.props.set('file', file);
+  obj.props.set('line', line);
   obj.trace = captureTrace(iniBool('zend.exception_ignore_args', true) ? false : true);
 }
 function iniBool(k, def) { const v = rt.ini.get(k); if (v === undefined) return def; return /^(1|on|true|yes)$/i.test(String(v)); }

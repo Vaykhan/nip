@@ -5,7 +5,7 @@ import { toBool, toStr } from '../convert.js';
 import { rt } from '../runtime/state.js';
 import { warn } from '../runtime/errors.js';
 import { callFunction, typeStr } from '../runtime/functions.js';
-import { displayName } from '../runtime/classes.js';
+import { displayName, nipProps, objectProps } from '../runtime/classes.js';
 import { containsRefSlot, refHolderCounts } from '../runtime/gc.js';
 import { def, deref } from './core.js';
 
@@ -61,13 +61,15 @@ function debugProps(o) {
   if (o.cls.nativeDebug) return o.cls.nativeDebug(o).map(([k, v]) => [typeof k === 'string' ? `"${k}"` : String(k), v]);
   const di = debugInfo(o);
   if (di) return di.rawEntries().map(([k, v]) => [typeof k === 'string' ? propLabel(o, k, true) : String(k), v]);
+  const np = nipProps(o);
+  if (np) return np.rawEntries().map(([k, v]) => [typeof k === 'string' ? `"${k}"` : String(k), v]);
   const out = [];
   const seenKeys = new Set();
   for (const [key, info] of o.cls.slots) {
-    if (!o.props.has(key) && info.type) { out.push([propLabel(o, key, true), null, typeStr(info.type)]); seenKeys.add(key); }
+    if (!o.props.has(key) && info.type && !info.internal) { out.push([propLabel(o, key, true), null, typeStr(info.type, info.cls)]); seenKeys.add(key); }
   }
   const res = [];
-  for (const [k, s] of o.props) res.push([propLabel(o, k, true), s]);
+  for (const [k, s] of objectProps(o)) res.push([propLabel(o, k, true), s]);
   // order: declared slots first in declaration order, uninitialized shown in place
   if (out.length) {
     const ordered = [];
@@ -107,7 +109,7 @@ function printR(v, ind, seen) {
       const di = v.cls.nativeDebug ? null : debugInfo(v);
       if (v.cls.nativeDebug) entries = v.cls.nativeDebug(v).map(([k, x]) => [String(k), x]);
       else if (di) entries = di.entries().map(([k, x]) => [typeof k === 'string' ? propLabel(v, k, false) : String(k), x]);
-      else entries = [...v.props].map(([k, x]) => [propLabel(v, k, false), deref(x)]);
+      else { const np = nipProps(v); entries = np ? np.entries().map(([k, x]) => [String(k), x]) : objectProps(v).map(([k, x]) => [propLabel(v, k, false), deref(x)]); }
     }
     s += pad + '(\n';
     for (const [k, x] of entries) s += pad + `    [${k}] => ` + printR(x, ind + 8, seen) + '\n';
@@ -152,7 +154,8 @@ function varExport(v, ind, seen) {
     seen.add(v);
     const isStd = v.cls.lname === 'stdclass';
     let s = isStd ? '(object) array(\n' : '\\' + v.cls.name + '::__set_state(array(\n';
-    for (const [k, x0] of v.props) {
+    const np = nipProps(v);
+    for (const [k, x0] of np ? np.entries().map(([k, x]) => [String(k), x]) : objectProps(v)) {
       const x = deref(x0);
       const name = k.charCodeAt(0) === 0 ? k.slice(k.indexOf('\0', 1) + 1) : k;
       s += pad + '   ' + exportStr(name) + ' => ';

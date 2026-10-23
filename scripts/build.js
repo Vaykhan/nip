@@ -24,7 +24,7 @@ const MODULES = [
   'lib/core.js', 'lib/dump.js', 'lib/printf.js', 'lib/string.js', 'lib/hash.js', 'lib/mbstring.js', 'lib/math.js',
   'lib/array.js', 'lib/var.js', 'lib/functions.js', 'lib/errors.js', 'lib/output.js', 'lib/json.js',
   'lib/serialize.js', 'lib/pcre.js', 'lib/date.js', 'lib/file.js',
-  'runtime/native-classes.js', 'prelude.js', 'runtime/constants.js', 'lib/misc.js', 'lib/crypt.js',
+  'runtime/native-classes.js', 'prelude.js', 'runtime/constants.js', 'lib/misc.js', 'lib/crypt.js', 'lib/reflection.js',
   'runtime/boot.js', 'runtime/run.js', 'cli.js', 'index.js',
 ];
 // Modules that only import others; they contain no code of their own.

@@ -10,7 +10,7 @@ import { deprecated, throwError } from '../runtime/errors.js';
 import { valueName } from '../runtime/functions.js';
 import { findMethod } from '../runtime/callables.js';
 
-function pnamesOf(fn) {
+export function pnamesOf(fn) {
   const src = fn.toString();
   const m = /^[^(]*\(([^)]*)\)/.exec(src);
   if (!m) return [];

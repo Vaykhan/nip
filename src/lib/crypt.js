@@ -9,7 +9,7 @@ import { bytes } from '../utf8.js';
 import { rt } from '../runtime/state.js';
 import { throwError, warn } from '../runtime/errors.js';
 import { callNative } from '../runtime/functions.js';
-import { lookupClass } from '../runtime/classes.js';
+import { lookupClass, objectProps } from '../runtime/classes.js';
 import { def, deref, S } from './core.js';
 import { getStream, streamReadLine } from './file.js';
 
@@ -266,7 +266,7 @@ def('class_alias', (_class, alias, autoload = true) => { const c = lookupClass(S
 def('array_key_exists_dummy', () => 0); rt.fns.delete('array_key_exists_dummy');
 def('get_resource_type', (resource) => (deref(resource) instanceof PHPResource ? (deref(resource).closed ? 'Unknown' : deref(resource).type) : false));
 def('get_resource_id', (resource) => deref(resource).id);
-def('get_mangled_object_vars', (object) => { const a = new PHPArray(); for (const [k, v] of object.props) a.set(normKey(k), cp(deref(v))); return a; });
+def('get_mangled_object_vars', (object) => { const a = new PHPArray(); for (const [k, v] of objectProps(object)) a.set(normKey(k), cp(deref(v))); return a; });
 def('get_object_vars_all', (object) => 0); rt.fns.delete('get_object_vars_all');
 def('mb_http_output', () => 'UTF-8');
 def('lcg', () => 0); rt.fns.delete('lcg');

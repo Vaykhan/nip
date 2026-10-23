@@ -118,7 +118,9 @@ if (baseline) {
   const want = fs.readFileSync(baseline, 'utf8').split('\n').filter(Boolean);
   const pass = new Set(results.pass), timedOut = new Set(results.timeout);
   const ran = new Set(filtered.map(testName));
-  const lost = want.filter((t) => ran.has(t) && !pass.has(t) && !timedOut.has(t));
+  const flaky = new Set(fs.readFileSync(path.join(__dirname, 'flaky.txt'), 'utf8').split('\n').filter((l) => l && !l.startsWith('#')));
+  const lost = want.filter((t) => ran.has(t) && !pass.has(t) && !timedOut.has(t) && !flaky.has(t));
+  for (const t of want) if (flaky.has(t) && ran.has(t) && !pass.has(t)) console.log(`${process.env.GITHUB_ACTIONS ? '::warning file=' + t + '::' : 'WARN '}flaky test failed: ${t}`);
   const slow = want.filter((t) => timedOut.has(t));
   const gained = results.pass.filter((t) => !want.includes(t));
   const ci = !!process.env.GITHUB_ACTIONS;

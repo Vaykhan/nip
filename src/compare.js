@@ -4,6 +4,7 @@ import { Flt, numericStr, PHPArray, PHPObject, PHPResource, Ref } from './values
 import { toBool, toInt, toNumber, toStr } from './convert.js';
 import { findMethod } from './runtime/callables.js';
 import { closureClass } from './runtime/native-classes.js';
+import { callFunction } from './runtime/functions.js';
 
 export function numCmp(a, b) { // a, b are int or Flt
   if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : a > b ? 1 : 0;
@@ -22,6 +23,14 @@ function numEq(a, b) {
 export function isNum(v) { return typeof v === 'number' || typeof v === 'bigint' || v instanceof Flt; }
 
 export function strCmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
+
+// a prelude class can compare its objects with __nipCompare($other): int, or null if uncomparable
+function nipCompare(a, b) {
+  const m = a.cls.methods.get('__nipcompare');
+  if (m === undefined || !b.cls.methods.has('__nipcompare')) return undefined;
+  const r = callFunction(m.fn, [b], a, m.cls, a.cls, null);
+  return r === null ? null : r < 0 ? -1 : r > 0 ? 1 : 0;
+}
 
 export function looseEq(a, b) {
   if (a === b) return !(a instanceof Flt && a.v !== a.v);
@@ -50,6 +59,8 @@ export function looseEq(a, b) {
   }
   if (a instanceof PHPObject && b instanceof PHPObject) {
     if (a === b) return true;
+    const h = nipCompare(a, b);
+    if (h !== undefined) return h === 0;
     if (a.cls !== b.cls) return false;
     if (a.cls.isEnum || a.cls === closureClass) return false;
     if (a.props.size !== b.props.size) return false;
@@ -110,6 +121,8 @@ export function cmp(a, b) { // <=> : -1 0 1
   if (b instanceof PHPArray) return -1;
   if (a instanceof PHPObject && b instanceof PHPObject) {
     if (a === b) return 0;
+    const h = nipCompare(a, b);
+    if (h !== undefined) return h === null ? 1 : h;
     if (a.cls !== b.cls) return 1;
     for (const [k, v] of a.props) { if (!b.props.has(k)) return 1; const w = b.props.get(k); const c = cmp(v instanceof Ref ? v.v : v, w instanceof Ref ? w.v : w); if (c) return c; }
     return 0;

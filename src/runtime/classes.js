@@ -6,8 +6,8 @@ import { isNum, looseEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from './state.js';
-import { initThrowable, notice, throwError, warn } from './errors.js';
-import { callFunction, coercePropType, coerceType, compileFunction, FAIL } from './functions.js';
+import { initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
+import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr, valueName } from './functions.js';
 import { callValue } from './callables.js';
 import { gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
@@ -23,7 +23,33 @@ export class PHPClass {
     this.methods = new Map(); this.privMethods = null;
     this.enumBacked = null; this.decl = null; this.nativeIter = null; this.toBoolHook = null; this.hasDestructor = false;
     this.propInit = null;
+    this.hasInternal = false; // has prelude-internal properties, see isInternalSlot()
   }
+}
+
+// Members of classes written in src/prelude/*.php whose names start with "__" (other than PHP's
+// magic methods) are implementation details: they are left out of property listings, dumps,
+// casts, comparisons and Reflection, as if they were C-level state of an internal class.
+const MAGIC_METHODS = new Set(['__construct', '__destruct', '__call', '__callstatic', '__get', '__set', '__isset', '__unset',
+  '__sleep', '__wakeup', '__serialize', '__unserialize', '__tostring', '__invoke', '__set_state', '__clone', '__debuginfo']);
+export function isInternalName(owner, name) {
+  return name.charCodeAt(0) === 95 && name.charCodeAt(1) === 95 && !!owner.decl && owner.decl.file === PRELUDE_FILE && !MAGIC_METHODS.has(name.toLowerCase());
+}
+export function isInternalSlot(cls, key) { if (!cls.hasInternal) return false; const s = cls.slots.get(key); return s !== undefined && s.internal === true; }
+// [key, value-or-Ref] pairs of an object's properties without the internal ones
+export function objectProps(o) {
+  if (!o.cls.hasInternal) return [...o.props];
+  const out = [];
+  for (const e of o.props) if (!isInternalSlot(o.cls, e[0])) out.push(e);
+  return out;
+}
+// The properties PHP shows for an internal class in var_dump/print_r/var_export, (array) casts and
+// json_encode, which a prelude class can compute with __nipProps(). null when it doesn't.
+export function nipProps(o) {
+  const m = o.cls.methods.get('__nipprops');
+  if (m === undefined) return null;
+  const r = callFunction(m.fn, [], o, m.cls, o.cls, null);
+  return r instanceof PHPArray ? r : new PHPArray();
 }
 
 export function lookupClass(name, quiet) {
@@ -106,7 +132,7 @@ export function declareClass(decl, f) {
     for (const c of decl.consts) {
       const ex = cls.consts.get(c.name);
       if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, c.l, decl.file);
-      cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final });
+      cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c });
     }
     // enum cases
     if (cls.isEnum) {
@@ -114,7 +140,7 @@ export function declareClass(decl, f) {
       cls.cases = [];
       for (const c of decl.cases) {
         const E = c.e ? cExpr(c.e) : null;
-        const entry = { case: true, val: undefined, done: false, cls, vis: 'public', name: c.name, E: null };
+        const entry = { case: true, val: undefined, done: false, cls, vis: 'public', name: c.name, E: null, decl: c };
         entry.make = () => {
           const o = new PHPObject(cls);
           o.props.set('name', c.name);
@@ -134,7 +160,7 @@ export function declareClass(decl, f) {
     for (const m of decl.methods) addMethod(cls, m.fn, m, cls);
     // promoted ctor params
     const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
-    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, type: prm.type, readonly: prm.readonly || cls.readonly }, cls);
+    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
     // abstract check
     if (!cls.abstract && !cls.isInterface && !cls.isTrait) {
       const abs = [...cls.methods.values()].filter((m) => m.abstract);
@@ -161,6 +187,7 @@ export function inheritFrom(cls, p) {
   for (const [k, v] of p.sprops) cls.sprops.set(k, v);
   for (const [k, v] of p.props) if (v.vis !== 'private') cls.props.set(k, v);
   for (const [k, v] of p.slots) cls.slots.set(k, v);
+  cls.hasInternal = p.hasInternal;
   for (const [k, v] of p.methods) cls.methods.set(k, v);
   cls.nativeIter = p.nativeIter; cls.toBoolHook = p.toBoolHook;
   if (p.nativeCtor) cls.nativeCtor = p.nativeCtor;
@@ -175,10 +202,12 @@ function addProp(cls, p, owner) {
   const info = {
     name: p.name, key: p.vis === 'private' && !p.static ? `\0${owner.name}\0${p.name}` : p.name, cls: owner, vis: p.vis,
     type: p.type || null, readonly: !!p.readonly, hasDef: !!p.hasDef, defE: p.hasDef ? (p.defE || cExpr(p.def)) : null, val: undefined, evaluated: false, decl: p,
+    internal: isInternalName(owner, p.name),
   };
+  if (info.internal) cls.hasInternal = true;
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
-    const si = { name: p.name, cls: owner, vis: p.vis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE };
+    const si = { name: p.name, cls: owner, vis: p.vis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
     if (!info.hasDef && info.type && !info.type.nullable) si.uninit = true;
     cls.sprops.set(p.name, si);
     return;
@@ -281,8 +310,12 @@ export function classConst(cls, name, f) {
   if (!c.done) {
     if (c.evaluating) throwError('Error', `Cannot declare self-referencing constant ${c.cls.name}::${name}`);
     c.evaluating = true;
-    try { c.val = c.case ? c.make() : c.E(constFrame(c.cls)); }
-    finally { c.evaluating = false; }
+    try {
+      c.val = c.case ? c.make() : c.E(constFrame(c.cls));
+      // typed class constants (PHP 8.3) are checked strictly
+      const t = c.decl && c.decl.type;
+      if (t && coerceType(t, c.val, true, { cls: c.cls, sc: c.cls }) === FAIL) throwError('TypeError', `Cannot assign ${valueName(c.val)} to class constant ${c.cls.name}::${name} of type ${typeStr(t, c.cls)}`);
+    } finally { c.evaluating = false; }
     c.done = true;
     if (c.val instanceof PHPArray) c.val.cow = true;
   }
@@ -547,6 +580,8 @@ export function cloneObject(o, f) {
   for (const key of ['fn', 'bound', 'thisObj', 'scope', 'sc', 'trace', 'native']) if (o[key] !== undefined) c[key] = o[key];
   if (o.cls.nativeClone) o.cls.nativeClone(o, c);
   const m = o.cls.methods.get('__clone');
+  // internal classes (here: prelude classes) with a private __clone() can't be cloned at all
+  if (m && m.vis === 'private' && m.cls.decl && m.cls.decl.file === PRELUDE_FILE) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (m) {
     if (m.vis !== 'public' && !canAccessMember(m, f ? f.cls : null)) throwError('Error', `Call to ${m.vis} ${o.cls.name}::__clone() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
     c.cloning = true;
@@ -561,6 +596,7 @@ export function objVisibleProps(obj, scope) {
   const out = [];
   for (const [k, s] of obj.props) {
     const v = s instanceof Ref ? s.v : s;
+    if (obj.cls.hasInternal && isInternalSlot(obj.cls, k)) continue;
     if (k.charCodeAt(0) === 0) {
       const p = k.indexOf('\0', 1);
       const owner = k.slice(1, p), name = k.slice(p + 1);
@@ -580,8 +616,10 @@ export function toArrayCast(v) {
   if (v instanceof PHPObject) {
     if (v.cls === closureClass) return PHPArray.from([v]);
     if (v.cls.nativeToArray) return v.cls.nativeToArray(v);
+    const np = nipProps(v);
+    if (np) return np;
     const a = new PHPArray();
-    for (const [k, s] of v.props) {
+    for (const [k, s] of objectProps(v)) {
       const val = s instanceof Ref ? s.v : s;
       const info = v.cls.props.get(k);
       let key = k;

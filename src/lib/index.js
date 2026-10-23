@@ -19,4 +19,5 @@ import './date.js';
 import './file.js';
 import './misc.js';
 import './crypt.js';
+import './reflection.js';
 import '../prelude.js';

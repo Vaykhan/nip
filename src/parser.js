@@ -33,6 +33,24 @@ export class Parser {
   peek(o = 1) { return this.toks[this.p + o] || this.toks[this.toks.length - 1]; }
   next() { return this.toks[this.p++]; }
   error(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l); }
+  // the pending doc comment at token tk, if no declaration has taken it yet (see the lexer)
+  takeDoc(tk) { const d = tk && tk.doc; if (!d || d.used) return null; d.used = true; return d.text; }
+  // #[Name(args), ...] groups: [{ name, args, l }]
+  parseAttributes() {
+    let attrs = null;
+    while (this.isOp('#[')) {
+      this.p++;
+      while (!this.isOp(']')) {
+        const l = this.tok.l;
+        const name = this.resolveClass(this.ident());
+        const args = this.isOp('(') ? this.parseArgs() : [];
+        (attrs || (attrs = [])).push({ name, args, l });
+        if (!this.accept(',')) break;
+      }
+      this.expect(']');
+    }
+    return attrs;
+  }
   unexpected(tk) {
     tk = tk || this.tok;
     let d;
@@ -119,6 +137,14 @@ export class Parser {
   }
 
   parseStatement(top) {
+    if (this.isOp('#[')) {
+      const attrs = this.parseAttributes();
+      const st = this.parseStatement(top);
+      if (st && st.k === 'FuncDecl') st.fn.attrs = attrs;
+      else if (st && st.k === 'ClassDecl') st.attrs = attrs;
+      else if (st && st.k === 'ExprStmt' && st.e.k === 'Closure') st.e.fn.attrs = attrs;
+      return st;
+    }
     const t = this.tok, l = t.l;
     if (t.t === 'html') { this.p++; return { k: 'Echo', args: [{ k: 'Lit', v: t.v, l }], l }; }
     if (t.t === 'op') {
@@ -221,8 +247,10 @@ export class Parser {
           if ((nx.t === 'id') || (nx.t === 'op' && nx.v === '&' && this.peek(2).t === 'id')) {
             this.p++;
             const byRef = this.accept('&');
+            const doc = this.takeDoc(this.tok);
             const name = this.ident();
             const fn = this.parseFunctionRest(this.nsName(name), byRef, l);
+            fn.doc = doc;
             return { k: 'FuncDecl', fn, l, top: !!top };
           }
           break;
@@ -439,7 +467,7 @@ export class Parser {
     this.expect('(');
     const params = [];
     while (!this.isOp(')')) {
-      const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false };
+      const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false, attrs: this.parseAttributes() };
       for (;;) {
         if (this.isId('public') || this.isId('protected') || this.isId('private')) { prm.promote = this.next().v.toLowerCase(); continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
@@ -478,6 +506,7 @@ export class Parser {
       this.st.fnStack.pop();
       fn.body = b.body;
     } else { this.semi(); fn.body = null; }
+    fn.endLine = this.toks[this.p - 1].l;
     fn.strict = this.st.strict;
     return fn;
   }
@@ -487,11 +516,13 @@ export class Parser {
     const l = this.tok.l;
     const flags = { abstract: false, final: false, readonly: false };
     while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) flags[this.next().v.toLowerCase()] = true;
+    const startLine = this.tok.l;
     const kind = this.ident().toLowerCase(); // class|interface|trait|enum
     let name;
+    const doc = this.takeDoc(this.tok);
     if (anonArgs !== undefined) name = 'class@anonymous';
     else name = this.nsName(this.ident());
-    const cd = { k: 'ClassDecl', kind, name, parent: null, interfaces: [], flags, consts: [], props: [], methods: [], traits: [], cases: [], enumType: null, l, file: this.file, anon: anonArgs !== undefined };
+    const cd = { k: 'ClassDecl', kind, name, parent: null, interfaces: [], flags, consts: [], props: [], methods: [], traits: [], cases: [], enumType: null, l, file: this.file, anon: anonArgs !== undefined, doc, startLine, endLine: 0, attrs: null };
     if (kind === 'enum' && this.accept(':')) cd.enumType = this.parseType();
     if (this.acceptId('extends')) {
       if (kind === 'interface') { do cd.interfaces.push(this.resolveClass(this.ident())); while (this.accept(',')); }
@@ -504,10 +535,12 @@ export class Parser {
       if (this.tok.t === 'eof') this.unexpected();
       this.parseMember(cd);
     }
+    cd.endLine = this.toks[this.p - 1].l;
     this.st.clsStack.pop();
     return cd;
   }
   parseMember(cd) {
+    const attrs = this.parseAttributes();
     const l = this.tok.l;
     if (this.acceptId('use')) {
       const names = [this.resolveClass(this.ident())];
@@ -534,10 +567,11 @@ export class Parser {
       return;
     }
     if (this.acceptId('case')) {
+      const doc = this.takeDoc(this.tok);
       const name = this.ident();
       let e = null; if (this.accept('=')) e = this.parseExpr();
       this.semi();
-      cd.cases.push({ name, e, l });
+      cd.cases.push({ name, e, l, attrs, doc });
       return;
     }
     const mods = { vis: null, static: false, abstract: false, final: false, readonly: cd.flags.readonly, var: false };
@@ -551,12 +585,13 @@ export class Parser {
       break;
     }
     if (this.acceptId('const')) {
-      // optional type
-      if (this.tok.t === 'id' && this.peek().t === 'id') this.parseType();
-      else if (this.isOp('?')) this.parseType();
+      // optional type (PHP 8.3)
+      let type = null;
+      if ((this.tok.t === 'id' && this.peek().t === 'id') || this.isOp('?') || this.isOp('(')) type = this.parseType();
       do {
+        const doc = this.takeDoc(this.tok);
         const name = this.ident(); this.expect('=');
-        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l });
+        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l, type, attrs, doc });
       } while (this.accept(','));
       this.semi();
       return;
@@ -564,8 +599,9 @@ export class Parser {
     if (this.acceptId('function')) {
       const byRef = this.accept('&');
       const nameTok = this.tok; if (nameTok.t !== 'id') this.unexpected(); this.p++;
+      const doc = this.takeDoc(nameTok);
       const fn = this.parseFunctionRest(nameTok.v, byRef, l, { cls: cd.name });
-      fn.cls = cd.name;
+      fn.cls = cd.name; fn.attrs = attrs; fn.doc = doc;
       cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', final: mods.final, l });
       return;
     }
@@ -574,9 +610,10 @@ export class Parser {
     if (this.tok.t !== 'var') type = this.parseType();
     do {
       const v = this.tok; if (v.t !== 'var') this.unexpected(); this.p++;
+      const doc = this.takeDoc(v);
       let def; let hasDef = false;
       if (this.accept('=')) { def = this.parseExpr(); hasDef = true; }
-      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', type, readonly: mods.readonly, l });
+      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', type, readonly: mods.readonly, l, attrs, doc });
     } while (this.accept(','));
     if (this.isOp('{')) this.error('Property hooks are not supported');
     this.semi();
@@ -712,6 +749,8 @@ export class Parser {
   parseNew() {
     const l = this.next().l;
     let cls;
+    const attrs = this.parseAttributes();
+    if (attrs && !this.isId('class')) this.unexpected();
     if (this.isId('class')) {
       // anonymous class
       this.p++;
@@ -720,6 +759,7 @@ export class Parser {
       this.p--; // re-point at 'class' keyword for parseClass
       this.toks[this.p] = { t: 'id', v: 'class', l };
       const cd = this.parseClass(args);
+      cd.attrs = attrs;
       cd.name = 'class@anonymous' + (++this.st.anonCount);
       return { k: 'New', cls: cd, args, l };
     }
@@ -779,6 +819,7 @@ export class Parser {
 
   parseClosure(isStatic) {
     const l = this.tok.l;
+    const doc = this.takeDoc(this.peek(0)) || this.takeDoc(this.peek(1));
     if (this.acceptId('fn')) {
       const byRef = this.accept('&');
       const fn = { name: '{closure}', byRef, params: this.parseParams(), ret: null, body: null, isGen: false, l, file: this.file, arrow: true, static: isStatic, strict: this.st.strict };
@@ -789,11 +830,14 @@ export class Parser {
       this.st.fnStack.pop();
       fn.body = [{ k: 'Return', e, l: e.l }];
       fn.arrowExpr = e;
+      fn.endLine = this.toks[this.p - 1].l;
+      fn.doc = doc;
       return { k: 'Closure', fn, l };
     }
     this.expectId('function');
     const byRef = this.accept('&');
     const fn = this.parseFunctionRest('{closure}', byRef, l, { closure: true, static: isStatic });
+    fn.doc = doc;
     return { k: 'Closure', fn, l };
   }
 
@@ -807,6 +851,13 @@ export class Parser {
       case 'tpl': this.p++; return { k: 'Interp', parts: this.interpParts(t.v), l };
       case 'shell': this.p++; return { k: 'Shell', parts: this.interpParts(t.v), l };
       case 'op':
+        if (t.v === '#[') { // attributes on a closure or arrow function
+          const attrs = this.parseAttributes();
+          const e = this.parsePrimary();
+          if (e.k !== 'Closure') this.unexpected();
+          e.fn.attrs = attrs;
+          return e;
+        }
         if (t.v === '(') { this.p++; const e = this.parseExpr(); this.expect(')'); return e; }
         if (t.v === '[') { this.p++; return { k: 'Arr', items: this.parseArrayItems(']'), l }; }
         if (t.v === '$') {

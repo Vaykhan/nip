@@ -60,6 +60,7 @@ export function checkProgram(ast) {
         scope.labels.set(n.name, path.slice());
         return;
       case 'Goto': scope.gotos.push({ n, path: path.slice() }); return;
+      case 'Return': visit(n.e, scope.byRef ? WRITE : READ); return; // function &f() { return $a[]; }
       case 'While': case 'DoWhile': case 'For': case 'Foreach': case 'Switch': {
         const { body, cases, ...rest } = n;
         const writes = (key) => key === 'kv' || key === 'v' || (key === 'e' && n.k === 'Foreach' && n.byRef);
@@ -97,6 +98,7 @@ export function checkProgram(ast) {
   function visitFunction(fn) {
     const outer = scope, outerPath = path;
     scope = newScope(); path = [];
+    scope.byRef = !!fn.byRef;
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
     checkGotos(scope, !fn.params.length && !fn.isGen ? fn.body : null);
     scope = outer; path = outerPath;

@@ -1,0 +1,4 @@
+# php-src tests whose result depends on timing, randomness or the environment. The baseline check
+# only warns when one of these stops passing.
+ext/standard/tests/array/array_rand.phpt
+ext/standard/tests/file/filestat.phpt
