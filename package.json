@@ -1,0 +1,11 @@
+{
+  "name": "nip",
+  "version": "0.1.0",
+  "description": "NIP (Nip is php): a PHP 8.3 interpreter in a single Node.js file",
+  "main": "nip.js",
+  "bin": { "nip": "nip.js" },
+  "files": ["nip.js"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "tests/run.sh" },
+  "license": "BSD-3-Clause"
+}

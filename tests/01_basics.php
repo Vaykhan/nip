@@ -1,0 +1,21 @@
+<?php
+$i = 10; $f = 1.5; $s = "str"; $b = true; $n = null;
+echo $i + $f, "\n", $i . $s, "\n", $i / 4, "\n", $i % 3, "\n", 2 ** 10, "\n", -7 / 2, "\n";
+var_dump($i == "10", $i === "10", "abc" == 0, null == false, "1e3" == "1000", 0.1 + 0.2 == 0.3);
+var_dump(1 <=> 2, "a" <=> "b", [1,2] <=> [1,3]);
+$x = 5; $x += 3; $x -= 1; $x *= 2; $x /= 7; var_dump($x);
+$s .= "ing"; echo $s, "\n";
+$y = $n ?? "default"; echo $y, "\n";
+$z = 0 ?: "elvis"; echo $z, "\n";
+echo intdiv(17, 5), " ", 17 % 5, " ", fmod(17.5, 5), "\n";
+var_dump((int)"12abc", (float)"3.14xyz", (bool)"0", (bool)"", (bool)"0.0", (string)false, (array)"x");
+var_dump(PHP_INT_MAX, PHP_INT_MAX + 1, PHP_INT_MIN, -PHP_INT_MAX - 1, 0x7FFFFFFFFFFFFFFF);
+var_dump(9007199254740993, 9007199254740993 + 2, 1 << 62, 1 << 63, -1 >> 1, ~5, 5 & 3, 5 | 3, 5 ^ 3);
+var_dump(0b1010, 0o17, 017, 1_000_000, .5, 1e3, 1E-3);
+$a = "5"; $a++; var_dump($a); $c = "z"; $c++; var_dump($c); $d = "Az"; $d++; var_dump($d); $e = "a9"; $e++; var_dump($e);
+$nul = null; $nul++; var_dump($nul); $nul2 = null; $nul2--; var_dump($nul2);
+var_dump(7 <=> 7.0, "abc" < "abd", "10" < "9", 10 < "9", "10" < "9a");
+var_dump(1.0, 100.0, 1e20, 1.5e-10, -0.0, 3.0 * 2, 0.1 * 3, 1/3, sqrt(2), PHP_FLOAT_EPSILON);
+echo 1.0, " ", 1e20, " ", 1e15, " ", 123456789012345678, " ", 0.00001, " ", -1.5, "\n";
+var_dump("abc" . 1.0, 7.0 / 2, round(3.14159, 2), floor(-2.5), ceil(-2.5), abs(-5), abs(-5.5));
+var_dump(max(1, 2, 3), min([4, 2, 8]), max("apple", "banana"), max([1, 2], [1, 3]), min(1, "0"));
