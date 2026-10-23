@@ -5,6 +5,7 @@ import { Frame } from '../compiler/common.js';
 import { lvVarCache } from '../compiler/lvalue.js';
 import { E_ALL, E_DEPRECATED, E_STRICT, rt } from './state.js';
 import { declareClass } from './classes.js';
+import { resetObjHandles } from './gc.js';
 import { compileSource, hoistDecls, runProgram } from './program.js';
 import { resetJsonState } from '../lib/json.js';
 import { resetPcreState } from '../lib/pcre.js';
@@ -60,7 +61,7 @@ export function resetRuntime() {
   rt.errorHandlers = []; rt.exceptionHandlers = []; rt.shutdownFns = []; rt.autoloaders = []; rt.included = new Set();
   rt.obStack = []; rt.outBuf = ''; rt.destructibles = []; rt.inShutdown = false; rt.lastRetRef = null; rt.lastError = null; rt.ini = new Map(); rt.mainStatics = null;
   rt.errorReporting = E_ALL & ~E_DEPRECATED & ~E_STRICT; rt.displayErrors = 'stderr'; rt.precision = 14; rt.serializePrecision = -1;
-  resetJsonState(); resetPcreState();
+  resetJsonState(); resetPcreState(); resetObjHandles(); rt.staticOwners = new Set(); rt.constRoots = []; rt.deadline = 0; rt.timeLimit = 0;
   PHPResource.n = 4;
   lvVarCache.clear(); lazyLoaded.clear();
 }

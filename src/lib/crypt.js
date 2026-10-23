@@ -2,7 +2,8 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { cp, mkf, normKey, PHPArray, PHPResource, Ref } from '../values.js';
+import { cp, FatalSig, mkf, normKey, PHPArray, PHPResource, Ref } from '../values.js';
+import { RESERVED_CLASS_NAMES } from '../parser.js';
 import { toBool, toInt, toStr } from '../convert.js';
 import { strInc } from '../arith.js';
 import { bytes } from '../utf8.js';
@@ -262,7 +263,7 @@ def('highlight_string', (string, _return = false) => { const s = '<code>' + call
 def('php_strip_whitespace', (filename) => { try { return fs.readFileSync(S(filename), 'latin1'); } catch (e) { return ''; } });
 def('token_get_all', (code) => { throwError('Error', 'token_get_all() is not supported'); });
 def('spl_classes', () => new PHPArray());
-def('class_alias', (_class, alias, autoload = true) => { const c = lookupClass(S(_class)); const ln = S(alias).replace(/^\\/, '').toLowerCase(); if (rt.classes.has(ln)) { warn(`Cannot declare class ${S(alias)}, because the name is already in use`); return false; } rt.classes.set(ln, c); return true; });
+def('class_alias', (_class, alias, autoload = true) => { const c = lookupClass(S(_class)); const ln = S(alias).replace(/^\\/, '').toLowerCase(); if (RESERVED_CLASS_NAMES.has(ln.slice(ln.lastIndexOf('\\') + 1))) throw new FatalSig(`Cannot use '${S(alias)}' as class name as it is reserved`, rt.line, rt.file); if (rt.classes.has(ln)) { warn(`Cannot declare class ${S(alias)}, because the name is already in use`); return false; } rt.classes.set(ln, c); return true; });
 def('array_key_exists_dummy', () => 0); rt.fns.delete('array_key_exists_dummy');
 def('get_resource_type', (resource) => (deref(resource) instanceof PHPResource ? (deref(resource).closed ? 'Unknown' : deref(resource).type) : false));
 def('get_resource_id', (resource) => deref(resource).id);

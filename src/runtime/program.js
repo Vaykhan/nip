@@ -73,12 +73,16 @@ function hoistPrelude(classes, f) {
 }
 export function runProgram(prog, f) {
   if (!prog.body) prog.body = cStmts(prog.ast);
-  hoistDecls(prog.ast, f);
-  const r = prog.body(f);
-  return r === RETURN ? f.ret : 1;
+  const prevStrict = rt.mainStrict;
+  rt.mainStrict = !!prog.ast.strict;
+  try {
+    hoistDecls(prog.ast, f);
+    const r = prog.body(f);
+    return r === RETURN ? f.ret : 1;
+  } finally { rt.mainStrict = prevStrict; }
 }
 
-function resolveIncludePath(p) {
+export function resolveIncludePath(p) {
   if (p === '') return null;
   const tryFile = (x) => { try { return fs.statSync(x).isFile() ? x : null; } catch (e) { return null; } };
   if (pathMod.isAbsolute(p)) return tryFile(p);
@@ -122,12 +126,14 @@ export function doEval(code, f, st) {
 export function doInclude(path, kind, f) {
   const resolved = resolveIncludePath(path);
   if (!resolved) {
-    if (kind.startsWith('require')) {
+    // the warnings come from inside include(), which shows in backtraces
+    const nf = new NativeFrame({ name: kind, isMethod: false }, []); nf.native = false;
+    rt.stack.push(nf);
+    try {
       warn(`${kind}(${path}): Failed to open stream: No such file or directory`);
-      throwError('Error', `Failed opening required '${path}' (include_path='${rt.ini.get('include_path') || '.:/usr/share/php'}')`);
-    }
-    warn(`${kind}(${path}): Failed to open stream: No such file or directory`);
-    warn(`${kind}(): Failed opening '${path}' for inclusion (include_path='${rt.ini.get('include_path') || '.:/usr/share/php'}')`);
+      if (!kind.startsWith('require')) warn(`${kind}(): Failed opening '${path}' for inclusion (include_path='${rt.ini.get('include_path') || '.:/usr/share/php'}')`);
+    } finally { rt.stack.pop(); }
+    if (kind.startsWith('require')) throwError('Error', `Failed opening required '${path}' (include_path='${rt.ini.get('include_path') || '.:/usr/share/php'}')`);
     return false;
   }
   const real = fs.realpathSync(resolved);

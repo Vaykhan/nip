@@ -124,7 +124,9 @@ def('define', (constant_name, value, case_insensitive = false) => {
   const n = S(constant_name);
   if (n.includes('::')) throwError('ValueError', 'define(): Argument #1 ($constant_name) cannot be a class constant');
   if (rt.consts.has(n)) { warn(`Constant ${n} already defined`); return false; }
-  rt.consts.set(n, cp(value)); return true;
+  rt.consts.set(n, cp(value));
+  if (value !== null && typeof value === 'object') rt.constRoots.push(value);
+  return true;
 });
 def('defined', (constant_name) => {
   const n = S(constant_name);

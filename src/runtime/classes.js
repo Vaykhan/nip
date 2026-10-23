@@ -9,7 +9,7 @@ import { rt } from './state.js';
 import { deprecated, initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr, valueName } from './functions.js';
 import { callValue } from './callables.js';
-import { gcCheck, gcCollect } from './gc.js';
+import { dropRef, gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
 import { lazyClass, lazyClassSrc } from './boot.js';
 import { checkDelayed, checkInheritance } from './inheritance.js';
@@ -341,6 +341,7 @@ export function classConst(cls, name, f) {
     } finally { c.evaluating = false; }
     c.done = true;
     if (c.val instanceof PHPArray) c.val.cow = true;
+    if (c.val !== null && typeof c.val === 'object') rt.constRoots.push(c.val); // enum cases, new in constants
   }
   return c.val;
 }
@@ -512,7 +513,7 @@ export function writeProp(obj, name, v, f) {
   }
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
-  if (slot instanceof PHPObject && slot !== v && slot.cls.hasDestructor) gcCheck(slot);
+  if (slot !== v && slot !== null && typeof slot === 'object' && !(slot instanceof Ref)) { dropRef(slot); if (slot instanceof PHPObject && slot.cls.hasDestructor) gcCheck(slot); }
 }
 // Prelude classes can handle accesses to undefined properties before the magic methods do
 // (ArrayObject::ARRAY_AS_PROPS): __nipGet/__nipIsset/__nipSet/__nipUnset return [true, value]
@@ -607,7 +608,7 @@ export function unsetProp(obj, name, f) {
     if (info.readonly) throwError('Error', `Cannot unset readonly property ${obj.cls.name}::$${name}`);
     key = info.key;
   }
-  if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); gcCheck(old instanceof Ref ? old.v : old); return; }
+  if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
   if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
   if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } }

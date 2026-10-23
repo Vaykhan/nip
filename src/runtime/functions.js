@@ -1,8 +1,7 @@
 // User function calls: frames, parameter binding, type checks and coercion, returns.
 
 import {
-  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, PHPArray, PHPObject, Ref
-} from '../values.js';
+  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, objHandles, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
 import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
 import { Frame, hasSuspend, RETURN } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
@@ -11,9 +10,13 @@ import { cStmtsG, fiberBody } from '../compiler/generator.js';
 import { rt } from './state.js';
 import { deprecated, PRELUDE_FILE, throwError, warn } from './errors.js';
 import { findMethod, isCallable } from './callables.js';
-import { gcAfterCall } from './gc.js';
+import { frameExit, gcAfterCall } from './gc.js';
 import { makeGenerator } from './generators.js';
 
+function argsHoldObjects(args) {
+  for (let i = 0; i < args.length; i++) { const a = args[i]; if (a !== null && typeof a === 'object' && (a instanceof PHPObject || (a instanceof Ref && a.v instanceof PHPObject))) return true; }
+  return false;
+}
 export function fnDisplayName(fn) {
   if (!fn) return '';
   if (fn.isMethod && fn.cls) return fn.cls.name + '::' + fn.name;
@@ -285,7 +288,11 @@ function checkReturn(fn, v, f, none) {
     if (a === 'never') throwError('TypeError', `${fnDisplayName(fn)}(): never-returning function must not implicitly return`);
   }
   const r = coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
-  if (r === FAIL) throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(t, fn.cls)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
+  if (r === FAIL) {
+    // static reads as the called class
+    const shown = t.alts.includes('static') && (f.sc || fn.cls) ? { ...t, alts: t.alts.map((a) => (a === 'static' ? (f.sc || fn.cls).name : a)) } : t;
+    throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(shown, fn.cls)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
+  }
   return r;
 }
 export function coercePropType(info, v, clsName, name) {
@@ -314,13 +321,28 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   rt.frame = f; rt.file = fn.file;
   f.callLine = prevLine; f.callFile = prevFile;
   rt.stack.push(f);
-  let r;
-  try { r = body(f); }
-  finally { rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--; }
-  const ret = r === RETURN ? f.ret : null;
+  const allocs = objHandles.allocs;
+  let r, ret;
+  try {
+    r = body(f);
+    ret = r === RETURN ? f.ret : null;
+    // the return type is checked in the callee (errors point at its return statement)
+    if (fn.ret !== null && fn.ret !== undefined) {
+      if (r !== RETURN && fn.decl && fn.decl.endLine) rt.line = fn.decl.endLine; // falling off the end: the closing brace
+      ret = checkReturn(fn, ret, f, r !== RETURN);
+    }
+  } catch (e) {
+    // an exception unwinds the call: its locals go too (not what the exception holds)
+    rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
+    if (e instanceof ThrowSig) { frameExit(f.vars, e.obj); if (f.ret !== null && typeof f.ret === 'object') frameExit([f.ret], e.obj); }
+    throw e;
+  }
+  rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
   if (f.retRef) rt.lastRetRef = f.retRef; else if (fn.byRef) rt.lastRetRef = NOREF;
   if (f.destr) gcAfterCall(f, ret);
-  if (fn.ret !== null && fn.ret !== undefined) return checkReturn(fn, ret, f, r !== RETURN);
+  // the locals are gone: objects only they held lose their handles (when objects were created
+  // during the call or passed to it)
+  if (allocs !== objHandles.allocs || argsHoldObjects(args)) frameExit(f.vars, ret);
   return ret;
 }
 
@@ -365,10 +387,14 @@ export function callNative(fn, args) {
   const prev = rt.nativeName, prevArgs = rt.nativeArgs; rt.nativeName = fn.name; rt.nativeArgs = args;
   const st = rt.stack;
   st.push(new NativeFrame(fn, args));
+  let r;
   try {
-    const r = fn.frame ? fn.native(rt.frame, ...args) : fn.native(...args);
-    return r === undefined ? null : r;
+    r = fn.frame ? fn.native(rt.frame, ...args) : fn.native(...args);
   } finally { rt.nativeName = prev; rt.nativeArgs = prevArgs; st.pop(); }
+  if (r === undefined) r = null;
+  // objects passed to a builtin and held nowhere else are freed when it returns
+  if (argsHoldObjects(args)) frameExit(args, r);
+  return r;
 }
 export class NativeFrame {
   constructor(fn, args) { this.fn = fn; this.args = args; this.callLine = rt.line; this.callFile = rt.file; this.this = null; this.cls = null; this.native = true; }

@@ -14,7 +14,7 @@ import {
   bindProp, callMethodName, findStaticProp, lookupClass, lookupStaticProp, propArr, propRef, readProp,
   readPropQuiet, unsetProp, writeProp
 } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { dropRef, gcCheck } from '../runtime/gc.js';
 
 export function cLval(n) {
   switch (n.k) {
@@ -63,8 +63,8 @@ function lvVar(name, node) {
     name,
     get(f) { const r = f.vars[name]; if (r === undefined) { warnUndefVar(name); return null; } return r.v; },
     getq(f) { const r = f.vars[name]; return r === undefined ? undefined : r.v; },
-    set(f, v) { const r = f.vars[name]; if (r !== undefined) { const old = r.v; r.v = v; if (old instanceof PHPObject && old !== v && old.cls.hasDestructor) gcCheck(old); } else f.vars[name] = new Ref(v); },
-    bind(f, ref) { f.vars[name] = ref; },
+    set(f, v) { const r = f.vars[name]; if (r !== undefined) { const old = r.v; r.v = v; if (old !== v && old !== null && typeof old === 'object') { dropRef(old); if (old instanceof PHPObject && old.cls.hasDestructor) gcCheck(old); } } else f.vars[name] = new Ref(v); },
+    bind(f, ref) { const old = f.vars[name]; f.vars[name] = ref; if (old !== undefined && old !== ref && old.v !== null && typeof old.v === 'object') dropRef(old.v); },
     ref(f) { return f.vars[name] || (f.vars[name] = new Ref(null)); },
     arr(f) {
       const r = f.vars[name] || (f.vars[name] = new Ref(null));
@@ -72,7 +72,7 @@ function lvVar(name, node) {
       if (v instanceof PHPArray && !v.cow && !v.fe) return v;
       return writableArrIn(r);
     },
-    unset(f) { const r = f.vars[name]; delete f.vars[name]; if (r !== undefined && r.v instanceof PHPObject && r.v.cls.hasDestructor) gcCheck(r.v); },
+    unset(f) { const r = f.vars[name]; delete f.vars[name]; if (r !== undefined) { dropRef(r.v); if (r.v instanceof PHPObject && r.v.cls.hasDestructor) gcCheck(r.v); } },
     place() { return this; },
     modify(f, fn, quiet) {
       let r = f.vars[name];
@@ -111,8 +111,9 @@ function lvIndex(n) {
     return {
       get: (f) => { const k = toStr(I(f)); const r = rt.globals[k]; if (!r) { warn(`Undefined global variable $${k}`); return null; } return r.v; },
       getq: (f) => { const r = rt.globals[toStr(I(f))]; return r ? r.v : undefined; },
-      set: (f, v) => { gref(f).v = v; }, bind: (f, r) => { rt.globals[toStr(I(f))] = r; }, ref: gref,
-      arr: (f) => writableArrIn(gref(f)), unset: (f) => { delete rt.globals[toStr(I(f))]; },
+      set: (f, v) => { const g = gref(f); const old = g.v; g.v = v; if (old !== v) dropRef(old); },
+      bind: (f, r) => { const k = toStr(I(f)); const old = rt.globals[k]; rt.globals[k] = r; if (old && old !== r) dropRef(old.v); }, ref: gref,
+      arr: (f) => writableArrIn(gref(f)), unset: (f) => { const k = toStr(I(f)); const old = rt.globals[k]; delete rt.globals[k]; if (old) dropRef(old.v); },
       modify: (f, fn) => { const r = gref(f); return (r.v = fn(r.v)); },
     };
   }
@@ -168,14 +169,17 @@ function indexOps(P, I) {
       }
       const c = P.arr(f);
       if (c instanceof PHPArray) {
-        if (I) c.set(normKey(I(f)), v); else c.push(v);
+        if (I) { const k = normKey(I(f)); const old = c.get(k); c.set(k, v); if (old !== v && old !== null && typeof old === 'object') dropRef(old); } else c.push(v);
         return;
       }
       if (c instanceof PHPObject) { arrayAccessSet(c, I ? I(f) : null, v); return; }
     },
     bind(f, ref) {
       const c = P.arr(f);
-      if (c instanceof PHPArray) { if (I) c.setRaw(normKey(I(f)), ref); else c.push(ref); return; }
+      if (c instanceof PHPArray) {
+        if (I) { const k = normKey(I(f)); const old = c.getRaw(k); c.setRaw(k, ref); if (old !== undefined && old !== ref) dropRef(old instanceof Ref ? old.v : old); } else c.push(ref);
+        return;
+      }
       throwError('Error', 'Cannot assign by reference to overloaded object');
     },
     ref(f) {
@@ -229,7 +233,7 @@ function indexOps(P, I) {
     unset(f) {
       const cur = P.getq(f);
       if (cur === undefined || cur === null) return;
-      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f)); const old = c.get(k); c.delete(k); gcCheck(old); return; }
+      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f)); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
       if (cur instanceof PHPObject) { if (cur.cls.ancestors.has('arrayaccess')) callMethodName(cur, 'offsetUnset', [I(f)]); else throwError('Error', `Cannot use object of type ${cur.cls.name} as array`); return; }
       if (typeof cur === 'string') throwError('Error', 'Cannot unset string offsets');
     },

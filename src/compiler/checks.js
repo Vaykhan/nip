@@ -8,6 +8,7 @@ import { cExpr } from './expr.js';
 import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
+import { RESERVED_CLASS_NAMES } from '../parser.js';
 
 // How an expression is used: read, written (assignment target, by-ref argument, ...), unset,
 // or passed as an argument whose by-ref-ness is only known at run time.
@@ -40,11 +41,23 @@ export function checkProgram(ast) {
     switch (n.k) {
       case 'Lit': return;
       case 'ClassDecl': {
+        if (!n.anon) { const short = n.name.slice(n.name.lastIndexOf('\\') + 1); if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n); }
         checkClass(n);
         checkAttrs(n.attrs, T_CLASS);
         for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD); methods.add(m.fn); }
         for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
-        for (const c of n.consts) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
+        for (const c of n.consts) {
+          checkAttrs(c.attrs, T_CLASS_CONSTANT);
+          checkConstExpr(c.e, false);
+          if (c.type) {
+            const bad = c.type.alts.find((a) => typeof a === 'string' && ['callable', 'void', 'never'].includes(a.toLowerCase()));
+            if (bad) fail(`Class constant ${n.name}::${c.name} cannot have type ${bad.toLowerCase()}`, c);
+            const lit = literalValue(c.e);
+            if (lit !== NOT_LITERAL && (lit === null ? !c.type.nullable && !c.type.alts.some((a) => a === 'mixed' || a === 'null') : !validDefault(c.type, lit))) {
+              fail(`Cannot use ${literalType(lit)} as value for class constant ${n.name}::${c.name} of type ${typeStr(c.type, null, true)}`, c);
+            }
+          }
+        }
         for (const c of n.cases) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
         for (const p of n.props) {
           checkConstExpr(p.def, false);
@@ -129,6 +142,11 @@ export function checkProgram(ast) {
         const ret = scope.ret && !scope.isGen && scope.ret.raw && scope.ret.raw.length === 1 && !scope.ret.q && typeof scope.ret.raw[0] === 'string' ? scope.ret.raw[0].toLowerCase() : null;
         if (ret === 'void' && n.e) fail(n.e.k === 'Lit' && n.e.v === null ? 'A void function must not return a value (did you mean "return;" instead of "return null;"?)' : 'A void function must not return a value', n);
         if (ret === 'never') fail('A never-returning function must not return', n);
+        if (!n.e && scope.ret && !scope.isGen && ret !== 'void') {
+          const t = scope.ret;
+          const nullOk = t.nullable || t.alts.some((a) => a === 'mixed' || a === 'null');
+          fail(`A function with return type must return a value${nullOk ? ' (did you mean "return null;" instead of "return;"?)' : ''}`, n);
+        }
         visit(n.e, scope.byRef ? WRITE : READ); return; // function &f() { return $a[]; }
       }
       case 'While': case 'DoWhile': case 'For': case 'Foreach': case 'Switch': {

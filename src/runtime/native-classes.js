@@ -67,7 +67,7 @@ export function bootNativeClasses() {
     final: true,
     methods: {
       'static create': (self, args) => { const o = new PHPObject(rt.classes.get('weakreference')); o.target = argv0(args, 0); return o; },
-      get: (self) => self.target || null,
+      get: (self) => (self.target && !self.target.idFreed ? self.target : null), // freed objects are gone
     },
   });
   for (const c of [closureClass, generatorClass, weakRef, rt.classes.get('fiber')]) c.noDynamic = true;

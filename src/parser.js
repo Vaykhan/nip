@@ -2,7 +2,6 @@
 
 import pathMod from 'node:path';
 import { I64MIN, mkf, ParseErr } from './values.js';
-import { toBool } from './convert.js';
 import { neg } from './arith.js';
 import { lex } from './lexer.js';
 
@@ -17,6 +16,8 @@ const BIN_BP = {
   'instanceof': [21, 'L'], '**': [22, 'R'],
 };
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '.=', '%=', '**=', '&=', '|=', '^=', '<<=', '>>=', '??=']);
+// names a class can't have (zend_is_reserved_class_name)
+export const RESERVED_CLASS_NAMES = new Set(['bool', 'false', 'float', 'int', 'null', 'parent', 'self', 'static', 'string', 'true', 'void', 'never', 'iterable', 'object', 'mixed']);
 const RESERVED_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'callable', 'iterable', 'object', 'mixed', 'void', 'null', 'never', 'false', 'true', 'self', 'parent', 'static']);
 const MAGIC = new Set(['__line__', '__file__', '__dir__', '__function__', '__class__', '__method__', '__namespace__', '__trait__']);
 // statements PHP doesn't tick after (zend_is_unticked_stmt, plus if and switch which don't in practice)
@@ -146,6 +147,7 @@ export class Parser {
 
   // declare(ticks=N): every statement that PHP ticks after gets `ticks` (see cStmt)
   parseStatement(top) {
+    if (!this.isId('declare') && !(this.tok.t === 'op' && this.tok.v === ';')) this.sawStatement = true; // for strict_types placement
     const st = this.parseStatement0(top);
     if (st && this.st.ticks && !UNTICKED.has(st.k)) st.ticks = this.st.ticks;
     return st;
@@ -372,8 +374,19 @@ export class Parser {
         case 'declare': {
           this.p++; this.expect('(');
           const prevTicks = this.st.ticks;
-          do { const name = this.ident().toLowerCase(); this.expect('='); const e = this.parseExpr(); if (name === 'ticks') { if (e.k !== 'Lit') throw new ParseErr('declare(ticks) value must be a literal', e.l, 'Fatal error'); this.st.ticks = Number(e.v); } if (name === 'strict_types') this.st.strict = e.k === 'Lit' && toBool(e.v); } while (this.accept(','));
+          let strict = false;
+          do {
+            const name = this.ident().toLowerCase(); this.expect('='); const e = this.parseExpr();
+            if (name === 'ticks') { if (e.k !== 'Lit') throw new ParseErr('declare(ticks) value must be a literal', e.l, 'Fatal error'); this.st.ticks = Number(e.v); }
+            if (name === 'strict_types') {
+              if (e.k !== 'Lit' || (e.v !== 0 && e.v !== 1)) this.fatal('strict_types declaration must have 0 or 1 as its value', t);
+              if (this.sawStatement) this.fatal('strict_types declaration must be the very first statement in the script', t);
+              this.st.strict = e.v === 1;
+              strict = true;
+            }
+          } while (this.accept(','));
           this.expect(')');
+          if (strict && (this.isOp('{') || this.isOp(':'))) this.fatal('strict_types declaration must not use block mode', t);
           // block form: the declaration applies to the block only
           if (this.isOp('{')) { const b = this.parseBlock(); this.st.ticks = prevTicks; return b; }
           if (this.accept(':')) { const b = this.parseStmtsUntil('enddeclare'); this.p++; this.semi(); this.st.ticks = prevTicks; return b; }
@@ -397,6 +410,7 @@ export class Parser {
     return { k: 'ExprStmt', e, l };
   }
   addUse(kind, name, alias) {
+    if (kind === 'class' && RESERVED_CLASS_NAMES.has(alias.toLowerCase())) this.fatal(`Cannot use ${name} as ${alias} because '${alias}' is a special class name`);
     if (kind === 'function') this.st.useFns.set(alias.toLowerCase(), name);
     else if (kind === 'const') this.st.useConsts.set(alias, name);
     else this.st.uses.set(alias.toLowerCase(), name);
@@ -473,9 +487,12 @@ export class Parser {
     return { alts: alts.filter((a) => a !== 'null'), nullable, raw: alts, l };
   }
   parseSingleType() {
+    const tk = this.tok;
     const name = this.ident();
     const ln = name.toLowerCase();
     if (RESERVED_TYPES.has(ln)) return ln;
+    const last = ln.slice(ln.lastIndexOf('\\') + 1);
+    if (ln.includes('\\') && RESERVED_TYPES.has(last) && last !== 'self' && last !== 'parent' && last !== 'static') this.fatal(`Type declaration '${last}' must be unqualified`, tk);
     return this.resolveClass(name);
   }
   atTypeStart() {
@@ -1079,5 +1096,7 @@ export class Parser {
 export function parsePHP(src, file) {
   const toks = lex(src, file);
   const p = new Parser(toks, file);
-  return p.parseProgram();
+  const ast = p.parseProgram();
+  ast.strict = !!p.st.strict; // declare(strict_types=1): applies to calls from the file's top-level code
+  return ast;
 }

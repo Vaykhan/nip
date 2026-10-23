@@ -254,9 +254,14 @@ export function normKey(k) {
 export function cp(v) { if (v instanceof PHPArray) v.cow = true; return v; }
 
 // ---------------------------------------------------------------- objects
-let objIdCounter = 0;
+// Object handles: freed handles are reused, most recently freed first (see runtime/gc.js)
+export const objHandles = { next: 0, free: [], allocs: 0 };
 export class PHPObject {
-  constructor(cls) { this.cls = cls; this.props = new Map(); this.id = ++objIdCounter; }
+  constructor(cls) {
+    this.cls = cls; this.props = new Map();
+    objHandles.allocs++;
+    this.id = objHandles.free.length ? objHandles.free.pop() : ++objHandles.next;
+  }
 }
 export class PHPResource {
   constructor(type, h) { this.type = type; this.h = h; this.id = ++PHPResource.n; this.closed = false; }

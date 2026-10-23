@@ -6,12 +6,12 @@ import { toStr } from '../convert.js';
 import { utf8Encode } from '../utf8.js';
 import { Frame } from '../compiler/common.js';
 import { rt } from './state.js';
-import { toThrowSig, writeErr } from './errors.js';
+import { setTimeLimit, toThrowSig, warn, writeErr } from './errors.js';
 import { callNative, NativeFrame } from './functions.js';
 import { callValue } from './callables.js';
 import { gcShutdown } from './gc.js';
 import { closeFibers } from './fibers.js';
-import { compileSource, runProgram } from './program.js';
+import { compileSource, doInclude, resolveIncludePath, runProgram } from './program.js';
 import { deref } from '../lib/core.js';
 import { INI_DEFAULTS } from '../lib/errors.js';
 import { obApply, obEmit } from '../lib/output.js';
@@ -83,6 +83,20 @@ function iniValue(raw) {
   return tokens.map((t) => (/^[A-Za-z_]/.test(t) && rt.consts.has(t) ? toStr(rt.consts.get(t)) : t)).join('');
 }
 
+// auto_prepend_file / auto_append_file: required around the main script; a missing file is
+// reported "in Unknown on line 0"
+function autoInclude(key, f) {
+  const path = rt.ini.get(key);
+  if (!path) return;
+  if (!resolveIncludePath(path)) {
+    const prevFile = rt.file, prevLine = rt.line;
+    rt.file = 'Unknown'; rt.line = 0;
+    try { warn('Unknown: Failed to open stream: No such file or directory'); } finally { rt.file = prevFile; rt.line = prevLine; }
+    throw new FatalSig(`Failed opening required '${path}' (include_path='${rt.ini.get('include_path') || '.:/usr/share/php'}')`, 0, 'Unknown');
+  }
+  doInclude(path, 'require', f);
+}
+
 // disable_functions (startup-only ini): listed builtins behave as if they didn't exist
 function disableFunctions(list) {
   rt.disabledFns = null;
@@ -112,14 +126,18 @@ export function runScript(code, file, argv, opts = {}) {
   rt.globalFrame = f; rt.frame = f; rt.file = file; rt.line = 0; rt.mainFile = file;
   let exitCode = 0;
   try {
+    const auto = !opts.lint && file !== 'Command line code'; // php -r ignores them
+    if (auto) autoInclude('auto_prepend_file', f);
     const prog = compileSource(code, file);
     rt.mainStrict = false;
     if (opts.lint) { rt.flush(); return { exitCode: 0, output: '' }; }
     runProgram(prog, f);
+    if (auto) autoInclude('auto_append_file', f);
   } catch (e) {
     exitCode = handleTopLevel(e);
   }
-  // shutdown sequence
+  // shutdown sequence (shutdown functions get the time limit again)
+  if (rt.timeLimit > 0) setTimeLimit(rt.timeLimit);
   try {
     for (let i = 0; i < rt.shutdownFns.length; i++) { const [cb, a] = rt.shutdownFns[i]; callValue(cb, a); }
   } catch (e) { exitCode = handleTopLevel(e); }

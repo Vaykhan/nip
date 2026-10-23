@@ -25,7 +25,7 @@ import {
 import {
   canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { dropRef, gcCheck } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
 import { deref } from '../lib/core.js';
 import { closureClass } from '../runtime/native-classes.js';
@@ -171,7 +171,8 @@ const EXPR = {
     }
     const T = cLval(n.t);
     const E = cValue(n.e);
-    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && !isPureExpr(n.e) && !isSimpleTarget(n.t)) {
+    // PHP evaluates dims and property names that are expressions before the assigned value
+    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && ((!isPureExpr(n.e) && !isSimpleTarget(n.t)) || hasImpureDims(n.t))) {
       return (f) => { const p = T.place(f); const v = E(f); const r = p.set(f, v); return r === undefined ? v : r; };
     }
     if (n.t.k === 'VarVar') {
@@ -181,7 +182,7 @@ const EXPR = {
       const name = n.t.name;
       return (f) => {
         const v = E(f); const r = f.vars[name];
-        if (r !== undefined) { const old = r.v; r.v = v; if (old instanceof PHPObject && old !== v && old.cls.hasDestructor) gcCheck(old); }
+        if (r !== undefined) { const old = r.v; r.v = v; if (old !== v && old !== null && typeof old === 'object') { dropRef(old); if (old instanceof PHPObject && old.cls.hasDestructor) gcCheck(old); } }
         else f.vars[name] = new Ref(v);
         return v;
       };
@@ -230,7 +231,8 @@ const EXPR = {
       };
     }
     const fnop = BINOPS[op];
-    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && !isPureExpr(n.e) && !isSimpleTarget(n.t)) {
+    // PHP evaluates dims and property names that are expressions before the assigned value
+    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && ((!isPureExpr(n.e) && !isSimpleTarget(n.t)) || hasImpureDims(n.t))) {
       return (f) => { const p = T.place(f); const v = E(f); return p.modify(f, (cur) => fnop(cur, v)); };
     }
     if (op === '.' && n.t.k === 'Var' && typeof n.t.name === 'string' && n.t.name !== 'this' && !SUPERGLOBALS.has(n.t.name) && n.t.name !== 'GLOBALS') {
@@ -542,6 +544,13 @@ const EXPR = {
 };
 
 // target whose sub-expressions are literals / plain variables that the RHS cannot change
+function hasImpureDims(t) {
+  switch (t.k) {
+    case 'Index': return (t.i !== null && !isPureExpr(t.i)) || hasImpureDims(t.o);
+    case 'Prop': return (typeof t.name === 'object' && !isPureExpr(t.name)) || hasImpureDims(t.o);
+  }
+  return false;
+}
 function isSimpleTarget(t) {
   switch (t.k) {
     case 'Var': return typeof t.name === 'string';

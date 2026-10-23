@@ -8,7 +8,7 @@ import { bytes, utf8Encode } from '../utf8.js';
 import {
   E_ALL, E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING, rt, writeFd
 } from '../runtime/state.js';
-import { captureTrace, raise, throwError, traceAsString } from '../runtime/errors.js';
+import { captureTrace, raise, setTimeLimit, throwError, traceAsString } from '../runtime/errors.js';
 import { callableFn, callValue } from '../runtime/callables.js';
 import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
@@ -37,6 +37,7 @@ def('ini_set', (option, value) => {
   if (k === 'display_errors') rt.displayErrors = (v === '1' || v.toLowerCase() === 'on' || v.toLowerCase() === 'true' || v.toLowerCase() === 'stdout') ? 'stdout' : (v.toLowerCase() === 'stderr' ? 'stderr' : '0');
   else if (k === 'error_reporting') rt.errorReporting = toInt(v);
   else if (k === 'precision') rt.precision = toInt(v);
+  else if (k === 'max_execution_time') setTimeLimit(toInt(v));
   else if (k === 'serialize_precision') rt.serializePrecision = toInt(v);
   else if (k === 'date.timezone') rt.tz = v;
   rt.ini.set(k, v);
@@ -51,7 +52,7 @@ function ini_get(k) {
     case 'precision': return String(rt.precision);
     case 'serialize_precision': return String(rt.serializePrecision);
     case 'memory_limit': return '128M';
-    case 'max_execution_time': return '0';
+    case 'max_execution_time': return String(rt.timeLimit);
     case 'date.timezone': return rt.tz;
     case 'default_charset': return 'UTF-8';
     case 'include_path': return '.:/usr/share/php';
@@ -114,7 +115,7 @@ def('debug_backtrace', (options = 1, limit = 0) => { const t = captureTrace(!(I(
 def('debug_print_backtrace', (options = 0, limit = 0) => { const t = captureTrace(!(I(options) & 2)); t.delete(0); t.reindex(); const s = traceAsString(t); rt.echo(s.slice(0, s.lastIndexOf('#')) ); });
 def('gc_collect_cycles', () => 0);
 def('gc_enable', () => null); def('gc_disable', () => null); def('gc_enabled', () => true); def('gc_mem_caches', () => 0);
-def('set_time_limit', (seconds) => true);
+def('set_time_limit', (seconds) => { setTimeLimit(I(seconds)); return true; });
 def('ignore_user_abort', (enable = null) => 0);
 def('connection_status', () => 0); def('connection_aborted', () => 0);
 def('headers_sent', () => false); def('header', (header, replace = true, response_code = 0) => null); def('header_remove', (name = null) => null);

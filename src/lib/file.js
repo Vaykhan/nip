@@ -91,8 +91,22 @@ export function streamWrite(stream, data) {
   else { fs.writeSync(h.fd, buf, 0, buf.length, h.pos - h.rbuf.length); h.pos = h.pos - h.rbuf.length + buf.length; h.rbuf = ''; }
   return buf.length;
 }
+// data: URLs (RFC 2397): "data:[//][<media type>][;base64],<data>"; null when malformed
+function dataUrl(fn) {
+  const m = /^data:(?:\/\/)?([^,]*),([\s\S]*)$/.exec(fn);
+  if (!m) return null;
+  if (/;base64$/i.test(m[1])) return Buffer.from(m[2], 'base64').toString('latin1');
+  return m[2].replace(/%([0-9a-fA-F]{2})/g, (x, h) => String.fromCharCode(parseInt(h, 16)));
+}
 function openStream(filename, mode) {
   const fn = filename;
+  if (/^data:/i.test(fn)) {
+    const data = dataUrl(fn);
+    if (data === null) { warn(`${rt.nativeName}(): rfc2397: no comma in URL`); warn(`${rt.nativeName}(${fn}): Failed to open stream: operation failed`); return false; }
+    const r = mkStream('mem', -1, fn, 'r');
+    r.h.mem = data; r.h.dataUrl = true;
+    return r;
+  }
   if (fn === 'php://stdin') return STDIN_R;
   if (fn === 'php://stdout') return mkStream('stdio', 1, fn, 'w');
   if (fn === 'php://stderr') return mkStream('stdio', 2, fn, 'w');
@@ -163,14 +177,14 @@ def('stream_get_line', (stream, length, ending = '') => {
     h.rbuf += c;
   }
 });
-def('stream_get_meta_data', (stream) => { const h = getStream(stream); return PHPArray.fromPairs([['timed_out', false], ['blocked', true], ['eof', h.eof], ['wrapper_type', h.kind === 'file' ? 'plainfile' : 'PHP'], ['stream_type', h.kind === 'mem' ? 'MEMORY' : 'STDIO'], ['mode', h.mode], ['unread_bytes', 0], ['seekable', h.kind !== 'stdio'], ['uri', h.path]]); });
+def('stream_get_meta_data', (stream) => { const h = getStream(stream); return PHPArray.fromPairs([['timed_out', false], ['blocked', true], ['eof', h.eof], ['wrapper_type', h.kind === 'file' ? 'plainfile' : h.dataUrl ? 'RFC2397' : 'PHP'], ['stream_type', h.kind === 'mem' ? 'MEMORY' : 'STDIO'], ['mode', h.mode], ['unread_bytes', 0], ['seekable', h.kind !== 'stdio'], ['uri', h.path]]); });
 def('stream_isatty', (stream) => { const h = getStream(stream); try { return h.kind === 'stdio' && tty.isatty(h.fd); } catch (e) { return false; } });
 alias('posix_isatty', 'stream_isatty');
 def('stream_set_blocking', (stream, enable) => true);
 def('stream_set_timeout', (stream, seconds, microseconds = 0) => true);
 def('stream_context_create', (options = null, params = null) => new PHPResource('stream-context', {}));
 def('stream_select', (read, write, except, seconds, microseconds = 0) => { const r = deref(read); return r instanceof PHPArray ? r.size : 0; }, { refs: [true, true, true] });
-def('stream_get_wrappers', () => PHPArray.from(['php', 'file']));
+def('stream_get_wrappers', () => PHPArray.from(['php', 'file', 'data']));
 def('fpassthru', (stream) => { const s = callNative(rt.fns.get('stream_get_contents'), [stream]); rt.echo(s); return s.length; });
 def('fgetcsv', (stream, length = null, separator = ',', enclosure = '"', escape = '\\') => {
   const h = getStream(stream);
@@ -230,6 +244,7 @@ def('file_get_contents', (filename, use_include_path = false, context = null, of
   const fn = S(filename);
   if (fn === 'php://stdin') { let out = STDIN_R.h.rbuf; STDIN_R.h.rbuf = ''; for (;;) { const c = rawRead(STDIN_R.h, 65536); if (c === '') break; out += c; } return out; }
   if (fn === 'php://input') return '';
+  if (/^data:/i.test(fn)) { const d = dataUrl(fn); if (d !== null) return d; }
   if (/^https?:\/\//i.test(fn)) {
     try { return fromBytes(cpMod.execFileSync('curl', ['-sSL', '--fail', fn], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 30 })); }
     catch (e) { warn(`file_get_contents(${fn}): Failed to open stream: HTTP request failed!`); return false; }

@@ -11,7 +11,7 @@ export const rt = {
   globals: Object.create(null), frame: null, globalFrame: null, line: 0, file: '', stack: [], depth: 0,
   silence: 0, errorReporting: E_ALL & ~E_DEPRECATED & ~E_STRICT, displayErrors: 'stderr',
   precision: 14, serializePrecision: -1, errorHandlers: [], exceptionHandlers: [], shutdownFns: [], autoloaders: [],
-  epoch: 0, hoisting: false, tickFns: [], tickCount: 0, currentFiber: null, suspendedFibers: new Set(), included: new Set(), progCache: new Map(), obStack: [], outBuf: '', capture: null, ini: new Map(), mainStrict: false,
+  epoch: 0, hoisting: false, constRoots: [], deadline: 0, timeLimit: 0, staticOwners: new Set(), tickFns: [], tickCount: 0, currentFiber: null, suspendedFibers: new Set(), included: new Set(), progCache: new Map(), obStack: [], outBuf: '', capture: null, ini: new Map(), mainStrict: false,
   destructibles: [], tz: 'UTC', inHandler: false, lastError: null, exitCode: 0, startTime: Date.now(),
   echo(s) {
     if (s.length === 0) return;

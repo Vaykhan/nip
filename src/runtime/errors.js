@@ -101,6 +101,18 @@ export function captureTrace(withArgs) {
 }
 // Code in src/prelude/*.php runs as if it were internal: errors raised there are reported at
 // the user's call site, and calls between prelude functions don't appear in traces.
+// set_time_limit()/max_execution_time: loops check the deadline every few thousand iterations
+let timeTicks = 0;
+export function checkTimeLimit() {
+  if (++timeTicks < 4096) return;
+  timeTicks = 0;
+  if (Date.now() > rt.deadline) {
+    const n = rt.timeLimit;
+    rt.deadline = 0;
+    throw new FatalSig(`Maximum execution time of ${n} second${n === 1 ? '' : 's'} exceeded`, rt.line, rt.file);
+  }
+}
+export function setTimeLimit(n) { rt.timeLimit = n; rt.deadline = n > 0 ? Date.now() + n * 1000 : 0; }
 export const PRELUDE_FILE = 'prelude.php';
 export function userLocation() {
   if (rt.file !== PRELUDE_FILE) return [rt.file, rt.line];

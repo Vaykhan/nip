@@ -7,10 +7,10 @@ import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
-import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
+import { checkTimeLimit, notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { compilingByRef, declareFunction, valueName } from '../runtime/functions.js';
 import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
 import { callValue } from '../runtime/callables.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
@@ -106,14 +106,20 @@ const STMT = {
     const l = n.l;
     if (n.args.length === 1 && n.args[0].k === 'Lit') { const s = toStr(n.args[0].v); return () => { rt.echo(s); }; }
     const args = n.args.map(cExpr);
-    if (args.length === 1) { const A = args[0]; return (f) => { rt.line = l; const v = A(f); rt.echo(typeof v === 'string' ? v : toStr(v)); }; }
-    return (f) => { rt.line = l; for (let i = 0; i < args.length; i++) { const v = args[i](f); rt.echo(typeof v === 'string' ? v : toStr(v)); } };
+    if (args.length === 1) { const A = args[0]; return (f) => { rt.line = l; if (idq.n) idSafePoint(); const v = A(f); rt.echo(typeof v === 'string' ? v : toStr(v)); }; }
+    return (f) => { rt.line = l; if (idq.n) idSafePoint(); for (let i = 0; i < args.length; i++) { const v = args[i](f); rt.echo(typeof v === 'string' ? v : toStr(v)); } };
   },
   ExprStmt(n) {
     if (n.e.k === 'Var' && n.e.name !== 'this') return () => undefined; // `$x;` compiles to nothing in PHP (no warning)
     const E = cExpr(n.e); const l = n.l;
-    if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; E(f); };
-    return (f) => { rt.line = l; const v = E(f); if (v instanceof PHPObject && v.cls.hasDestructor && !v.destructed) gcCheck(v); };
+    // statement starts are where freed object handles get reclaimed (see runtime/gc.js)
+    if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; if (idq.n) idSafePoint(); E(f); };
+    return (f) => {
+      rt.line = l;
+      if (idq.n) idSafePoint();
+      const v = E(f);
+      if (v instanceof PHPObject) { dropRef(v); if (v.cls.hasDestructor && !v.destructed) gcCheck(v); }
+    };
   },
   If(n) {
     const conds = [cExpr(n.c), ...n.elifs.map((e) => cExpr(e.c))];
@@ -138,6 +144,7 @@ const STMT = {
     return (f) => {
       rt.line = l;
       while (toBool(C(f))) {
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -151,6 +158,7 @@ const STMT = {
     const C = cExpr(n.c), B = cBody(n.body);
     return (f) => {
       do {
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -169,6 +177,7 @@ const STMT = {
         let ok = true;
         for (let i = 0; i < cond.length; i++) { const v = cond[i](f); if (i === cond.length - 1) ok = toBool(v); }
         if (!ok) break;
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -182,6 +191,7 @@ const STMT = {
   Foreach(n) {
     const E = cExpr(n.e);
     const LE = n.byRef ? cLval(n.e) : null;
+    const subjIsVar = ['Var', 'Index', 'Prop', 'SProp', 'VarVar'].includes(n.e.k);
     const K = n.kv ? cLval(n.kv) : null;
     const V = cLval(n.v);
     const isList = n.v.k === 'List';
@@ -193,7 +203,10 @@ const STMT = {
       rt.line = l;
       if (n.byRef) {
         const subj0 = LE.getq(f);
-        if (subj0 instanceof PHPObject) return foreachObject(f, subj0, K, V, B, true, isList);
+        if (subj0 instanceof PHPObject) {
+          if (subj0.cls.ancestors.has('traversable')) throwError('Error', 'An iterator cannot be used with foreach by reference');
+          return foreachObject(f, subj0, K, V, B, true, isList);
+        }
         if (subj0 !== undefined && subj0 !== null && !(subj0 instanceof PHPArray)) { warn(`foreach() argument must be of type array|object, ${valueName(subj0)} given`); return; }
         let arr = LE.arr(f);
         if (!(arr instanceof PHPArray)) return foreachObject(f, arr, K, V, B, true, isList);
@@ -206,12 +219,11 @@ const STMT = {
         try {
           for (;;) {
             // the variable may have been given another array
-            const cur = LE.getq(f);
+            const cur = subjIsVar ? LE.getq(f) : arr;
             if (cur !== arr) {
               if (!(cur instanceof PHPArray)) break;
               detach(arr);
-              arr = LE.arr(f);
-              it.pos = arr.pos;
+              arr = LE.arr(f); // the position carries over
               attach(arr);
             }
             let i = it.pos;
@@ -237,6 +249,7 @@ const STMT = {
       if (subj instanceof PHPArray) {
         if (subj.size === 0) return;
         subj.fe = (subj.fe || 0) + 1;
+        feSubjects.push(subj);
         try {
           const ks = subj.k, vs = subj.v;
           for (let i = 0; i < ks.length; i++) {
@@ -256,10 +269,13 @@ const STMT = {
               return r;
             }
           }
-        } finally { subj.fe--; }
+        } finally { subj.fe--; feSubjects.pop(); dropRef(subj); }
         return;
       }
-      if (subj instanceof PHPObject) return foreachObject(f, subj, K, V, B, false, isList);
+      if (subj instanceof PHPObject) {
+        feSubjects.push(subj);
+        try { return foreachObject(f, subj, K, V, B, false, isList); } finally { feSubjects.pop(); dropRef(subj); }
+      }
       warn(`foreach() argument must be of type array|object, ${valueName(subj)} given`);
     };
   },
@@ -311,7 +327,7 @@ const STMT = {
       return (f) => { rt.line = l; rt.lastRetRef = null; const v = E0(f); const r = rt.lastRetRef; rt.lastRetRef = null; f.ret = v; if (r !== null && r !== NOREF && r.v === v) f.retRef = r; else if (r !== NOREF) notice('Only variable references should be returned by reference'); return RETURN; };
     }
     const E = cValue(n.e); const l = n.l;
-    return (f) => { rt.line = l; f.ret = E(f); return RETURN; };
+    return (f) => { rt.line = l; if (idq.n) idSafePoint(); f.ret = E(f); return RETURN; };
   },
   Try(n) {
     const B = cBody(n.body);
@@ -376,7 +392,7 @@ const STMT = {
         const owner = f.closure || f.fn;
         if (!owner) { st = rt.mainStatics || (rt.mainStatics = new Map()); }
         else {
-          if (!owner.statics) owner.statics = new Map();
+          if (!owner.statics) { owner.statics = new Map(); rt.staticOwners.add(owner); }
           st = owner.statics;
           // methods: statics are per-class (late static binding scope)
           if (f.fn && f.fn.isMethod && f.sc && !f.closure) {
@@ -402,7 +418,9 @@ const STMT = {
     return (f) => {
       for (const it of items) {
         if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined`); continue; }
-        rt.consts.set(it.name, it.E(f));
+        const v = it.E(f);
+        rt.consts.set(it.name, v);
+        if (v !== null && typeof v === 'object') rt.constRoots.push(v);
       }
     };
   },
