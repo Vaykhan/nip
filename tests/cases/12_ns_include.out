@@ -1,0 +1,18 @@
+array(1) {
+  ["config"]=>
+  bool(true)
+}
+from include: outer
+Hello, Bob from App\Util X Y 1.2 App\Util\Str App\Util\Str
+bool(true)
+Main\Local Main\Local Main
+Main\localFn 3 FALLBACK
+Main\localFn
+bool(true)
+bool(true)
+Main\Local
+bool(false)
+eol ok
+RuntimeException
+[2,4]
+[exit 0]

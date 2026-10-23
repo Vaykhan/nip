@@ -1,6 +1,6 @@
 #!/bin/bash
 # quick diff of php vs NIP for phpt names (path suffixes)
-NIP="$(cd "$(dirname "$0")/../.." && pwd)/nip.js"
+NIP="$(cd "$(dirname "$0")/../.." && pwd)/bin/nip.js"
 for t in "$@"; do
 f=$(find ${PHPSRC:-/tmp/php-src} -path "*$t" | head -1)
 d=$(mktemp -d); sed -n '/^--FILE--$/,/^--[A-Z]*--$/p' "$f" | sed '1d;$d' > $d/t.php

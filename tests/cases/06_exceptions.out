@@ -1,0 +1,49 @@
+ok
+finally 0
+MyEx: custom 42 X line 3
+finally 1
+InvalidArgumentException: bad arg 7
+finally 2
+Throwable DivisionByZeroError: Division by zero
+finally 3
+in finally
+try
+finally
+inner finally
+caught inner
+outer prev=inner RuntimeException
+2file.php10
+handler: [2] Undefined variable $undefined_var
+handler: [2] Undefined array key "missing"
+handler: [2] A non-numeric value encountered
+2converted: Array to string conversion
+Call to a member function foo() on null
+Attempt to assign property "bar" on null
+{closure}(): Argument #1 ($i) must be of type int, string gi
+UnhandledMatchError: Unhandled match case 99
+date exception
+string(0) ""
+int(0)
+Exception T 32
+rethrown a
+1
+2
+gen finally
+TypeError
+tostring test
+#0 {main}
+#0 {dir}/06_exceptions.php(39): lvl2()
+#1 {dir}/06_exceptions.php(40): lvl1()
+#2 {main}
+2 lvl2
+arith
+Modulo by zero
+strlen() expects exactly 1 argument, 0 given
+ValueError
+before uncaught
+PHP Fatal error:  Uncaught MyEx: final uncaught in {dir}/06_exceptions.php:48
+Stack trace:
+#0 {main}
+  thrown in {dir}/06_exceptions.php on line 48
+shutdown ran
+[exit 255]

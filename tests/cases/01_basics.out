@@ -1,0 +1,92 @@
+11.5
+10str
+2.5
+1
+1024
+-3.5
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+int(-1)
+int(-1)
+int(-1)
+int(2)
+string
+default
+elvis
+3 2 2.5
+int(12)
+float(3.14)
+bool(false)
+bool(false)
+bool(true)
+string(0) ""
+array(1) {
+  [0]=>
+  string(1) "x"
+}
+int(9223372036854775807)
+float(9.223372036854776E+18)
+int(-9223372036854775808)
+int(-9223372036854775808)
+int(9223372036854775807)
+int(9007199254740993)
+int(9007199254740995)
+int(4611686018427387904)
+int(-9223372036854775808)
+int(-1)
+int(-6)
+int(1)
+int(7)
+int(6)
+int(10)
+int(15)
+int(15)
+int(1000000)
+float(0.5)
+float(1000)
+float(0.001)
+int(6)
+string(2) "aa"
+string(2) "Ba"
+string(2) "b0"
+int(1)
+PHP Warning:  Decrement on type null has no effect, this will change in the next major version of PHP in {dir}/01_basics.php on line 16
+NULL
+int(0)
+bool(true)
+bool(false)
+bool(false)
+bool(true)
+float(1)
+float(100)
+float(1.0E+20)
+float(1.5E-10)
+float(-0)
+float(6)
+float(0.30000000000000004)
+float(0.3333333333333333)
+float(1.4142135623730951)
+float(2.220446049250313E-16)
+1 1.0E+20 1.0E+15 123456789012345678 1.0E-5 -1.5
+string(4) "abc1"
+float(3.5)
+float(3.14)
+float(-3)
+float(-2)
+int(5)
+float(5.5)
+int(3)
+int(2)
+string(6) "banana"
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(3)
+}
+string(1) "0"
+[exit 0]

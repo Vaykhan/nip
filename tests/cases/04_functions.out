@@ -1,0 +1,49 @@
+11 3 6
+6 9
+2
+3
+2
+15
+11
+12
+6
+[CBA]
+abab 3 5
+5
+hi x st y hi z st w st v
+[1] [1,2,3]
+NULL
+string(1) "x"
+integerstring
+float(5)
+float(3.5)
+int(42)
+TypeError: add(): Argument #1 ($a) must be of type int, string given, called in {dir}/04_functions.php on line 26
+Too few arguments to function add(), 0 passed in {dir}/04_functions.php on line 27 and at least 1 expected
+12502500
+2432902008176640000
+3
+1:a,b:["a","b"]
+{"0":1,"1":2,"a":3,"b":4}
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+12
+100101
+Array
+(
+    [0] => 1
+    [1] => 2
+    [2] => 3
+)
+1,4,9,16,25
+42
+s3cret s3cret
+42
+2
+12
+ABC Abc 
+
+[exit 0]

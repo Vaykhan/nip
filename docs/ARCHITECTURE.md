@@ -1,0 +1,111 @@
+# Architecture
+
+NIP is a tree-compiling interpreter: PHP source is parsed into an AST, and the AST is compiled
+into nested JavaScript closures that V8 can optimize. There is no bytecode and no separate VM loop.
+
+```
+source ──lexer.js──▶ tokens ──parser.js──▶ AST ──compiler/*──▶ closures ──runtime/*──▶ output
+                                                                  │
+                                         lib/* (builtins), prelude/*.php (PHP-source stdlib)
+```
+
+## Source layout
+
+| Path | Contents |
+|---|---|
+| `bin/nip.js` | CLI entry. The main thread starts a worker thread with a 256 MB stack and forwards its exit code. |
+| `src/index.js` | Public API: `run`, `runFile`, `cliMain`. |
+| `src/cli.js` | php-compatible command-line options (`-r`, `-l`, `-d`, `-f`, stdin). |
+| `src/values.js` | Value model: `Flt`, `Ref`, `PHPArray`, `PHPObject`, `PHPResource`, control signals. |
+| `src/convert.js`, `compare.js`, `arith.js` | Type juggling, `==`/`===`/`<=>`, arithmetic with int64 overflow semantics. |
+| `src/utf8.js` | Byte string ⇄ JS string conversion. |
+| `src/lexer.js`, `src/parser.js` | Tokens and AST (recursive descent for statements, Pratt parsing for expressions). |
+| `src/compiler/` | AST → closures: `expr.js`, `lvalue.js` (assignable expressions), `stmt.js`, `generator.js` (functions containing `yield`), `common.js` (frames, shared helpers). |
+| `src/runtime/` | Interpreter state (`state.js`), errors and traces, function calls and parameter binding, callables and closures, classes/objects, destructor timing (`gc.js`), generators, include/eval, native classes, constants, boot and run. |
+| `src/lib/` | Builtin functions, one module per area (`string.js`, `array.js`, `pcre.js`, `json.js`, `file.js`, ...). `core.js` holds the registry and argument helpers; `index.js` loads them all. |
+| `src/prelude/*.php` | The part of the standard library written in PHP: interfaces, the exception hierarchy, SPL data structures and iterators, `DateTime`. `core.php` is compiled at boot, other files on first use. |
+| `scripts/build.js` | Builds `dist/nip.cjs`, a single-file CommonJS bundle of everything above. |
+
+## Values
+
+| PHP | JavaScript representation |
+|---|---|
+| `null`, `bool` | `null`, `true`/`false` |
+| `int` | JS `number` while within ±2^53, `bigint` beyond (always within int64; overflow turns into float as in PHP) |
+| `float` | `Flt` box (`new Flt(1.0)`), so `1` and `1.0` stay distinct; create with `mkf()` |
+| `string` | JS string used as a **byte string**: every char code is 0–255. Convert with `utf8Decode`/`utf8Encode` at the boundaries (I/O, `mb_*`, regex in `u` mode). |
+| `array` | `PHPArray`: insertion-ordered keys/values in parallel arrays; the key→index `Map` is only built when the array stops being a packed list. Copy-on-write via the `cow` flag. |
+| `object` | `PHPObject` with a `props` Map; private properties use PHP's mangled names (`\0Class\0prop`). |
+| `resource` | `PHPResource` |
+
+A variable slot holding a reference is a `Ref` (`{ v }`). Arrays store `Ref`s in slots that are
+references (`$a[0] = &$x`). Builtins receive plain values unless they are registered with
+by-reference parameters.
+
+## Compilation
+
+Every AST node compiles to a closure taking the current `Frame` (`f`):
+`cExpr(node)` returns `(f) => value`, `cStmt(node)` returns `(f) => signal`, where a signal is
+`undefined` for normal completion or one of the `BREAK`/`CONTINUE`/`RETURN` objects. Exceptions
+are JS exceptions carrying a `ThrowSig`.
+
+Assignable expressions compile to *lvalue* objects (`cLval`) with `get`, `set`, `ref`, `unset`,
+`arr` (fetch for write) and `place` (evaluate dimensions first, so `$a[f()] = g()` calls `f`
+before `g`, as PHP does).
+
+Functions containing `yield` compile in generator mode (`compiler/generator.js`): statements become
+JS generator functions, and expressions containing `yield` are rewritten so the yield can suspend
+in the middle of them.
+
+## Runtime
+
+`rt` (in `runtime/state.js`) holds all interpreter state: function and class tables, constants,
+globals, the call stack, ini settings, output buffers and error handlers. `boot()` compiles the
+prelude once per process and snapshots the tables; `resetRuntime()` restores the snapshot before
+each `run()`, so repeated runs in one process are isolated.
+
+Each PHP function call creates a `Frame` (`vars`, `this`, class scope, late-static-binding class,
+call site). Builtins run under a `NativeFrame` so stack traces and error messages name the right
+function.
+
+Destructors: JS has no refcounts, so `runtime/gc.js` emulates PHP's destruction timing for classes
+that define `__destruct()`. After the statements and calls that could drop the last reference, it
+checks whether those objects are still reachable from the roots, and runs destructors at the
+points PHP would.
+
+## Builtin functions
+
+Builtins are registered with `def(name, fn, opts)` from `lib/core.js`:
+
+```js
+def('str_contains', (haystack, needle) => S(haystack).includes(S(needle)));
+def('sort', (array, flags = 0) => ..., { refs: [true] });   // first parameter by reference
+```
+
+- The JS parameter names become the PHP parameter names (for named arguments and error messages).
+  Parameters with a JS default are optional.
+- `S`, `I`, `N`, `B`, `A` coerce arguments with PHP 8 rules (string, int, int|float, bool, array),
+  including the `TypeError`s and deprecations PHP raises.
+- Errors use `warn()`, `notice()`, `deprecated()` and `throwError('ValueError', msg)` from
+  `runtime/errors.js`, with PHP's exact messages.
+
+## Module rules
+
+The source can be concatenated into a single script (`scripts/build.js`). That relies on two rules:
+
+1. **Top-level names are unique across `src/`.** The build fails if two modules declare the same
+   function or class.
+2. **No module needs a later module while it is being evaluated.** The top-level code of a
+   module may call functions declared anywhere (function declarations are hoisted), but it must
+   not use `const`/`let`/`class` bindings from modules later in the `MODULES` order in
+   `scripts/build.js`. Builtin registrations (`def(...)`) only need `lib/core.js` and
+   `runtime/state.js`.
+
+ES module imports are read-only. A module that needs to change another module's state does it
+by calling a function that module exports (for example `resetJsonState()`).
+
+## Testing
+
+- `tests/cases/*.php` with expected output in `.out` files produced by PHP 8.3.6 (`npm test`).
+- `tests/phpt/runner.js` runs php-src's `.phpt` tests with both `php` and NIP and counts identical
+  results. This is the compatibility measure tracked in the README and the roadmap.

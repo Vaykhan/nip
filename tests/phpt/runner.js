@@ -1,6 +1,11 @@
 // Differential .phpt runner: runs the --FILE-- section with the reference `php` and with NIP,
 // compares combined output. Usage: node runner.js <dir-or-file>... [--jobs N] [--filter re] [--show]
-const fs = require('fs'), path = require('path'), cp = require('child_process'), os = require('os');
+import fs from 'node:fs';
+import path from 'node:path';
+import cp from 'node:child_process';
+import os from 'node:os';
+
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const args = process.argv.slice(2);
 let jobs = os.cpus().length, filter = null, show = false, list = [], outFile = null;
 for (let i = 0; i < args.length; i++) {
@@ -13,7 +18,7 @@ for (let i = 0; i < args.length; i++) {
 const files = [];
 const walk = (p) => { const st = fs.statSync(p); if (st.isDirectory()) for (const f of fs.readdirSync(p).sort()) walk(path.join(p, f)); else if (p.endsWith('.phpt')) files.push(p); };
 list.forEach(walk);
-const PHPJS = path.resolve(__dirname, '../../nip.js');
+const NIP = path.resolve(__dirname, '../../bin/nip.js');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'phpt-'));
 function sections(src) {
   const out = {}; let cur = null;
@@ -52,7 +57,7 @@ async function one(file) {
     const r = await run('php', [...ini, 'skip.php'], dir, 10000);
     if (/^\s*skip/i.test(r.out)) { results.skip.push(file); return; }
   }
-  const [a, b] = await Promise.all([run('php', [...ini, name], dir, 20000), run('node', [PHPJS, ...ini, name], dir, 30000)]);
+  const [a, b] = await Promise.all([run('php', [...ini, name], dir, 20000), run('node', [NIP, ...ini, name], dir, 30000)]);
   if (a.killed) { results.skip.push(file); return; }
   if (b.killed) { results.timeout.push(file); return; }
   if (a.out === b.out && a.code === b.code) results.pass.push(file);

@@ -1,0 +1,234 @@
+int(1)
+Array
+(
+    [0] => 123-456
+    [1] => 123
+    [2] => 456
+)
+Array
+(
+    [0] => 2024-03
+    [year] => 2024
+    [1] => 2024
+    [month] => 03
+    [2] => 03
+)
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "a"
+}
+array(4) {
+  [0]=>
+  string(2) "ac"
+  [1]=>
+  string(1) "a"
+  [2]=>
+  string(0) ""
+  [3]=>
+  string(1) "c"
+}
+Array
+(
+    [0] => Array
+        (
+            [0] => b
+            [1] => 1
+        )
+
+)
+3
+Array
+(
+    [0] => Array
+        (
+            [0] => 1
+            [1] => 22
+            [2] => 333
+        )
+
+)
+Array
+(
+    [0] => Array
+        (
+            [0] => a1
+            [1] => a
+            [2] => 1
+        )
+
+    [1] => Array
+        (
+            [0] => b2
+            [1] => b
+            [2] => 2
+        )
+
+    [2] => Array
+        (
+            [0] => c3
+            [1] => c
+            [2] => 3
+        )
+
+)
+Array
+(
+    [0] => Array
+        (
+            [0] => a1
+            [1] => b2
+        )
+
+    [l] => Array
+        (
+            [0] => a
+            [1] => b
+        )
+
+    [1] => Array
+        (
+            [0] => a
+            [1] => b
+        )
+
+    [2] => Array
+        (
+            [0] => 1
+            [1] => 2
+        )
+
+)
+a b c
+world hello!
+ab-ab cd-cd
+cccc
+yyxx 2
+a2 b40 c600
+Hello Big World
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => c
+    [3] => d
+)
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => c
+)
+Array
+(
+    [0] => a
+    [1] => -
+    [2] => b
+    [3] => -
+    [4] => c
+)
+Array
+(
+    [0] => a
+    [1] => b,c,d
+)
+Array
+(
+    [0] => Array
+        (
+            [0] => a
+            [1] => 0
+        )
+
+    [1] => Array
+        (
+            [0] => b
+            [1] => 2
+        )
+
+    [2] => Array
+        (
+            [0] => c
+            [1] => 4
+        )
+
+)
+Hello\.World\?\(1\+1\)\*\[x\]\$\^\{\}\=\!\<\>\|\:\-\#/ a\/b
+Array
+(
+    [0] => 1
+    [2] => 22
+)
+Array
+(
+    [1] => a
+)
+int(1)
+int(1)
+int(1)
+int(1)
+int(1)
+int(1)
+int(1)
+int(0)
+int(1)
+Array
+(
+    [0] => Array
+        (
+            [0] => éé
+            [1] => 1
+        )
+
+    [1] => Array
+        (
+            [0] => éé
+            [1] => 1
+        )
+
+)
+Héllo wörld
+a/b/c N1 N2 ayb
+int(1)
+string(3) "abc"
+int(1)
+string(3) "1 2"
+int(1)
+int(1)
+int(1)
+string(3) "100"
+int(1)
+string(3) "200"
+1,234,567
+> line1
+> line2
+trailing|
+XbXXbX
+["a","1","b","2","c"]
+int(0)
+bool(false)
+hi there
+cost {price} now
+Hi Bob, 30, {x}
+int(1)
+int(1)
+Array
+(
+    [0] => a
+    [1] => b
+    [2] => c
+    [3] => d
+)
+<aa><bb>cd
+int(1)
+array(1) {
+  [0]=>
+  string(4) "3.14"
+}
+0No error
+int(1)
+int(0)
+int(1)
+int(0)
+[exit 0]

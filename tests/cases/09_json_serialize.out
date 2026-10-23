@@ -1,0 +1,157 @@
+{"name":"Test","n":42,"f":3.14,"b":true,"null":null,"list":[1,2,3],"obj":{"k":"v"},"empty":[],"unicode":"h\u00e9llo \u20ac","slash":"a\/b","quote":"say \"hi\""}
+{
+    "name": "Test",
+    "n": 42,
+    "f": 3.14,
+    "b": true,
+    "null": null,
+    "list": [
+        1,
+        2,
+        3
+    ],
+    "obj": {
+        "k": "v"
+    },
+    "empty": [],
+    "unicode": "héllo €",
+    "slash": "a/b",
+    "quote": "say \"hi\""
+}
+{"1":"a","2":"b"}["a","b"]{}33.012
+"\u003Ctag\u003E\u0026\u0027\u0022"0.11.0e+100-09223372036854775807
+array(4) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  array(3) {
+    [0]=>
+    int(1)
+    [1]=>
+    int(2)
+    [2]=>
+    array(1) {
+      ["c"]=>
+      NULL
+    }
+  }
+  ["d"]=>
+  float(1.5)
+  ["e"]=>
+  string(3) "xé"
+}
+2 2 stdClass
+NULL
+int(4)
+string(12) "Syntax error"
+NULL
+string(3) "str"
+int(123)
+float(1)
+float(1.2345678901234567E+19)
+NULL
+int(4)
+JsonException: Syntax error 4
+bool(false)
+string(34) "Inf and NaN cannot be JSON encoded"
+bool(false)
+int(5)
+{
+    "a": {
+        "b": {
+            "c": []
+        }
+    }
+}
+{}[[]]{"x":{"y":1}}
+array(0) {
+}
+array(0) {
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+}
+bool(true)
+a:3:{s:1:"a";i:1;s:1:"b";a:4:{i:0;b:1;i:1;N;i:2;d:1.5;i:3;s:3:"str";}s:1:"c";i:-5;}
+array(3) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  array(4) {
+    [0]=>
+    bool(true)
+    [1]=>
+    NULL
+    [2]=>
+    float(1.5)
+    [3]=>
+    string(3) "str"
+  }
+  ["c"]=>
+  int(-5)
+}
+O:2:"SP":4:{s:3:"pub";i:1;s:6:"~*~pro";i:2;s:7:"~SP~pri";i:3;s:3:"arr";a:1:{i:0;s:1:"x";}}
+SP Object
+(
+    [pub] => 1
+    [pro:protected] => 2
+    [pri:SP:private] => 3
+    [arr] => Array
+        (
+            [0] => x
+        )
+
+)
+wakeup
+Custom Object
+(
+    [a] => 1
+    [b] => 2
+)
+O:6:"Modern":1:{s:2:"xx";i:5;} Modern Object
+(
+    [x] => 10
+)
+PHP Warning:  unserialize(): Error at offset 0 of 7 bytes in {dir}/09_json_serialize.php on line 22
+bool(false)
+bool(false)
+float(1)
+int(5)
+string(3) "abc"
+array (
+  'a' => 1,
+  'b' => 
+  array (
+    0 => true,
+    1 => NULL,
+  ),
+  'c' => 1.5,
+  'd' => 'it\'s',
+)
+1.0
+'x'
+false
+array (
+  0 => 1,
+  1 => 2,
+)
+\SP::__set_state(array(
+   'pub' => 1,
+   'pro' => 2,
+   'pri' => 3,
+   'arr' => 
+  array (
+    0 => 'x',
+  ),
+))
+{"float":3.3333333333333335}
+"€""\ud83d\ude00"
+string(4) "😀"
+string(2) "é"
+{"1":1,"0":0}{"0":"a","1":"b"}
+NULL
+string(28) "Maximum stack depth exceeded"
+[exit 0]
