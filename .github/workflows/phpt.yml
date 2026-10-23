@@ -1,25 +1,34 @@
 name: php-src tests
 
-# Runs php-src's own .phpt tests with php 8.3 and NIP and reports how many produce identical output.
+# Runs php-src's own .phpt tests with php 8.3 and NIP. Fails when a test listed in the suite's
+# baseline (tests/phpt/baseline/*.txt) no longer produces identical output.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: '17 4 * * 1'
 
 jobs:
   phpt:
+    name: ${{ matrix.suite }}
     runs-on: ubuntu-24.04
+    env:
+      # the runner image's PHP loads Xdebug, whose var_dump() and error output differ from plain PHP
+      XDEBUG_MODE: 'off'
     strategy:
       fail-fast: false
       matrix:
         suite:
-          - tests/lang
+          - tests
           - Zend/tests
-          - ext/standard/tests/strings
-          - ext/standard/tests/array
-          - ext/standard/tests/math
+          - ext/standard/tests
           - ext/json/tests
           - ext/pcre/tests
+          - ext/spl/tests
+          - ext/date/tests
+          - ext/reflection/tests
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -27,9 +36,23 @@ jobs:
           node-version: 24
       - name: Install PHP
         run: command -v php || (sudo apt-get update && sudo apt-get install -y php8.3-cli)
+      - run: php --version
       - name: Fetch php-src tests
         run: |
           git clone --depth 1 --branch php-8.3.6 --filter=blob:none --sparse https://github.com/php/php-src.git php-src
-          git -C php-src sparse-checkout set tests Zend/tests ext/standard/tests ext/json/tests ext/pcre/tests
-      - name: Run
-        run: node tests/phpt/runner.js "php-src/${{ matrix.suite }}" --out results.json | tail -n 1 | tee -a "$GITHUB_STEP_SUMMARY"
+          git -C php-src sparse-checkout set "${{ matrix.suite }}"
+      - name: Run and compare with the baseline
+        shell: bash
+        run: |
+          baseline="tests/phpt/baseline/$(echo '${{ matrix.suite }}' | tr / _).txt"
+          set +e
+          node tests/phpt/runner.js "php-src/${{ matrix.suite }}" --root php-src --out results.json --baseline "$baseline" > output.txt
+          status=$?
+          cat output.txt
+          grep -E '^(pass=|baseline:)' output.txt >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: phpt-results-${{ strategy.job-index }}
+          path: results.json
