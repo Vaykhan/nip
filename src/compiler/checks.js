@@ -78,7 +78,7 @@ export function checkProgram(ast) {
       case 'PreInc': case 'PreDec': case 'PostInc': case 'PostDec': visit(n.e, WRITE); return;
       case 'Unset': visit(n.list, UNSET); return;
       case 'Arr':
-        if (ctx !== WRITE && ctx !== ASSIGN) break;
+        if (ctx !== ASSIGN) break;
       // falls through: [$a, $b] = ... destructuring
       case 'List': {
         const items = (n.items || []).filter(Boolean);

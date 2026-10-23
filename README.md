@@ -66,13 +66,20 @@ skipped.
 
 | Suite | Identical output |
 |---|---|
-| `tests/lang` | 255 / 278 (92%) |
+| `tests/lang` | 256 / 278 (92%) |
+| `tests` (all: lang, basic, func, output, ...) | 585 / 722 (81%) |
 | `ext/standard/tests/math` | 121 / 148 (82%) |
-| `ext/standard/tests/array` | 598 / 795 (75%) |
+| `ext/standard/tests/array` | 596 / 795 (75%) |
 | `ext/json/tests` | 62 / 85 (73%) |
-| `ext/standard/tests/strings` | 441 / 634 (70%) |
+| `ext/standard/tests/strings` | 441 / 635 (69%) |
+| `ext/reflection/tests` | 265 / 413 (64%) |
+| `Zend/tests` (engine edge cases) | 2449 / 3941 (62%) |
 | `ext/pcre/tests` | 90 / 148 (61%) |
-| `Zend/tests` (engine edge cases) | 2019 / 3774 (53%) |
+| `ext/standard/tests` (all) | 1809 / 3127 (58%) |
+| `ext/spl/tests` | 238 / 710 (34%) |
+| `ext/date/tests` | 218 / 655 (33%) |
+
+CI fails when a test listed in `tests/phpt/baseline/` stops passing.
 
 ### Known limitations
 

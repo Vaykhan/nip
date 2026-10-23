@@ -10,8 +10,9 @@ criteria. "Compatible" always means *identical output to PHP*, checked by tests,
   readonly, named arguments, exceptions, namespaces, include/eval.
 - About 600 builtin functions (strings, arrays, math, PCRE, JSON, serialize, dates, files, ...).
 - CLI only: no web server integration, no database access.
-- Identical output on php-src's own tests: `tests/lang` 92%, `ext/standard/tests/strings` 70%,
-  `ext/standard/tests/array` 75%, `Zend/tests` 53%.
+- Identical output on php-src's own tests (v0.1): `tests/lang` 92%, `ext/standard/tests/strings` 70%,
+  `ext/standard/tests/array` 75%, `Zend/tests` 53%. Now: `Zend/tests` 62%, `ext/reflection` 64%
+  (see the README).
 - Speed: about 1.5× slower than PHP 8.3 on loops, about 5× slower on call-heavy code.
   Startup takes about 110 ms.
 
