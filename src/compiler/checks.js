@@ -8,6 +8,7 @@ import { cExpr } from './expr.js';
 import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
+import { deprecated } from '../runtime/errors.js';
 import { RESERVED_CLASS_NAMES } from '../parser.js';
 
 // How an expression is used: read, written (assignment target, by-ref argument, ...), unset,
@@ -19,11 +20,18 @@ const READ = 0, WRITE = 1, UNSET = 2, ARG = 3, ASSIGN = 4;
 const VAR_OR_CALL = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'Call', 'MCall', 'NullsafeMCall', 'SCall']);
 const CONST_EXPR_NODES = new Set(['Lit', 'Bin', 'And', 'Or', 'Xor', 'Not', 'BitNot', 'Neg', 'Plus', 'Ternary', 'Index', 'Arr',
   'Const', 'CConst', 'ClassName', 'Name', 'MagicClass', 'MagicMethod', 'Coalesce', 'New', 'Prop']);
+const AUTO_GLOBALS = new Set(['GLOBALS', '_SERVER', '_GET', '_POST', '_COOKIE', '_FILES', '_ENV', '_REQUEST', '_SESSION']);
 const isTemp = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && !VAR_OR_CALL.has(n.k);
 
-export function checkProgram(ast) {
+export function checkProgram(ast, file) {
   const seen = new WeakSet();
   const fail = (msg, n) => { throw new FatalSig(msg, n.l); };
+  // deprecations PHP raises while compiling
+  const compileDeprecated = (msg, n) => {
+    const prevFile = rt.file, prevLine = rt.line;
+    rt.file = file; rt.line = n.l;
+    try { deprecated(msg); } finally { rt.file = prevFile; rt.line = prevLine; }
+  };
   // goto: labels and gotos of the current function, and the loops/switches/finally blocks
   // enclosing the statement being visited
   let scope = newScope(), path = [];
@@ -367,7 +375,22 @@ export function checkProgram(ast) {
       if (p.type) checkTypeDecl(p.type, 'param', fn);
     }
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
-    for (const u of fn.uses || []) if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
+    const unames = new Set();
+    for (const u of fn.uses || []) {
+      if (u.name === 'this') fail('Cannot use $this as lexical variable', fn);
+      if (AUTO_GLOBALS.has(u.name)) fail('Cannot use auto-global as lexical variable', fn);
+      if (unames.has(u.name)) fail(`Cannot use variable $${u.name} twice`, fn);
+      if (pnames.has(u.name)) fail(`Cannot use lexical variable $${u.name} as a parameter name`, fn);
+      unames.add(u.name);
+    }
+    // an optional parameter before a required one is required (except PHP 5 style `T $x = null`)
+    let lastRequired = -1;
+    fn.params.forEach((p, i) => { if (!p.def && !p.variadic) lastRequired = i; });
+    fn.params.forEach((p, i) => {
+      if (!p.def || i >= lastRequired) return;
+      const implicitNullable = p.type && !p.type.nullable && p.def.k === 'Lit' && p.def.v === null;
+      if (!implicitNullable) compileDeprecated(`Optional parameter $${p.name} declared before required parameter $${fn.params[lastRequired].name} is implicitly treated as a required parameter`, p.def.l ? p.def : fn);
+    });
     if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
     for (const p of fn.params) {
       checkAttrs(p.attrs, T_PARAMETER);

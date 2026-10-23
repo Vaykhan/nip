@@ -9,7 +9,7 @@ import {
   E_ALL, E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING, rt, writeFd
 } from '../runtime/state.js';
 import { captureTrace, raise, setTimeLimit, throwError, traceAsString } from '../runtime/errors.js';
-import { callableFn, callValue } from '../runtime/callables.js';
+import { boundCallback, callableFn, callValue } from '../runtime/callables.js';
 import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
 import { sgn } from './string.js';
@@ -94,7 +94,7 @@ def('error_get_last', () => {
   return PHPArray.fromPairs([['type', rt.lastError.type], ['message', rt.lastError.message], ['file', rt.lastError.file], ['line', rt.lastError.line]]);
 });
 def('error_clear_last', () => { rt.lastError = null; });
-def('register_shutdown_function', (callback, ...args) => { rt.shutdownFns.push([callback, args]); });
+def('register_shutdown_function', (callback, ...args) => { rt.shutdownFns.push([boundCallback(callback), args]); });
 def('register_tick_function', (callback, ...args) => {
   callableFn(callback); // validates, with PHP's message
   rt.tickFns.push({ cb: callback, args, calling: false });

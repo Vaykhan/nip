@@ -33,10 +33,11 @@ export function compileFunction(decl, opts = {}) {
   const vi = params.findIndex((p) => p.variadic);
   const fn = {
     name: decl.name, decl, params, byRef: decl.byRef, ret: decl.ret, isGen: decl.isGen,
+    isCtor: !!opts.method && decl.name.toLowerCase() === '__construct', // see frameExit()
     file: decl.file, line: decl.l, strict: decl.strict,
     refs: refs.some(Boolean) ? refs : null, refRest: vi >= 0 && params[vi].byRef ? vi : null,
     body: null, statics: null, isMethod: !!opts.method, cls: opts.cls || null, isClosure: decl.name === '{closure}',
-    required: params.filter((p) => !p.def && !p.variadic).length,
+    required: params.reduce((r, p, i) => (!p.def && !p.variadic ? i + 1 : r), 0), // optional params before required ones are required
     simple: params.every((p) => !p.byRef && !p.variadic && !p.type && !p.promote),
   };
   if (fn.refs && fn.refRest !== null) fn.refs = refs.slice(0, vi);
@@ -82,7 +83,9 @@ function argCountError(fn, given, f) {
   // prelude functions stand in for internal ones, which word the error differently
   if (fn.file === PRELUDE_FILE) throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${word} ${fn.required} argument${fn.required === 1 ? '' : 's'}, ${given} given`);
   const top = rt.stack[rt.stack.length - 1];
-  const where = top && top.native === true ? '' : ` in ${rt.file} on line ${rt.line}`;
+  // the caller's location is shown for calls from user code (call_user_func() compiles to one)
+  const viaBuiltin = top && top.native === true && !/^call_user_func(_array)?$/.test(top.fn.name);
+  const where = viaBuiltin ? '' : ` in ${rt.file} on line ${rt.line}`;
   throwInCallee(fn, f, 'ArgumentCountError', `Too few arguments to function ${fnDisplayName(fn)}(), ${given} passed${where} and ${word} ${fn.required} expected`);
 }
 
@@ -120,7 +123,7 @@ function bindParams(fn, f, args) {
     if (i < na) v = args[i];
     else if (named !== undefined && named.has(p.name)) v = named.get(p.name);
     else if (p.def) {
-      v = p.def(f);
+      v = p.defNode.kind === 'Lit' ? p.def(f) : evalDefault(fn, f, p);
       if (p.type && v !== null) v = coerceParam(fn, p, i, v, false, f);
       f.vars[p.name] = new Ref(cp(v));
       if (p.promote) promoteParam(f, p, v);
@@ -145,6 +148,16 @@ function bindParams(fn, f, args) {
       if (idx >= 0 && idx < na && !ps[idx].variadic) throwError('Error', `Named parameter $${k} overwrites previous argument`);
     }
   }
+}
+// a default that isn't a literal is evaluated in the callee: errors show it in the trace, at the
+// default's line
+function evalDefault(fn, f, p) {
+  const savedLine = rt.line, savedFile = rt.file;
+  f.callLine = savedLine; f.callFile = savedFile;
+  rt.stack.push(f);
+  rt.file = fn.file; if (p.defNode.l) rt.line = p.defNode.l;
+  try { return p.def(f); }
+  finally { rt.stack.pop(); rt.line = savedLine; rt.file = savedFile; }
 }
 function promoteParam(f, p, v) {
   const obj = f.this;
@@ -334,7 +347,7 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   } catch (e) {
     // an exception unwinds the call: its locals go too (not what the exception holds)
     rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
-    if (e instanceof ThrowSig) { frameExit(f.vars, e.obj); if (f.ret !== null && typeof f.ret === 'object') frameExit([f.ret], e.obj); }
+    if (e instanceof ThrowSig) { frameExit(f.vars, e.obj, fn.isCtor ? thisObj : null); if (f.ret !== null && typeof f.ret === 'object') frameExit([f.ret], e.obj); }
     throw e;
   }
   rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
@@ -342,7 +355,7 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   if (f.destr) gcAfterCall(f, ret);
   // the locals are gone: objects only they held lose their handles (when objects were created
   // during the call or passed to it)
-  if (allocs !== objHandles.allocs || argsHoldObjects(args)) frameExit(f.vars, ret);
+  if (allocs !== objHandles.allocs || argsHoldObjects(args)) frameExit(f.vars, ret, fn.isCtor ? thisObj : null);
   return ret;
 }
 

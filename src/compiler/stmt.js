@@ -204,7 +204,7 @@ const STMT = {
       if (n.byRef) {
         const subj0 = LE.getq(f);
         if (subj0 instanceof PHPObject) {
-          if (subj0.cls.ancestors.has('traversable')) throwError('Error', 'An iterator cannot be used with foreach by reference');
+          if (subj0.cls.ancestors.has('iterator') && subj0.cls.lname !== 'generator') throwError('Error', 'An iterator cannot be used with foreach by reference');
           return foreachObject(f, subj0, K, V, B, true, isList);
         }
         if (subj0 !== undefined && subj0 !== null && !(subj0 instanceof PHPArray)) { warn(`foreach() argument must be of type array|object, ${valueName(subj0)} given`); return; }

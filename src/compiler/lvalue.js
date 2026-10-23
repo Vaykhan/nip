@@ -427,6 +427,6 @@ export function cClassRef(c) {
     const v = E(f);
     if (v instanceof PHPObject) return v.cls;
     if (typeof v === 'string') return lookupClass(v);
-    throwError('Error', 'Cannot use value of type ' + typeOf(v) + ' as class name');
+    throwError('Error', 'Class name must be a valid object or a string');
   };
 }

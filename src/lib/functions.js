@@ -5,9 +5,9 @@ import { toBool, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { isRefParam } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
-import { throwError, warn } from '../runtime/errors.js';
+import { PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
 import { FRAME_FUNCS } from '../runtime/functions.js';
-import { callValue, invokeCallable, resolveCallable } from '../runtime/callables.js';
+import { callValue, invokeCallable, nativeCallback } from '../runtime/callables.js';
 import {
   canAccessMember, classConst, classExists, lookupClass, lookupStaticProp, objVisibleProps,
   propAccessible, propDefault
@@ -16,12 +16,12 @@ import { A, def, S } from './core.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
 def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); if (rt.disabledFns && rt.disabledFns.has(n.toLowerCase())) return false; return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
-def('call_user_func', (callback, ...args) => callValue(callback, args));
+def('call_user_func', (callback, ...args) => invokeCallable(nativeCallback(callback), args));
 def('call_user_func_array', (callback, args) => {
   const a = A(args);
   const pos = []; let named = null;
   for (const [k, v] of a.entries()) { if (typeof k === 'string') { if (!named) named = new Map(); named.set(k, v); } else pos.push(v); }
-  const c = resolveCallable(callback, rt.frame, true);
+  const c = nativeCallback(callback);
   // by-ref params: wrap values in refs
   if (c.fn.refs) for (let i = 0; i < pos.length; i++) if (isRefParam(c.fn, i)) pos[i] = new Ref(pos[i]);
   if (named) pos.named = named;
@@ -113,8 +113,11 @@ def('spl_autoload_register', (callback = null, _throw = true, prepend = false) =
 });
 def('spl_autoload_unregister', (callback) => { const i = rt.autoloaders.findIndex((c) => looseEq(c, callback) || c === callback); if (i >= 0) { rt.autoloaders.splice(i, 1); return true; } return false; });
 def('spl_autoload_functions', () => PHPArray.from(rt.autoloaders.slice()));
-def('get_declared_classes', () => PHPArray.from([...rt.classes.values()].filter((c) => !c.isInterface && !c.isTrait).map((c) => c.name)));
-def('get_declared_interfaces', () => PHPArray.from([...rt.classes.values()].filter((c) => c.isInterface).map((c) => c.name)));
+// declared classes, interfaces and traits; class_alias() names are listed lowercased
+const declared = (pred) => PHPArray.from([...rt.classes].filter(([k, c]) => pred(c) && !c.anon && !(c.isTrait && c.decl && c.decl.file === PRELUDE_FILE)).map(([k, c]) => (k === c.lname ? c.name : k)));
+def('get_declared_classes', () => declared((c) => !c.isInterface && !c.isTrait));
+def('get_declared_interfaces', () => declared((c) => c.isInterface));
+def('get_declared_traits', () => declared((c) => c.isTrait));
 def('get_defined_functions', () => {
   const out = new PHPArray(); const internal = new PHPArray(), user = new PHPArray();
   for (const [k, f] of rt.fns) (f.native ? internal : user).push(k);
@@ -135,7 +138,7 @@ def('defined', (constant_name) => {
 });
 def('constant', (name) => {
   const n = S(name);
-  if (n.includes('::')) { const [c, k] = n.split('::'); return classConst(lookupClass(c), k, rt.frame); }
+  if (n.includes('::')) { const [c, k] = n.split('::'); return classConst(lookupClass(c), k, rt.frame, true); }
   const v = rt.consts.get(n.replace(/^\\/, ''));
   if (v === undefined) throwError('Error', `Undefined constant "${n}"`);
   return v;

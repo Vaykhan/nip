@@ -12,7 +12,8 @@ import { def, deref } from './core.js';
 function varDump(v, ind, seen, rc) {
   let amp = '';
   if (v instanceof Ref) { if (rc && (rc.get(v) || 0) > 1) amp = '&'; v = v.v; }
-  if (amp) return varDump0(v, ind, seen, rc).replace(/^(\s*)/, '$1&');
+  // a recursive reference is shown without the &
+  if (amp && !seen.has(v)) return varDump0(v, ind, seen, rc).replace(/^(\s*)/, '$1&');
   return varDump0(v, ind, seen, rc);
 }
 function varDump0(v, ind, seen, rc) {

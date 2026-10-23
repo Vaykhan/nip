@@ -15,7 +15,7 @@ import { arrowFreeVars, isFresh, isLvalNode, SUPERGLOBALS, warnUndefVar } from '
 import { cClassRef, cLval } from './lvalue.js';
 import { iterateObject } from './stmt.js';
 import { rt } from '../runtime/state.js';
-import { notice, throwError } from '../runtime/errors.js';
+import { deprecated, notice, PRELUDE_FILE, throwError } from '../runtime/errors.js';
 import {
   callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
 } from '../runtime/functions.js';
@@ -145,7 +145,7 @@ const EXPR = {
   CConst(n) {
     const C = cClassRef(n.cls);
     const name = n.name;
-    return (f) => classConst(C(f), name, f);
+    return (f) => classConst(C(f), name, f, true);
   },
   ClassName(n) {
     if (typeof n.cls === 'string') {
@@ -471,8 +471,8 @@ const EXPR = {
       let name = sname, ln = lname;
       if (!name) {
         const nv = N(f);
-        if (nv instanceof PHPObject) { const c = resolveCallable(nv, f, true); return call(c.fn, A(f, c.fn), c.thisObj, c.cls, c.sc, c.closure); }
-        name = toStr(nv); ln = name.toLowerCase();
+        if (typeof nv !== 'string') throwError('Error', 'Method name must be a string');
+        name = nv; ln = name.toLowerCase();
       }
       let m;
       const scope = f.cls;
@@ -518,7 +518,8 @@ const EXPR = {
     const call = deferCalls ? deferredCall : callFunction;
     return (f) => {
       const cls = C(f);
-      const name = sname || toStr(N(f));
+      let name = sname;
+      if (name === null) { name = N(f); if (typeof name !== 'string') throwError('Error', 'Method name must be a string'); }
       const m = cls.methods.get(name.toLowerCase());
       if (!m || (m.vis !== 'public' && !canAccessMember(m, f.cls))) {
         // __callStatic / __call
@@ -532,6 +533,7 @@ const EXPR = {
         throwError('Error', `Call to undefined method ${cls.name}::${name}()`);
       }
       if (m.abstract) throwError('Error', `Cannot call abstract method ${m.cls.name}::${m.name}()`);
+      if (m.static && m.cls.isTrait && m.fn.file !== PRELUDE_FILE) deprecated(`Calling static trait method ${m.cls.name}::${m.name} is deprecated, it should only be called on a class using the trait`);
       const args = A(f, m.fn);
       if (m.static) {
         const sc = isRel && (isParent || isSelf) ? (f.sc || cls) : cls;

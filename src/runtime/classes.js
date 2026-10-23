@@ -2,7 +2,7 @@
 
 import { cp, FatalSig, isInt, NOREF, normKey, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
 import { toBool, toStr, typeOf } from '../convert.js';
-import { isNum, looseEq } from '../compare.js';
+import { isNum, looseEq, strictEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from './state.js';
@@ -55,7 +55,8 @@ export function nipProps(o) {
 
 // whether an attribute list has the attribute (a lowercase, fully qualified name without leading \)
 export function hasAttr(attrs, lname) { return !!attrs && attrs.some((a) => (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase() === lname); }
-export function lookupClass(name, quiet) {
+// kind: 'Interface' or 'Trait' for the error message (a missing trait is a fatal error)
+export function lookupClass(name, quiet, kind) {
   if (name instanceof PHPClass) return name;
   let n = name[0] === '\\' ? name.slice(1) : name;
   const ln = n.toLowerCase();
@@ -75,7 +76,8 @@ export function lookupClass(name, quiet) {
     } finally { rt.autoloading.delete(ln); }
   }
   if (quiet) return null;
-  throwError('Error', `Class "${n}" not found`);
+  if (kind === 'Trait') throw new FatalSig(`Trait "${n}" not found`, rt.line, rt.file);
+  throwError('Error', `${kind || 'Class'} "${n}" not found`);
 }
 // class lookup for inheritance checks: no autoloading until the class is registered
 const resolveForCheck = (n) => classExists(n, false);
@@ -124,7 +126,7 @@ export function declareClass(decl, f) {
     }
     // interfaces
     for (const iname of decl.interfaces) {
-      const ic = lookupClass(iname);
+      const ic = lookupClass(iname, false, 'Interface');
       if (!ic.isInterface) throw new FatalSig(`${cls.name} cannot implement ${ic.name} - it is not an interface`, decl.l, decl.file);
       addInterface(cls, ic);
     }
@@ -132,14 +134,14 @@ export function declareClass(decl, f) {
       addInterface(cls, rt.classes.get('unitenum'));
       if (decl.enumType) addInterface(cls, rt.classes.get('backedenum'));
     }
-    // traits
-    for (const tu of decl.traits) useTraits(cls, tu, f);
     // constants
     for (const c of decl.consts) {
       const ex = cls.consts.get(c.name);
       if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, c.l, decl.file);
       cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c });
     }
+    // traits (their defaults may use the class's constants)
+    if (decl.traits.length) bindTraits(cls, decl);
     // enum cases
     if (cls.isEnum) {
       cls.enumBacked = decl.enumType ? decl.enumType.alts[0] : null;
@@ -263,40 +265,147 @@ function addMethod(cls, decl, m, owner, alias) {
   cls.methods.set(lname, method);
   if (m.vis === 'private') { if (!cls.privMethods) cls.privMethods = new Map(); cls.privMethods.set(lname, method); }
 }
-function useTraits(cls, tu, f) {
-  const traits = tu.names.map((n) => {
-    const t = lookupClass(n);
-    if (!t.isTrait) throw new FatalSig(`${cls.name} cannot use ${t.name} - it is not a trait`, cls.decl.l, cls.decl.file);
-    return t;
-  });
-  const excluded = new Map(); // lname -> Set of trait lnames excluded
-  for (const r of tu.rules) if (r.kind === 'insteadof') for (const ex of r.excl) {
-    const k = r.method.toLowerCase();
-    if (!excluded.has(k)) excluded.set(k, new Set());
-    excluded.get(k).add(ex.toLowerCase());
-  }
-  for (const t of traits) {
-    for (const [ln, m] of t.methods) {
-      if (excluded.has(ln) && excluded.get(ln).has(t.lname)) continue;
-      const ownDefined = cls.decl.methods.some((om) => om.fn.name.toLowerCase() === ln);
-      if (ownDefined && m.abstract) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(m);
-      if (!ownDefined) {
-        let vis = m.vis;
-        for (const r of tu.rules) if (r.kind === 'as' && !r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname) && r.vis) vis = r.vis;
-        const ex = cls.methods.get(ln);
-        if (!(m.abstract && ex && !ex.abstract)) addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final: m.final, origin: m.origin || t }, cls);
-      }
-      for (const r of tu.rules) {
-        if (r.kind === 'as' && r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname)) {
-          addMethod(cls, m.fn.decl, { vis: r.vis || m.vis, static: m.static, abstract: m.abstract, final: m.final, origin: m.origin || t }, cls, r.alias);
-        }
-      }
+// trait composition (zend_do_bind_traits): the rules of all `use` blocks are checked, then
+// methods, constants and properties are copied in trait order. Members the class declares itself
+// win over trait members, and two traits may only bring the same method, constant or property if
+// one of them is abstract or the definitions are identical.
+function bindTraits(cls, decl) {
+  const at = (msg) => new FatalSig(msg, decl.l, decl.file);
+  const traits = [], rules = [];
+  for (const tu of decl.traits) {
+    for (const n of tu.names) {
+      const t = lookupClass(n, false, 'Trait');
+      if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
+      traits.push(t);
     }
-    for (const [, info] of t.slots) addProp(cls, Object.assign({}, info.decl, { defE: info.defE }), cls);
-    for (const [, si] of t.sprops) addProp(cls, { name: si.name, def: null, hasDef: !!si.defE, defE: si.defE, static: true, vis: si.vis, type: si.type, readonly: si.readonly }, cls);
-    for (const [k, c] of t.consts) if (!cls.consts.has(k)) cls.consts.set(k, { E: c.E, val: undefined, done: false, cls, vis: c.vis });
+    rules.push(...tu.rules);
+  }
+  const usedTrait = (name) => {
+    const t = lookupClass(name, true);
+    if (!t) throw at(`Could not find trait ${name}`);
+    if (!t.isTrait) throw at(`Class ${t.name} is not a trait, Only traits may be used in 'as' and 'insteadof' statements`);
+    if (!traits.includes(t)) throw at(`Required Trait ${t.name} wasn't added to ${cls.name}`);
+    return t;
+  };
+  const excluded = new Map(); // trait -> Set of excluded method lnames
+  const aliases = []; // [rule, trait]
+  for (const r of rules) {
+    const ln = r.method.toLowerCase();
+    if (r.kind === 'insteadof') {
+      const t = usedTrait(r.trait);
+      if (!t.methods.has(ln)) throw at(`A precedence rule was defined for ${t.name}::${r.method} but this method does not exist`);
+      for (const en of r.excl) {
+        const et = usedTrait(en);
+        let set = excluded.get(et);
+        if (!set) excluded.set(et, set = new Set());
+        if (set.has(ln)) throw at(`Failed to evaluate a trait precedence (${r.method}). Method of trait ${et.name} was defined to be excluded multiple times`);
+        set.add(ln);
+        if (et === t) throw at(`Inconsistent insteadof definition. The method ${r.method} is to be used from ${t.name}, but ${t.name} is also on the exclude list`);
+      }
+      continue;
+    }
+    let t = null;
+    if (r.trait) {
+      t = usedTrait(r.trait);
+      if (!t.methods.has(ln)) throw at(`An alias was defined for ${t.name}::${r.method} but this method does not exist`);
+    } else {
+      for (const ut of traits) {
+        if (!ut.methods.has(ln)) continue;
+        if (t && t !== ut) throw at(`An alias was defined for method ${r.method}(), which exists in both ${t.name} and ${ut.name}. Use ${t.name}::${r.method} or ${ut.name}::${r.method} to resolve the ambiguity`);
+        t = ut;
+      }
+      if (!t) throw at(r.alias ? `An alias (${r.alias}) was defined for method ${r.method}(), but this method does not exist` : `The modifiers of the trait method ${r.method}() are changed, but this method does not exist. Error`);
+    }
+    aliases.push([r, t]);
+  }
+  // methods
+  const own = new Set(decl.methods.map((m) => m.fn.name.toLowerCase()));
+  const fromTrait = new Map(); // lname -> { t, m, name } added from a trait
+  const addTraitMethod = (t, m, name, vis, final) => {
+    const ln = name.toLowerCase();
+    const prev = fromTrait.get(ln);
+    if (prev && prev.m.fn.decl === m.fn.decl && prev.vis === vis) return;
+    if (m.abstract && (own.has(ln) || prev || cls.methods.has(ln))) {
+      if (own.has(ln) || prev) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(m);
+      return; // the existing method must satisfy the abstract signature
+    }
+    if (own.has(ln)) return;
+    if (prev && !prev.m.abstract) throw at(`Trait method ${t.name}::${m.name} has not been applied as ${cls.name}::${name}, because of collision with ${prev.t.name}::${prev.name}`);
+    fromTrait.set(ln, { t, m, name, vis });
+    addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final, origin: m.origin || t }, cls, name === m.name ? undefined : name);
+  };
+  for (const t of traits) {
+    const ex = excluded.get(t);
+    for (const [ln, m] of t.methods) {
+      for (const [r, at2] of aliases) {
+        if (r.alias && at2 === t && r.method.toLowerCase() === ln) addTraitMethod(t, m, r.alias, r.vis || m.vis, m.final || !!r.final);
+      }
+      if (ex && ex.has(ln)) continue;
+      let vis = m.vis, final = m.final;
+      for (const [r, at2] of aliases) if (!r.alias && at2 === t && r.method.toLowerCase() === ln) { if (r.vis) vis = r.vis; if (r.final) final = true; }
+      addTraitMethod(t, m, m.name, vis, final);
+    }
     for (const a of t.traitIfaces || []) cls.ancestors.add(a);
   }
+  // constants
+  const constOwner = new Map(); // name -> trait that brought it
+  const ownConsts = new Map(decl.consts.map((c) => [c.name, c]));
+  traits.forEach((t, i) => {
+    for (const [k, c] of t.consts) {
+      const ownC = ownConsts.get(k);
+      const ex = ownC ? { E: cExpr(ownC.e), vis: ownC.vis, final: !!ownC.final, type: ownC.type, cls } : cls.consts.get(k);
+      if (!ex) { cls.consts.set(k, { E: c.E, val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c.decl }); constOwner.set(k, t); continue; }
+      const exCls = ownC || constOwner.has(k) ? cls : ex.cls;
+      const first = exCls === cls ? (traits.slice(0, i).find((pt) => pt.consts.has(k)) || cls) : exCls;
+      const same = ex.vis === c.vis && !!ex.final === !!c.final && sameType(constType(ex), constType(c)) && sameValue(() => (ex.E ? ex.E(constFrame(cls)) : ex.val), () => c.E(constFrame(cls)));
+      if (!same) throw at(`${first.name} and ${t.name} define the same constant (${k}) in the composition of ${cls.name}. However, the definition differs and is considered incompatible. Class was composed`);
+    }
+  });
+  // properties
+  const ownProps = new Map(decl.props.map((p) => [p.name, p]));
+  const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
+  if (ctor) for (const prm of ctor.fn.params) if (prm.promote) ownProps.set(prm.name, { name: prm.name, vis: prm.promote, type: prm.type, readonly: prm.readonly, static: false, hasDef: false });
+  const propOwner = new Map(); // name -> trait that brought it
+  traits.forEach((t, i) => {
+    const tprops = [...[...t.slots.values()].map((info) => info.decl), ...[...t.sprops.values()].map((si) => si.decl)].filter(Boolean);
+    for (const pd of tprops) {
+      const name = pd.name, tStatic = !!pd.static;
+      const ownP = ownProps.get(name);
+      let ex = ownP, exCls = cls;
+      if (!ex && propOwner.has(name)) ex = propOwner.get(name).decl;
+      if (!ex) {
+        const inh = tStatic ? cls.sprops.get(name) : cls.props.get(name);
+        if (inh && !(inh.vis === 'private' && inh.cls !== cls)) { ex = inh.decl || inh; exCls = inh.cls; }
+      }
+      if (ex) {
+        const first = exCls === cls ? (traits.slice(0, i).find((pt) => hasTraitProp(pt, name)) || cls) : exCls;
+        const same = (ex.vis || 'public') === (pd.vis || 'public') && !!ex.static === tStatic && !!ex.readonly === !!pd.readonly &&
+          sameType(ex.type, pd.type) && sameValue(() => declaredDefault(ex, exCls), () => declaredDefault(pd, cls));
+        if (!same) throw at(`${first.name} and ${t.name} define the same property ($${name}) in the composition of ${cls.name}. However, the definition differs and is considered incompatible. Class was composed`);
+        if (ownP || !tStatic) continue;
+      }
+      if (cls.readonly && !pd.readonly) throw at(`Readonly class ${cls.name} cannot use trait with a non-readonly property ${t.name}::$${name}`);
+      const info = tStatic ? t.sprops.get(name) : [...t.slots.values()].find((x) => x.decl === pd);
+      addProp(cls, Object.assign({}, pd, { defE: info && info.defE }), cls);
+      propOwner.set(name, { t, decl: pd });
+    }
+  });
+}
+const constType = (c) => c.type || (c.decl && c.decl.type) || null;
+function hasTraitProp(t, name) { return t.sprops.has(name) || [...t.slots.values()].some((x) => x.decl && x.decl.name === name); }
+// a property's default value as declared (undefined: none, for typed properties)
+function declaredDefault(p, owner) {
+  if (p.hasDef) return (p.defE || cExpr(p.def))(constFrame(owner));
+  return p.type ? undefined : null;
+}
+function sameType(a, b) {
+  if (!a || !b) return !a && !b;
+  return typeStr(a, null, true) === typeStr(b, null, true);
+}
+function sameValue(fa, fb) {
+  const a = fa(), b = fb();
+  if (a === undefined || b === undefined) return a === b;
+  return strictEq(a, b);
 }
 
 function addEnumMethods(cls) {
@@ -326,10 +435,12 @@ function addEnumMethods(cls) {
   }
 }
 
-export function classConst(cls, name, f) {
+// direct: a fetch written in code (Foo::BAR, constant()), which can't name a trait
+export function classConst(cls, name, f, direct) {
   const c = cls.consts.get(name);
   if (c === undefined) throwError('Error', `Undefined constant ${cls.name}::${name}`);
   if (c.vis === 'private' && f && f.cls !== c.cls) throwError('Error', `Cannot access private constant ${cls.name}::${name}`);
+  if (direct && cls.isTrait) throwError('Error', `Cannot access trait constant ${cls.name}::${name} directly`);
   if (!c.done) {
     if (c.evaluating) throwError('Error', `Cannot declare self-referencing constant ${c.cls.name}::${name}`);
     c.evaluating = true;
@@ -356,7 +467,7 @@ export function findStaticProp(cls, name, f) {
   const si = lookupStaticProp(cls, name);
   if (!si) throwError('Error', `Access to undeclared static property ${cls.name}::$${name}`);
   if (si.vis !== 'public' && !canAccessMember(si, f ? f.cls : null)) throwError('Error', `Cannot access ${si.vis} property ${cls.name}::$${name}`);
-  if (si.uninit) { if (si.ref.v === null) { /* allow writes */ } }
+  if (cls.isTrait && cls.decl && cls.decl.file !== PRELUDE_FILE) deprecated(`Accessing static trait property ${cls.name}::$${name} is deprecated, it should only be accessed on a class using the trait`);
   return si;
 }
 

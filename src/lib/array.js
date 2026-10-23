@@ -281,7 +281,7 @@ def('array_unshift', (array, ...values) => {
   A(deref(array));
   const a = refArr(array);
   const out = new PHPArray();
-  for (const v of values) out.push(cp(v));
+  for (const v of values) out.push(v === a ? a.clone() : cp(v)); // unshifting the array onto itself adds its old contents
   for (const [k, v] of a.rawEntries()) { if (typeof k === 'string') out.setRaw(k, v); else out.push(v); }
   a.replaceWith(out, values.length);
   a.pos = 0;

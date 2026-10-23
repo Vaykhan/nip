@@ -599,10 +599,13 @@ export class Parser {
             rules.push({ kind: 'insteadof', trait: tn, method: m, excl: ex });
           } else {
             this.expectId('as');
-            let vis = null, alias = null;
+            let vis = null, alias = null, final = false;
             if (this.isId('public') || this.isId('protected') || this.isId('private')) vis = this.next().v.toLowerCase();
+            else if (this.isId('final')) { this.next(); final = true; }
+            else if (this.isId('static') || this.isId('abstract')) this.fatal(`Cannot use "${this.next().v.toLowerCase()}" as method modifier in trait alias`);
+            else if (this.isId('readonly')) this.fatal("Cannot use 'readonly' as method modifier");
             if (this.tok.t === 'id') alias = this.ident();
-            rules.push({ kind: 'as', trait: tn, method: m, vis, alias });
+            rules.push({ kind: 'as', trait: tn, method: m, vis, alias, final });
           }
           this.semi();
         }

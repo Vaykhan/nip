@@ -21,7 +21,7 @@ export function compileSource(src, file) {
     if (e instanceof ParseErr) throw new FatalSig(e.msg, e.line, file, e.kind || 'Parse error');
     throw e;
   }
-  try { checkProgram(ast); }
+  try { checkProgram(ast, file); }
   catch (e) { if (e instanceof FatalSig && !e.file) e.file = file; throw e; }
   return { ast, body: null, file };
 }
@@ -109,7 +109,7 @@ export function doEval(code, f, st) {
       ex.props.set('file', file); ex.props.set('line', e.line);
       throw new ThrowSig(ex);
     }
-    try { checkProgram(ast); }
+    try { checkProgram(ast, file); }
     catch (e) { if (e instanceof FatalSig && !e.file) e.file = file; throw e; }
     prog = { ast, body: cStmts(ast), file };
     if (evalCache.size > 1000) evalCache.clear();

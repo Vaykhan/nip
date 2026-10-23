@@ -197,21 +197,24 @@ function reach(v) {
     let x = stack.pop();
     if (x instanceof Ref) x = x.v;
     if (x === null || typeof x !== 'object' || seen.has(x)) continue;
-    if (x instanceof PHPObject) { seen.add(x); for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); }
+    if (x instanceof PHPObject) { seen.add(x); for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); if (x.refl) stack.push(x.refl.obj); }
     else if (x instanceof PHPArray) { if (x.size > 64) continue; seen.add(x); for (let i = 0; i < x.v.length; i++) if (x.k[i] !== undefined) stack.push(x.v[i]); }
   }
   return seen;
 }
-// a user function returned (vars: its local variables) or a builtin did (vars: its arguments)
-export function frameExit(vars, ret) {
+// a user function returned (vars: its local variables) or a builtin did (vars: its arguments).
+// ret (the return value or the thrown exception) and self (the object a constructor built) are in
+// flight, held by no variable yet: what they refer to stays.
+export function frameExit(vars, ret, self) {
   if (budget < BUDGET_MAX) budget += BUDGET_REFILL;
   if (budget <= 0) return; // spent: handles aren't reused for a while
   const excl = ret !== null && typeof ret === 'object' ? reach(ret) : null;
+  if (self) { if (excl) { for (const x of reach(self)) excl.add(x); } else return frameExit(vars, self); }
   const cands = new Set();
   for (const k in vars) addCands(vars[k], excl, cands, 0);
   if (!cands.size) return;
   // without budget, check them at a later statement start instead
-  if (!sweep(cands)) { for (const o of cands) idCands.add(o); idq.n = 1; }
+  if (!sweep(cands, ret, self)) { for (const o of cands) idCands.add(o); idq.n = 1; }
 }
 // at the start of a statement
 export function idSafePoint() {
@@ -244,13 +247,14 @@ function visitIdRoots(push) {
 }
 // free the handles of the candidates nothing reachable from the roots refers to; false when
 // the budget ran out first
-function sweep(cands) {
+function sweep(cands, ret, self) {
   let pending = 0;
   for (const o of cands) if (!o.idFreed && (!o.cls.hasDestructor || o.destructed)) pending++;
   if (pending === 0) return true;
   const seen = new Set(), stack = [];
   const push = (v) => { if (v !== null && typeof v === 'object' && !(v instanceof Flt)) stack.push(v); };
   visitIdRoots(push);
+  push(ret); push(self);
   let work = stack.length;
   while (stack.length && pending > 0) {
     const v = stack.pop();
