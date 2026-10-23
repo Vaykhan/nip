@@ -10,7 +10,6 @@ import { containsRefSlot, refHolderCounts } from '../runtime/gc.js';
 import { def, deref } from './core.js';
 
 function varDump(v, ind, seen, rc) {
-  const pad = ' '.repeat(ind);
   let amp = '';
   if (v instanceof Ref) { if (rc && (rc.get(v) || 0) > 1) amp = '&'; v = v.v; }
   if (amp) return varDump0(v, ind, seen, rc).replace(/^(\s*)/, '$1&');
@@ -90,7 +89,7 @@ function propLabel(o, key, dump) {
   }
   const info = o.cls.props.get(key);
   if (info && info.vis === 'protected') return dump ? `"${key}":protected` : `${key}:protected`;
-  return dump ? (/^\d+$/.test(key) && false ? key : `"${key}"`) : key;
+  return dump ? `"${key}"` : key;
 }
 
 function printR(v, ind, seen) {

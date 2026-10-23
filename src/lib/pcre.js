@@ -8,7 +8,6 @@ import { warn } from '../runtime/errors.js';
 import { callableFn } from '../runtime/callables.js';
 import { A, def, I, S } from './core.js';
 
-const PREG = { PATTERN_ORDER: 1, SET_ORDER: 2, OFFSET_CAPTURE: 256, UNMATCHED_AS_NULL: 512, SPLIT_NO_EMPTY: 1, SPLIT_DELIM_CAPTURE: 2, SPLIT_OFFSET_CAPTURE: 4, GREP_INVERT: 1 };
 let pregLastError = 0;
 export function resetPcreState() { pregLastError = 0; }
 const PREG_ERR_MSG = { 0: 'No error', 1: 'Internal error', 2: 'Backtrack limit exhausted', 3: 'Recursion limit exhausted', 4: 'Malformed UTF-8 characters, possibly incorrectly encoded', 5: 'The offset did not correspond to the beginning of a valid UTF-8 code point', 6: 'JIT stack limit exhausted' };
@@ -80,7 +79,7 @@ function translatePcre(p, fl, names, unicode) {
   let i = 0;
   const n = p.length;
   let groupCount = 0;
-  const esc = (ch) => (/[\^$\\.*+?()[\]{}|/\-]/.test(ch) ? '\\' + ch : ch);
+  const esc = (ch) => (/[\^$\\.*+?()[\]{}|/-]/.test(ch) ? '\\' + ch : ch);
   const litChar = (ch) => {
     const c = ch.codePointAt(0);
     if (/[\^$\\.*+?()[\]{}|/]/.test(ch)) return '\\' + ch;

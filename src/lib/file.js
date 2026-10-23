@@ -49,14 +49,6 @@ function rawRead(h, n) {
   if (h.kind === 'file') h.pos += got;
   return buf.toString('latin1', 0, got);
 }
-function fillBuf(h, want) {
-  while (h.rbuf.length < want) {
-    const chunk = rawRead(h, Math.max(8192, want - h.rbuf.length));
-    if (chunk === '') return false;
-    h.rbuf += chunk;
-  }
-  return true;
-}
 export function streamReadLine(h, maxLen) {
   if (h.kind === 'stdio' && h.fd === 0) rt.flush();
   for (;;) {

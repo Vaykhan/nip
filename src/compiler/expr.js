@@ -37,10 +37,6 @@ export function cValue(n) { // expression whose value will be stored: apply copy
   return (f) => { const v = E(f); if (v instanceof PHPArray) v.cow = true; return v; };
 }
 
-function constValue(n) { // try to fold a literal expression; returns undefined if not constant
-  if (n.k === 'Lit') return n.v;
-  return undefined;
-}
 
 export function cExpr(n) {
   const fn = EXPR[n.k];

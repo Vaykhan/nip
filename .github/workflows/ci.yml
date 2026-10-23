@@ -5,6 +5,18 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
   test:
     name: Tests (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
@@ -17,6 +29,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
+      - name: Unit tests
+        run: node --test tests/unit/*.test.js
       - name: Test sources
         run: node tests/run.js --verbose
       - name: Build single-file bundle
@@ -30,11 +44,9 @@ jobs:
           path: dist/nip.cjs
 
   php-diff:
-    # Compares directly with the system PHP 8.3 (Ubuntu 24.04 ships 8.3.x); informational, since
-    # patch releases newer than the 8.3.6 reference can legitimately differ.
+    # Compares directly with the system PHP (8.3.6 on the ubuntu-24.04 image).
     name: Differential test vs php 8.3
     runs-on: ubuntu-24.04
-    continue-on-error: true
     env:
       # the runner image's PHP loads Xdebug, whose var_dump() and error output differ from plain PHP
       XDEBUG_MODE: 'off'

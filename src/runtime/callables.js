@@ -119,7 +119,6 @@ export function callableFn(cb) { // returns a JS function for repeated invocatio
   const c = nativeCallback(cb);
   return (...args) => callFunction(c.fn, args, c.thisObj, c.cls, c.sc, c.closure);
 }
-function callableRefs(cb) { const c = resolveCallable(cb, rt.frame, true); return c.fn; }
 export function callableToClosure(v, f) {
   if (v instanceof PHPObject && v.cls === closureClass) return v;
   const c = resolveCallable(v, f, true);

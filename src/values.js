@@ -61,7 +61,6 @@ export function fmtReprZ(x) { // with ".0" for integral finite values (var_expor
 }
 
 // ---------------------------------------------------------------- numeric strings
-const WS = ' \t\n\r\v\f';
 export const NUM_FULL = /^[ \t\n\r\v\f]*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?[ \t\n\r\v\f]*$/;
 export const NUM_LEAD = /^[ \t\n\r\v\f]*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/;
 export const INT_LIKE = /^[ \t\n\r\v\f]*[+-]?\d+[ \t\n\r\v\f]*$/;
@@ -85,7 +84,6 @@ export function numericStr(s) {
   if (!NUM_FULL.test(s)) return null;
   return numFromText(s);
 }
-function isNumericStr(s) { return numericStr(s) !== null; }
 
 // ---------------------------------------------------------------- arrays
 export class PHPArray {

@@ -171,7 +171,7 @@ export function lex(src, file) {
         const startLine = line;
         line++;
         // find closing marker: a line consisting of optional whitespace + id, followed by non-id char
-        let p = bodyStart, found = -1, indent = '';
+        let found = -1, indent = '';
         const re = new RegExp('^([ \\t]*)' + id.replace(/[^\w]/g, '\\$&') + '(?![A-Za-z0-9_\\x80-\\xff])', 'gm');
         re.lastIndex = bodyStart;
         let mm;

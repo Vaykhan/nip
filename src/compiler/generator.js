@@ -14,6 +14,8 @@ import { callMethodName } from '../runtime/classes.js';
 import { GenThrow } from '../runtime/generators.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
+// wraps a non-yielding body so it can be driven like a generator
+// eslint-disable-next-line require-yield
 function genWrap(fn) { return function* (f) { return fn(f); }; }
 
 function cExprG(n) {

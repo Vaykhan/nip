@@ -106,7 +106,6 @@ const globalsProxy = { isGlobalsProxy: true };
 function lvIndex(n) {
   const P = isLvalNode(n.o) ? cLval(n.o) : lvTemp(n.o);
   const I = n.i ? cExpr(n.i) : null;
-  const noIdx = () => throwError('Error', 'Cannot use [] for reading');
   if (P.globals) {
     const gref = (f) => { const k = toStr(I(f)); return rt.globals[k] || (rt.globals[k] = new Ref(null)); };
     return {

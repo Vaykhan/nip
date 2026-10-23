@@ -2,22 +2,49 @@
   "name": "nip",
   "version": "0.1.0",
   "description": "NIP (Nip is php): a PHP 8.3 interpreter written in pure JavaScript for Node.js",
-  "keywords": ["php", "interpreter", "php8", "runtime"],
+  "keywords": [
+    "php",
+    "interpreter",
+    "php8",
+    "runtime"
+  ],
   "license": "BSD-3-Clause",
-  "repository": { "type": "git", "url": "git+https://github.com/Vaykhan/nip.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vaykhan/nip.git"
+  },
   "type": "module",
   "exports": {
-    ".": { "import": "./src/index.js", "require": "./dist/nip.cjs" }
+    ".": {
+      "import": "./src/index.js",
+      "require": "./dist/nip.cjs"
+    }
   },
-  "bin": { "nip": "./bin/nip.js" },
-  "files": ["bin", "src", "dist/nip.cjs"],
-  "engines": { "node": ">=22" },
+  "bin": {
+    "nip": "./bin/nip.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "dist/nip.cjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "node scripts/build.js",
     "prepare": "node scripts/build.js",
-    "test": "node tests/run.js",
+    "test": "node --test tests/unit/*.test.js && node tests/run.js",
     "test:bundle": "node scripts/build.js && node tests/run.js --bundle",
     "test:php": "node tests/run.js --php",
-    "phpt": "node tests/phpt/runner.js"
+    "phpt": "node tests/phpt/runner.js",
+    "test:unit": "node --test tests/unit/*.test.js",
+    "test:cases": "node tests/run.js",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0"
   }
 }

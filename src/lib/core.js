@@ -1,8 +1,8 @@
 // Builtin function registry (def/alias) and PHP 8 argument coercion helpers
 // (S = string, I = int, N = int|float, B = bool, A = array, ...).
 
-import { cp, Flt, fmtRepr, MAXS, mkf, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
-import { floatToInt, toBool, toDbl, toInt, toNumber, toStr } from '../convert.js';
+import { cp, Flt, fmtRepr, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
+import { floatToInt, toDbl, toInt, toNumber, toStr } from '../convert.js';
 import { isNum } from '../compare.js';
 import { writableArrIn } from '../compiler/common.js';
 import { E_DEPRECATED, rt } from '../runtime/state.js';
@@ -84,7 +84,6 @@ export const N = (v) => { // JS number from int|float param
   if (typeof v === 'string' && numericStr(v) === null && !NUM_LEAD.test(v)) argTypeErr('int|float', v);
   return toDbl(v);
 };
-const B = (v) => toBool(v instanceof Ref ? v.v : v);
 export const A = (v) => {
   if (v instanceof PHPArray) return v;
   if (v instanceof Ref) v = v.v;
@@ -92,8 +91,6 @@ export const A = (v) => {
   return v;
 };
 export const IntN = (v) => { if (isNum(v)) return v; if (v === null) { nullArgDeprecation('int|float'); return 0; } if (v instanceof PHPArray || v instanceof PHPObject) argTypeErr('int|float', v); return toNumber(v); }; // keep int|float
-const F = (x) => mkf(x);
-function numOut(x) { return Number.isInteger(x) && Math.abs(x) <= MAXS ? x : mkf(x); }
 export function deref(v) { return v instanceof Ref ? v.v : v; }
 // copy an array slot into a new array: shared references stay references (like ZVAL_COPY)
 export function slotCp(x) { if (x instanceof Ref) return x._weak ? cp(x.v) : x; return cp(x); }

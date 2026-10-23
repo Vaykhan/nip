@@ -178,8 +178,6 @@ function addProp(cls, p, owner) {
   };
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
-    const ex = cls.sprops.get(p.name);
-    if (ex && ex.cls !== owner && !p.hasDef && !ex.pending && false) return;
     const si = { name: p.name, cls: owner, vis: p.vis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE };
     if (!info.hasDef && info.type && !info.type.nullable) si.uninit = true;
     cls.sprops.set(p.name, si);
@@ -349,10 +347,6 @@ function trackDestructible(obj) {
   const fr = rt.frame;
   if (fr && fr !== rt.globalFrame) (fr.destr || (fr.destr = [])).push(obj);
 }
-function newObject(clsName, args) { // from native code
-  const cls = lookupClass(clsName);
-  return instantiate(cls, () => args, rt.frame);
-}
 
 export function callMethodName(obj, name, args) {
   const m = obj.cls.methods.get(name.toLowerCase());
@@ -454,7 +448,6 @@ export function writeProp(obj, name, v, f) {
       if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${obj.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
-    if (!obj.props.has(key) && obj.cls.methods.has('__set') && !info.type && false) { /* declared-but-unset */ }
   } else if (!obj.props.has(name)) {
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
