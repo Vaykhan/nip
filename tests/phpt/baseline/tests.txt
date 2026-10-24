@@ -11,8 +11,12 @@ tests/basic/bug73969.phpt
 tests/basic/timeout_variation_0.phpt
 tests/basic/timeout_variation_7.phpt
 tests/classes/__call_001.phpt
+tests/classes/__call_002.phpt
 tests/classes/__call_003.phpt
+tests/classes/__call_005.phpt
 tests/classes/__set__get_001.phpt
+tests/classes/__set__get_002.phpt
+tests/classes/__set__get_003.phpt
 tests/classes/__set__get_004.phpt
 tests/classes/__set__get_005.phpt
 tests/classes/__set_data_corrupt.phpt
@@ -339,6 +343,7 @@ tests/lang/bug30726.phpt
 tests/lang/bug30862.phpt
 tests/lang/bug32828.phpt
 tests/lang/bug32924.phpt
+tests/lang/bug35176.phpt
 tests/lang/bug43958.phpt
 tests/lang/bug44654.phpt
 tests/lang/bug44827.phpt
@@ -519,6 +524,8 @@ tests/lang/type_hints_003.phpt
 tests/lang/zend_throw_exception_001.phpt
 tests/output/bug60322.phpt
 tests/output/bug60768.phpt
+tests/output/bug74725.phpt
+tests/output/bug75236.phpt
 tests/output/flush_basic_001.phpt
 tests/output/ob_001.phpt
 tests/output/ob_002.phpt

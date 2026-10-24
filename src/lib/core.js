@@ -2,12 +2,11 @@
 // (S = string, I = int, N = int|float, B = bool, A = array, ...).
 
 import { cp, Flt, fmtRepr, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
-import { floatToInt, toDbl, toInt, toNumber, toStr } from '../convert.js';
+import { floatToInt, toDbl, toInt, toNumber, toStr, valueName } from '../convert.js';
 import { isNum } from '../compare.js';
 import { writableArrIn } from '../compiler/common.js';
 import { E_DEPRECATED, rt } from '../runtime/state.js';
 import { deprecated, throwError } from '../runtime/errors.js';
-import { valueName } from '../runtime/functions.js';
 import { findMethod } from '../runtime/callables.js';
 
 export function pnamesOf(fn) {

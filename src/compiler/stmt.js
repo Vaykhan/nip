@@ -1,14 +1,14 @@
 // Compilation of statements (control flow, declarations, foreach, try/catch, ...).
 
 import { cp, FatalSig, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
-import { toBool, toStr } from '../convert.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
 import { checkTimeLimit, notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { compilingByRef, declareFunction, valueName } from '../runtime/functions.js';
+import { compilingByRef, declareFunction } from '../runtime/functions.js';
 import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
 import { dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
 import { callValue } from '../runtime/callables.js';
@@ -352,7 +352,7 @@ const STMT = {
         let handled = false;
         for (const c of catches) {
           if (c.types.some((t) => obj.cls.ancestors.has(t))) {
-            if (c.v) { const r = f.vars[c.v]; if (r) r.v = obj; else f.vars[c.v] = new Ref(obj); }
+            if (c.v) { const r = f.vars[c.v]; if (r) { const old = r.v; r.v = obj; if (old !== obj && old !== null && typeof old === 'object') dropRef(old); } else f.vars[c.v] = new Ref(obj); }
             handled = true;
             if (F) {
               try { res = c.B(f); }

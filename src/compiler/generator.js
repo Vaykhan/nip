@@ -6,7 +6,7 @@
 // JS yield that unwinds to the Fiber driver in runtime/fibers.js.
 
 import { cp, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { toBool, toStr } from '../convert.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq, strictEq } from '../compare.js';
 import { CALL_KINDS, hasSuspend, hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
 import { cLval } from './lvalue.js';
@@ -14,7 +14,7 @@ import { cExpr, compileDeferred, matchRepr, PendingCall } from './expr.js';
 import { cStmt, GOTO, gotoTargets, iterateObject, tick } from './stmt.js';
 import { rt } from '../runtime/state.js';
 import { throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { callFunctionG, valueName } from '../runtime/functions.js';
+import { callFunctionG } from '../runtime/functions.js';
 import { callMethodName } from '../runtime/classes.js';
 import { GenThrow } from '../runtime/generators.js';
 import { FiberExit } from '../runtime/fibers.js';

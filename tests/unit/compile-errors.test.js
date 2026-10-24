@@ -49,6 +49,18 @@ const CASES = [
   ['class A { function f() {} } abstract class B extends A { abstract function f(); }', 'Cannot make non abstract method A::f() abstract in class B'],
   ['class A { protected function f() {} } class B extends A { private function f() {} }', 'Access level to B::f() must be protected (as in class A) or weaker'],
   ['class B implements Countable { function count(string $x): int {} }', 'Declaration of B::count(string $x): int must be compatible with Countable::count(): int'],
+  // write contexts
+  ['function f(&$r) {} f((new stdClass)->a);', 'Cannot use temporary expression in write context'],
+  ['function f($v) {} f($a[]);', 'Cannot use [] for reading'],
+  ['function f() {} f() = 1;', "Can't use function return value in write context"],
+  ['$o->m()++;', "Can't use method return value in write context"],
+  ['strlen("x")[0] = 1;', 'Cannot use result of built-in function in write context'],
+  ['f(a: 1, ...$b);', 'Cannot use argument unpacking after named arguments'],
+  ['for (;;) { break 2; }', "Cannot 'break' 2 levels"],
+  ['class A extends static {}', "Cannot use 'static' as class name, as it is reserved"],
+  ['enum E { case A; public static function cases(): array {} }', 'Cannot redeclare E::cases()'],
+  ['class A { function __get(int $n) {} }', 'A::__get(): Parameter #1 ($n) must be of type string when declared'],
+  ['function f(): int { yield 1; }', 'Generator return type must be a supertype of Generator, int given'],
 ];
 
 for (const [code, msg] of CASES) {
@@ -70,7 +82,8 @@ const VALID = [
   'class A { function f(): self {} function g(): ?A {} } class B extends A { function f(): static {} function g(): never {} }',
   'class A { private function f(int $a) {} function __construct(int $a) {} } class B extends A { function f(string $a) {} function __construct(string $a) {} }',
   'const C = new stdClass; class A { const X = [1, 2][0] + PHP_INT_SIZE; public $p = self::X ?? -1; } function f($a = new A(x: 1), $b = __LINE__) {} #[Attr(new A, [1])] function g() {}',
-  'function f(&$r) {} function g() { return new stdClass; } f((new stdClass)->a); g()->a = 1; g()->b[] = 2; isset((new stdClass)->c);',
+  // f() is declared after the call: whether it takes a reference is only known at run time
+  'function g() { return new stdClass; } f((new stdClass)->a); g()->a = 1; g()->b[] = 2; isset((new stdClass)->c); function f(&$r) {}',
   'class B implements IteratorAggregate { #[\\ReturnTypeWillChange] function getIterator() {} }',
 ];
 for (const code of VALID) {

@@ -103,6 +103,7 @@ export function doEval(code, f, st) {
       const toks = lex('<?php ' + code, file);
       const p = new Parser(toks, file, Object.assign({ fnStack: [], clsStack: [], anonCount: 0, strict: false }, st));
       ast = p.parseProgram();
+      ast.compileWarnings = p.st.compileWarnings || null;
     } catch (e) {
       if (!(e instanceof ParseErr)) throw e;
       const ex = makeException('ParseError', e.msg);

@@ -4,7 +4,7 @@ import {
   bigOrFloat, cp, Flt, fmtRepr, intAdd, intMul, intSub, isInt, MAXS, mkf, normBig, NUM_FULL, NUM_LEAD,
   numericStr, numFromText, PHPArray, PHPObject, Ref
 } from './values.js';
-import { floatToInt, toDbl, toStr, typeOf } from './convert.js';
+import { floatToInt, toDbl, toStr, typeOf, valueName } from './convert.js';
 import { deprecated, throwError, warn } from './runtime/errors.js';
 
 function arithOperand(v, op, a, b) {
@@ -129,7 +129,7 @@ export function bitXor(a, b) {
 export function bitNot(a) {
   if (typeof a === 'string') { let r = ''; for (let i = 0; i < a.length; i++) r += String.fromCharCode(~a.charCodeAt(i) & 255); return r; }
   if (a instanceof Flt) { if (!Number.isInteger(a.v) || a.v >= 9223372036854775808 || a.v < -9223372036854775808) deprecated(`Implicit conversion from float ${fmtRepr(a.v)} to int loses precision`); a = floatToInt(a.v); }
-  else if (!isInt(a)) throwError('TypeError', `Cannot perform bitwise not on ${typeOf(a)}`);
+  else if (!isInt(a)) throwError('TypeError', `Cannot perform bitwise not on ${valueName(a)}`);
   if (typeof a === 'number' && a >= -2147483648 && a <= 2147483647) return ~a;
   return normBig(BigInt.asIntN(64, ~BigInt(a)));
 }

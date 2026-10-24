@@ -48,6 +48,11 @@ function typeBits(t) {
   if (t.nullable) bits.add('null');
   return { bits, complex };
 }
+const SPECIAL_BUILTINS = {
+  strlen: 1, is_null: 1, is_bool: 1, is_long: 1, is_int: 1, is_integer: 1, is_float: 1, is_double: 1, is_string: 1, is_array: 1,
+  is_object: 1, is_resource: 1, is_scalar: 1, boolval: 1, intval: 1, floatval: 1, doubleval: 1, strval: 1, gettype: 1, count: 1,
+  sizeof: 1, get_class: [0, 1], get_called_class: 0, func_num_args: 0, func_get_args: 0, array_key_exists: 2,
+};
 const AUTO_GLOBALS = new Set(['GLOBALS', '_SERVER', '_GET', '_POST', '_COOKIE', '_FILES', '_ENV', '_REQUEST', '_SESSION']);
 const isTemp = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && !VAR_OR_CALL.has(n.k);
 
@@ -61,6 +66,7 @@ export function checkProgram(ast, file) {
     try { raiseFn(msg); } finally { rt.file = prevFile; rt.line = prevLine; }
   };
   const compileDeprecated = atNode(deprecated), compileWarning = atNode(warn);
+  for (const w of ast.compileWarnings || []) compileWarning(w.msg, w); // found by the parser
   // goto: labels and gotos of the current function, and the loops/switches/finally blocks
   // enclosing the statement being visited
   let scope = newScope(), path = [];
@@ -68,6 +74,7 @@ export function checkProgram(ast, file) {
   // the function being checked: null at the top level (which may run inside a class via
   // include), else { cls: enclosing ClassDecl or null, closure }
   let fnCtx = null, curClass = null;
+  const knownFns = new Map(); // functions declared earlier in the file (see 'FuncDecl')
 
   function visit(n, ctx) {
     if (!n || typeof n !== 'object' || seen.has(n)) return;
@@ -80,11 +87,11 @@ export function checkProgram(ast, file) {
       case 'ClassDecl': {
         if (!n.anon) { const short = n.name.slice(n.name.lastIndexOf('\\') + 1); if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n); }
         checkClass(n);
-        checkAttrs(n.attrs, T_CLASS);
-        for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD); methods.add(m.fn); }
-        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
+        checkAttrs(n.attrs, T_CLASS, n);
+        for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD, m); methods.add(m.fn); }
+        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
         for (const c of n.consts) {
-          checkAttrs(c.attrs, T_CLASS_CONSTANT);
+          checkAttrs(c.attrs, T_CLASS_CONSTANT, c);
           checkConstExpr(c.e, false);
           if (c.type) {
             const bad = c.type.alts.find((a) => typeof a === 'string' && ['callable', 'void', 'never'].includes(a.toLowerCase()));
@@ -95,7 +102,7 @@ export function checkProgram(ast, file) {
             }
           }
         }
-        for (const c of n.cases) { checkAttrs(c.attrs, T_CLASS_CONSTANT); checkConstExpr(c.e, false); }
+        for (const c of n.cases) { checkAttrs(c.attrs, T_CLASS_CONSTANT, c); checkConstExpr(c.e, false); }
         for (const p of n.props) {
           checkConstExpr(p.def, false);
           if (p.type && p.hasDef && p.def) {
@@ -126,6 +133,7 @@ export function checkProgram(ast, file) {
         if (ctx === ASSIGN && n.name === 'this') fail('Cannot re-assign $this', n);
         if (ctx === ASSIGN && n.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', n);
         if (ctx === UNSET && n.name === 'this') fail('Cannot unset $this', n);
+        if (ctx === UNSET && n.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', n);
         return;
       case 'Prop':
         if (n.nullsafe && ctx !== READ && ctx !== ARG) fail("Can't use nullsafe operator in write context", n);
@@ -133,18 +141,33 @@ export function checkProgram(ast, file) {
         visit(n.o, ctx === READ ? READ : WRITE);
         if (typeof n.name === 'object') visit(n.name, READ);
         return;
-      case 'Assign': case 'AssignOp': visit(n.t, ASSIGN); visit(n.e, READ); return;
+      case 'Assign': case 'AssignOp':
+        ensureWritable(n.t);
+        // [&$a] = expr: the value must be something a reference can point into
+        if (n.k === 'Assign' && (n.t.k === 'List' || n.t.k === 'Arr') && hasRefItem(n.t)) {
+          if (isNullsafeChain(n.e)) fail('Cannot take reference of a nullsafe chain', n);
+          if (!VAR_OR_CALL.has(n.e.k)) fail('Cannot assign reference to non referenceable value', n);
+        }
+        visit(n.t, ASSIGN); visit(n.e, READ); return;
       case 'AssignRef':
         if (n.e && n.e.k === 'Prop' && n.e.nullsafe) fail('Cannot take reference of a nullsafe chain', n);
-        visit(n.t, ASSIGN); visit(n.e, WRITE); return;
-      case 'PreInc': case 'PreDec': case 'PostInc': case 'PostDec': visit(n.e, WRITE); return;
-      case 'Unset': visit(n.list, UNSET); return;
+        if (n.e && n.e.k === 'Var' && n.e.name === 'GLOBALS') fail('Cannot acquire reference to $GLOBALS', n);
+        ensureWritable(n.t); visit(n.t, ASSIGN); visit(n.e, WRITE); return;
+      case 'PreInc': case 'PreDec': case 'PostInc': case 'PostDec': ensureWritable(n.e); visit(n.e, WRITE); return;
+      case 'Unset': for (const x of n.list) ensureWritable(x); visit(n.list, UNSET); return;
       case 'Arr':
-        if (ctx !== ASSIGN) break;
+        if (ctx !== ASSIGN) {
+          const empty = (n.items || []).indexOf(null);
+          // reported at the element before the empty one, which PHP compiled last
+          if (empty >= 0) { const prev = n.items.slice(0, empty).reverse().find(Boolean); fail('Cannot use empty array elements in arrays', (prev && prev.v && prev.v.l) ? prev.v : n); }
+          break;
+        }
       // falls through: [$a, $b] = ... destructuring
       case 'List': {
+        if (n.k === 'List' && ctx !== ASSIGN && ctx !== WRITE) fail('Cannot use list() as standalone expression', n);
         const items = (n.items || []).filter(Boolean);
         if (!items.length) fail('Cannot use empty list', n);
+        if (items.some((it) => it.key) && items.length < n.items.length) fail('Cannot use empty array entries in keyed array assignment', n);
         if (items.some((it) => it.spread)) fail('Spread operator is not supported in assignments', n);
         if (items.some((it) => it.key) && items.some((it) => !it.key)) fail('Cannot mix keyed and unkeyed array entries in assignments', n);
         for (const it of items) {
@@ -155,9 +178,26 @@ export function checkProgram(ast, file) {
         for (const it of items) { visit(it.key, READ); visit(it.v, it.byRef ? WRITE : ASSIGN); }
         return;
       }
-      case 'Call': visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) : null, n); return;
-      case 'MCall': case 'NullsafeMCall': visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
-      case 'SCall': case 'New': visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
+      case 'Call':
+        // with zend.assertions=-1, assert() calls aren't compiled at all
+        if (typeof n.f === 'string' && /^\\?assert$/i.test(n.fb || n.f) && (rt.ini.get('zend.assertions') ?? '-1') === '-1') return;
+        // builtins compiled to an instruction have a temporary result (zend_separate_if_call_and_write)
+        if (ctx !== READ && ctx !== ARG && typeof n.f === 'string' && tmpBuiltin(n)) fail('Cannot use result of built-in function in write context', n);
+        visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) || knownFns.get(n.f.replace(/^\\/, '').toLowerCase()) : null, n); return;
+      case 'FuncDecl':
+        if (n.fn && /\\assert$/i.test(n.fn.name)) fail('Defining a custom assert() function is not allowed, as the function has special semantics', n);
+        // a top-level function is declared when compiled: later calls in the file know its parameters
+        if (n.top && n.fn && n.fn.name) {
+          const ps = n.fn.params, vi = ps.findIndex((p) => p.variadic);
+          knownFns.set(n.fn.name.toLowerCase(), { refs: ps.map((p) => !!p.byRef), refRest: vi >= 0 && ps[vi].byRef ? vi : null });
+        }
+        break;
+      case 'MCall': case 'NullsafeMCall':
+        if (n.args === 'fcc' && isNullsafeChain(n)) fail('Cannot combine nullsafe operator with Closure creation', n);
+        visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
+      case 'SCall': case 'New':
+        if (n.k === 'New' && n.args === 'fcc') fail('Cannot create Closure for new expression', n);
+        visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
       case 'ConstDecl': for (const it of n.items) checkConstExpr(it.e, true); break;
       case 'Global':
         for (const x of n.names) if (x === 'this') fail('Cannot use $this as global variable', n);
@@ -212,7 +252,7 @@ export function checkProgram(ast, file) {
         return;
       }
       case 'Try':
-        for (const c of n.catches) if (c.v === 'this') fail('Cannot re-assign $this', n);
+        for (const c of n.catches) if (c.v === 'this') fail('Cannot re-assign $this', c.l ? c : n);
         if (n.fin) scope.hasFinally = true; else scope.hasTryWithoutFinally = true;
         within('try', () => { visit(n.body, READ); visit(n.catches, READ); });
         within('finally', () => visit(n.fin, READ));
@@ -221,6 +261,24 @@ export function checkProgram(ast, file) {
     for (const key in n) if (key !== 'l') visit(n[key], READ);
   }
 
+  function hasRefItem(list) { return (list.items || []).some((it) => it && (it.byRef || ((it.v.k === 'List' || it.v.k === 'Arr') && hasRefItem(it.v)))); }
+  function isNullsafeChain(e) {
+    for (let x = e; x && typeof x === 'object'; x = x.o) if (x.nullsafe || x.k === 'NullsafeMCall') return true;
+    return false;
+  }
+  // zend_ensure_writable_variable: what an assignment, ++/-- or unset() targets
+  function ensureWritable(t) {
+    if (!t || typeof t !== 'object') return;
+    if (t.k === 'Call') fail("Can't use function return value in write context", t);
+    if (t.k === 'MCall' || t.k === 'NullsafeMCall' || t.k === 'SCall') fail("Can't use method return value in write context", t);
+  }
+  // builtins zend_try_compile_special_func compiles to an instruction (with these argument counts)
+  function tmpBuiltin(n) {
+    if (!Array.isArray(n.args) || n.args.some((a) => a.spread || a.name)) return false;
+    if (n.fb && !n.f.startsWith('\\')) return false; // unqualified in a namespace: resolved at run time
+    const want = SPECIAL_BUILTINS[n.f.replace(/^\\/, '').toLowerCase()];
+    return want !== undefined && (Array.isArray(want) ? want.includes(n.args.length) : want === n.args.length);
+  }
   // A builtin known at compile time: PHP checks its by-value arguments as reads.
   function builtin(n) {
     if (n.fb && n.f.includes('\\') && !n.f.startsWith('\\')) return null; // namespaced: resolved at run time
@@ -231,7 +289,7 @@ export function checkProgram(ast, file) {
     if (!Array.isArray(args)) return;
     let unpacked = false, named = false;
     for (const a of args) {
-      if (a.spread) unpacked = true;
+      if (a.spread) { if (named) fail('Cannot use argument unpacking after named arguments', call); unpacked = true; }
       else if (a.name) named = true;
       else if (unpacked) fail('Cannot use positional argument after argument unpacking', call);
       else if (named) fail('Cannot use positional argument after named argument', call);
@@ -250,6 +308,8 @@ export function checkProgram(ast, file) {
   function checkClass(n) {
     const name = n.anon ? 'class@anonymous' : n.name, kind = n.kind;
     if (kind !== 'class' && kind !== 'enum' && hasAttrName(n.attrs, 'allowdynamicproperties')) fail(`Cannot apply #[AllowDynamicProperties] to ${kind}`, n);
+    if (n.flags.readonly && hasAttrName(n.attrs, 'allowdynamicproperties')) fail(`Cannot apply #[AllowDynamicProperties] to readonly class ${name}`, n);
+    if (kind === 'interface' && n.traits.length) fail(`Cannot use traits inside of interfaces. ${n.traits[0].names[0]} is used in ${name}`, n.traits[0].l ? n.traits[0] : n);
     if (kind === 'enum' && n.enumType) {
       const bt = n.enumType.raw && n.enumType.raw.length === 1 ? String(n.enumType.raw[0]).toLowerCase() : 'mixed';
       if (bt !== 'int' && bt !== 'string') fail(`Enum backing type must be int or string, ${typeStr(n.enumType, null, true)} given`, n);
@@ -257,9 +317,11 @@ export function checkProgram(ast, file) {
     const consts = new Set();
     for (const c of [...n.consts, ...n.cases].sort((a, b) => a.seq - b.seq)) {
       if (consts.has(c.name)) fail(`Cannot redefine class constant ${name}::${c.name}`, c);
+      if (c.name.toLowerCase() === 'class') fail("A class constant must not be called 'class'; it is reserved for class name fetching", c);
       consts.add(c.name);
       if (kind === 'interface' && c.vis && c.vis !== 'public') fail(`Access type for interface constant ${name}::${c.name} must be public`, c);
     }
+    if (kind !== 'enum' && n.cases.length) fail('Case can only be used in enums', n.cases[0]);
     for (const c of n.cases) {
       if (!n.enumType && c.e) fail(`Case ${c.name} of non-backed enum ${name} must not have a value`, c);
       if (n.enumType && !c.e) fail(`Case ${c.name} of backed enum ${name} must have a value`, c);
@@ -287,9 +349,11 @@ export function checkProgram(ast, file) {
         if (m.vis !== 'public') fail(`Access type for interface method ${name}::${fn.name}() must be public`, m);
         if (m.final) fail(`Interface method ${name}::${fn.name}() must not be final`, m);
         if (fn.body) fail(`Interface function ${name}::${fn.name}() cannot contain body`, m);
-      } else if (m.abstract && fn.body) fail(`Abstract function ${name}::${fn.name}() cannot contain body`, m);
+      } else if (m.abstract && m.vis === 'private' && kind !== 'trait') fail(`Abstract function ${name}::${fn.name}() cannot be declared private`, m);
+      else if (m.abstract && fn.body) fail(`Abstract function ${name}::${fn.name}() cannot contain body`, m);
       else if (!m.abstract && !fn.body) fail(`Non-abstract method ${name}::${fn.name}() must contain body`, m);
-      if (kind === 'enum' && ENUM_MAGIC.has(ln)) fail(`Enum ${name} cannot include magic method ${fn.name}`, m);
+      if (kind === 'enum' && ENUM_MAGIC.has(ln)) fail(`Enum ${name} cannot include magic method ${fn.name}`, n);
+      if (kind === 'enum' && (ln === 'cases' || (n.enumType && (ln === 'from' || ln === 'tryfrom')))) fail(`Cannot redeclare ${name}::${fn.name}()`, n);
       if (ln.startsWith('__') && MAGIC_SIGS[ln]) checkMagicMethod(name, m, MAGIC_SIGS[ln]);
       for (const p of fn.params) {
         if (!p.promote) continue;
@@ -365,11 +429,14 @@ export function checkProgram(ast, file) {
   }
   // the attribute classes of the engine are validated at compile time; user ones only by
   // ReflectionAttribute::newInstance()
-  function checkAttrs(attrs, target) {
+  // errors are reported at the line of the declaration (owner) the attributes belong to
+  function checkAttrs(attrs, target, owner) {
     if (!attrs) return;
+    const fail = (msg) => { throw new FatalSig(msg, (owner || attrs[0]).l); };
     const seen = new Set();
     for (const a of attrs) {
-      for (const arg of a.args || []) {
+      if (a.args === 'fcc') fail('Cannot create Closure as attribute argument', a);
+      for (const arg of Array.isArray(a.args) ? a.args : []) {
         if (arg && arg.spread) fail('Cannot use unpacking in attribute argument list', a);
         checkConstExpr(arg && arg.e !== undefined ? arg.e : arg, true);
       }
@@ -469,9 +536,9 @@ export function checkProgram(ast, file) {
       const implicitNullable = p.type && !p.type.nullable && p.def.k === 'Lit' && p.def.v === null;
       if (!implicitNullable) compileDeprecated(`Optional parameter $${p.name} declared before required parameter $${fn.params[lastRequired].name} is implicitly treated as a required parameter`, p.def.l ? p.def : fn);
     });
-    if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION);
+    if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION, fn);
     for (const p of fn.params) {
-      checkAttrs(p.attrs, T_PARAMETER);
+      checkAttrs(p.attrs, T_PARAMETER, fn);
       checkConstExpr(p.def, true);
       if (p.type && p.def) {
         const lit = literalValue(p.def);

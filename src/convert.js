@@ -8,6 +8,8 @@ import { throwError, warn } from './runtime/errors.js';
 import { findMethod } from './runtime/callables.js';
 import { callMethod, displayName } from './runtime/classes.js';
 
+// zend_zval_value_name: like typeOf, but true and false are named as values
+export function valueName(v) { return v === true ? 'true' : v === false ? 'false' : typeOf(v); }
 export function typeOf(v) { // get_debug_type
   if (v === null || v === undefined) return 'null';
   switch (typeof v) {

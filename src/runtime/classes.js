@@ -1,13 +1,13 @@
 // Classes and objects: declaration, inheritance, traits, enums, property and method access.
 
 import { cp, FatalSig, isInt, NOREF, normKey, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { toBool, toStr, typeOf } from '../convert.js';
+import { toBool, toStr, typeOf, valueName } from '../convert.js';
 import { isNum, looseEq, strictEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from './state.js';
 import { deprecated, initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
-import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr, valueName } from './functions.js';
+import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr } from './functions.js';
 import { callValue } from './callables.js';
 import { dropRef, gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
@@ -111,7 +111,7 @@ export function declareClass(decl, f) {
   const cls = new PHPClass(decl.anon ? `${decl.parent || decl.interfaces[0] || 'class'}@anonymous\0${decl.file}:${decl.l}$${(anonSerial++).toString(16)}` : decl.name);
   if (decl.anon) { cls.anon = true; cls.ancestors = new Set([cls.lname]); }
   cls.decl = decl; cls.kind = decl.kind;
-  cls.abstract = decl.flags.abstract; cls.final = decl.flags.final; cls.readonly = decl.flags.readonly;
+  cls.abstract = decl.flags.abstract; cls.final = decl.flags.final || decl.kind === 'enum'; cls.readonly = decl.flags.readonly;
   cls.isInterface = decl.kind === 'interface'; cls.isTrait = decl.kind === 'trait'; cls.isEnum = decl.kind === 'enum';
   const savedLine = rt.line, savedFile = rt.file;
   rt.line = decl.l; rt.file = decl.file;
@@ -124,16 +124,16 @@ export function declareClass(decl, f) {
       if (p.final) throw new FatalSig(`Class ${cls.name} cannot extend final class ${p.name}`, decl.l, decl.file);
       inheritFrom(cls, p);
     }
-    // interfaces
-    for (const iname of decl.interfaces) {
-      const ic = lookupClass(iname, false, 'Interface');
+    // interfaces (an enum implements UnitEnum, and BackedEnum if backed, after the ones it lists)
+    const ifaces = decl.interfaces.map((iname) => lookupClass(iname, false, 'Interface'));
+    if (cls.isEnum) { ifaces.push(rt.classes.get('unitenum')); if (decl.enumType) ifaces.push(rt.classes.get('backedenum')); }
+    const what = cls.isEnum ? 'Enum' : cls.isInterface ? 'Interface' : 'Class';
+    ifaces.forEach((ic, i) => {
       if (!ic.isInterface) throw new FatalSig(`${cls.name} cannot implement ${ic.name} - it is not an interface`, decl.l, decl.file);
+      if (ifaces.indexOf(ic) < i) throw new FatalSig(`${what} ${cls.name} cannot implement previously implemented interface ${ic.name}`, decl.l, decl.file);
       addInterface(cls, ic);
-    }
-    if (cls.isEnum) {
-      addInterface(cls, rt.classes.get('unitenum'));
-      if (decl.enumType) addInterface(cls, rt.classes.get('backedenum'));
-    }
+    });
+    if (!cls.isInterface) checkSpecialInterfaces(cls, decl, what);
     // constants
     for (const c of decl.consts) {
       const ex = cls.consts.get(c.name);
@@ -199,6 +199,22 @@ export function declareClass(decl, f) {
   return cls;
 }
 
+// interfaces only some classes may implement (their interface_gets_implemented handlers)
+function checkSpecialInterfaces(cls, decl, what) {
+  const at = (msg, l = decl.l, file = decl.file) => new FatalSig(msg, l, file);
+  const anc = cls.ancestors;
+  if (anc.has('throwable')) {
+    let root = cls;
+    while (root.parent) root = root.parent;
+    if (root.lname !== 'exception' && root.lname !== 'error') throw at(cls.isEnum ? `${what} ${cls.name} cannot implement interface Throwable` : `${what} ${cls.name} cannot implement interface Throwable, extend Exception or Error instead`);
+  }
+  if (!cls.isEnum && anc.has('unitenum')) throw at(`Non-enum class ${cls.name} cannot implement interface ${anc.has('backedenum') && !decl.interfaces.some((n) => /^\\?unitenum$/i.test(n)) ? 'BackedEnum' : 'UnitEnum'}`);
+  if (cls.isEnum && !decl.enumType && anc.has('backedenum')) throw at(`Non-backed enum ${cls.name} cannot implement interface BackedEnum`);
+  if (anc.has('iterator') && anc.has('iteratoraggregate')) throw at(`${what} ${cls.name} cannot implement both Iterator and IteratorAggregate at the same time`);
+  if (anc.has('traversable') && !anc.has('iterator') && !anc.has('iteratoraggregate') && decl.file !== PRELUDE_FILE) {
+    throw at(`${what} ${cls.name} must implement interface Traversable as part of either Iterator or IteratorAggregate`, 0, 'Unknown');
+  }
+}
 export function inheritFrom(cls, p) {
   cls.parent = p;
   for (const a of p.ancestors) cls.ancestors.add(a);

@@ -80,6 +80,7 @@ ext/date/tests/DateTime_sub-spring-type2-type2.phpt
 ext/date/tests/DateTime_sub-spring-type2-type3.phpt
 ext/date/tests/DateTime_sub-spring-type3-type2.phpt
 ext/date/tests/DateTime_sub-spring-type3-type3.phpt
+ext/date/tests/ExtendDateTime.phpt
 ext/date/tests/bug14561.phpt
 ext/date/tests/bug20382-1.phpt
 ext/date/tests/bug21399.phpt

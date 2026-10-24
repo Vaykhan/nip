@@ -136,9 +136,9 @@ export function lex(src, file) {
     if ((c >= 48 && c <= 57) || (ch === '.' && i + 1 < n && src.charCodeAt(i + 1) >= 48 && src.charCodeAt(i + 1) <= 57)) {
       let m;
       const stick = (re) => { re.lastIndex = i; return re.exec(src); };
-      if ((m = stick(/0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 16); continue; }
-      if ((m = stick(/0[bB][01]+(?:_[01]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 2); continue; }
-      if ((m = stick(/0[oO][0-7]+(?:_[0-7]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 8); continue; }
+      if ((m = stick(/0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 16, m[0]); continue; }
+      if ((m = stick(/0[bB][01]+(?:_[01]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 2, m[0]); continue; }
+      if ((m = stick(/0[oO][0-7]+(?:_[0-7]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 8, m[0]); continue; }
       m = stick(/(\d+(?:_\d+)*)?(\.\d+(?:_\d+)*|\.)?([eE][+-]?\d+(?:_\d+)*)?/y);
       let txt = m[0];
       if (txt.endsWith('.') && src[i + txt.length] === '.') txt = txt.slice(0, -1); // 1..2
@@ -147,9 +147,9 @@ export function lex(src, file) {
       if (m[2] === undefined && m[3] === undefined || (txt === m[1])) {
         if (clean.length > 1 && clean[0] === '0') {
           if (!/^[0-7]+$/.test(clean)) err('Invalid numeric literal');
-          pushInt(clean.slice(1), 8);
-        } else pushInt(clean, 10);
-      } else push('float', Number(clean));
+          pushInt(clean.slice(1), 8, txt);
+        } else pushInt(clean, 10, txt);
+      } else push('float', Number(clean), { raw: txt });
       continue;
     }
     // strings
@@ -160,7 +160,7 @@ export function lex(src, file) {
         s += src[j]; j++;
       }
       if (j >= n) err('syntax error, unexpected end of file');
-      push('str', s); line += countNl(s); i = j + 1; continue;
+      push('str', s, { sq: true }); line += countNl(s); i = j + 1; continue;
     }
     if (ch === '"' || ch === '`') {
       let j = i + 1;
@@ -206,12 +206,13 @@ export function lex(src, file) {
             throw new ParseErr('Invalid body indentation level (expecting an indentation level of at least ' + indent.length + ')', startLine);
           }).join('\n');
         }
-        if (nowdoc) push('str', body, { l: startLine });
+        const heredoc = '<<<' + (m[1] ? m[1] : '') + id; // as PHP shows it in syntax errors
+        if (nowdoc) push('str', body, { l: startLine, heredoc });
         else {
           const parts = interp(body, 'h', startLine + 1);
-          if (parts.length === 0) push('str', '', { l: startLine });
-          else if (parts.length === 1 && typeof parts[0] === 'string') push('str', parts[0], { l: startLine });
-          else push('tpl', parts, { l: startLine });
+          if (parts.length === 0) push('str', '', { l: startLine, heredoc });
+          else if (parts.length === 1 && typeof parts[0] === 'string') push('str', parts[0], { l: startLine, heredoc });
+          else push('tpl', parts, { l: startLine, heredoc });
         }
         continue;
       }
@@ -235,13 +236,13 @@ export function lex(src, file) {
   }
   return end();
 
-  function pushInt(digits, base) {
+  function pushInt(digits, base, raw) { // raw: the source text, for syntax errors
     if (digits === '') digits = '0';
     let b;
     if (base === 10) b = BigInt(digits);
     else b = BigInt((base === 16 ? '0x' : base === 8 ? '0o' : '0b') + digits);
-    if (b > I64MAX) push('float', Number(b));
-    else push('int', normBig(b));
+    if (b > I64MAX) push('float', Number(b), { raw });
+    else push('int', normBig(b), { raw });
   }
 
   // process escapes and interpolation; returns array of string | {code, line}

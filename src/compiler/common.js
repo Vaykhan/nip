@@ -2,7 +2,7 @@
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
 import { Flt, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
-import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
+import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callMethodName } from '../runtime/classes.js';
@@ -124,7 +124,7 @@ export function readIndex(base, key, quiet) {
     throwError('Error', `Cannot use object of type ${base.cls.name} as array`);
   }
   if (base === null || base === undefined) { if (!quiet) warn('Trying to access array offset on null'); return quiet ? undefined : null; }
-  if (!quiet) warn(`Trying to access array offset on ${typeOf(base)}`);
+  if (!quiet) warn(`Trying to access array offset on ${valueName(base)}`);
   return quiet ? undefined : null;
 }
 

@@ -2,7 +2,7 @@
 
 import {
   cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, objHandles, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
+import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { Frame, hasSuspend, RETURN } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { cStmts } from '../compiler/stmt.js';
@@ -273,7 +273,6 @@ export function coerceType(type, v, strict, ctx) {
   if (v instanceof PHPObject && hasStr && findMethod(v.cls, '__tostring')) return toStr(v);
   return FAIL;
 }
-export function valueName(v) { return v === true ? 'true' : v === false ? 'false' : typeOf(v); }
 // internal functions (and the prelude functions standing in for them) accept null for scalar
 // parameters in coercive mode, with a deprecation (PHP 8.1)
 const NULL_TO_SCALAR = { string: '', int: 0, float: null, bool: false };

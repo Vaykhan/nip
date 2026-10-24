@@ -1,7 +1,7 @@
 // Compilation of assignable expressions (variables, $a[...], properties, static props, list()).
 
 import { cp, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
-import { toBool, toStr, typeOf } from '../convert.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import {
   isLvalNode, keyRepr, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
   writableArrIn
@@ -63,6 +63,7 @@ function lvVar(name, node) {
     name,
     get(f) { const r = f.vars[name]; if (r === undefined) { warnUndefVar(name); return null; } return r.v; },
     getq(f) { const r = f.vars[name]; return r === undefined ? undefined : r.v; },
+    fetchW(f) { return (f.vars[name] || (f.vars[name] = new Ref(null))).v; },
     set(f, v) { const r = f.vars[name]; if (r !== undefined) { const old = r.v; r.v = v; if (old !== v && old !== null && typeof old === 'object') { dropRef(old); if (old instanceof PHPObject && old.cls.hasDestructor) gcCheck(old); } } else f.vars[name] = new Ref(v); },
     bind(f, ref) { const old = f.vars[name]; f.vars[name] = ref; if (old !== undefined && old !== ref && old.v !== null && typeof old.v === 'object') dropRef(old.v); },
     ref(f) { return f.vars[name] || (f.vars[name] = new Ref(null)); },
@@ -90,6 +91,7 @@ function lvVarVar(n) {
     place: (f) => lvVarDyn(nm(f)),
     get: (f) => sub(f).get(f), getq: (f) => sub(f).getq(f), set: (f, v) => sub(f).set(f, v), bind: (f, r) => sub(f).bind(f, r),
     ref: (f) => sub(f).ref(f), arr: (f) => sub(f).arr(f), unset: (f) => sub(f).unset(f), modify: (f, fn, q) => sub(f).modify(f, fn, q),
+    fetchW: (f) => { const l = sub(f); return l.fetchW ? l.fetchW(f) : l.get(f); },
   };
 }
 export const lvVarCache = new Map();
@@ -151,6 +153,17 @@ function indexOps(P, I) {
       if (base === undefined || base === null) return undefined;
       if (!I) noIdx();
       return readIndex(base, I(f), true);
+    },
+    // the element as a container being written to ($a[k]->p = v): a missing one is created as null
+    fetchW(f) {
+      const base = P.getq(f);
+      if (!(base instanceof PHPArray) && base !== undefined && base !== null) return lv.get(f);
+      const c = P.arr(f);
+      if (!(c instanceof PHPArray)) return lv.get(f);
+      if (!I) { c.push(null); return null; }
+      const k = normKey(I(f));
+      if (!c.has(k)) { c.set(k, null); return null; }
+      return c.get(k);
     },
     peek(f) {
       const b = P.peek ? P.peek(f) : P.getq(f);
@@ -293,18 +306,19 @@ function lvProp(n) {
 }
 function propOps(O, N, sname, nullsafe) {
   const nm = N ? (f) => toStr(N(f)) : () => sname;
+  const fetchO = (f) => (O.fetchW ? O.fetchW(f) : O.get(f));
   const objW = (f, name) => {
-    const o = O.get(f);
+    const o = fetchO(f);
     if (o instanceof PHPObject) return o;
     if (o === null || o === undefined) throwError('Error', `Attempt to assign property "${name}" on null`);
-    throwError('Error', `Attempt to assign property "${name}" on ${typeOf(o)}`);
+    throwError('Error', `Attempt to assign property "${name}" on ${valueName(o)}`);
   };
   return {
     get(f) {
       const o = O.get(f);
       if (o instanceof PHPObject) return readProp(o, nm(f), f);
       if ((o === null || o === undefined)) { if (nullsafe) return null; warn(`Attempt to read property "${nm(f)}" on null`); return null; }
-      warn(`Attempt to read property "${nm(f)}" on ${typeOf(o)}`); return null;
+      warn(`Attempt to read property "${nm(f)}" on ${valueName(o)}`); return null;
     },
     getq(f) {
       const o = O.getq(f);
@@ -319,12 +333,21 @@ function propOps(O, N, sname, nullsafe) {
     set(f, v) { const name = nm(f); writeProp(objW(f, name), name, v, f); },
     bind(f, ref) { const name = nm(f); const o = objW(f, name); bindProp(o, name, ref, f); },
     ref(f) { const name = nm(f); return propRef(objW(f, name), name, f); },
+    fetchW(f) {
+      const name = nm(f);
+      const o = fetchO(f);
+      if (!(o instanceof PHPObject)) throwError('Error', `Attempt to modify property "${name}" on ${valueName(o)}`);
+      const v = readPropQuiet(o, name, f);
+      if (v !== undefined) return v;
+      if (!o.cls.methods.has('__get') && !o.cls.props.has(name)) writeProp(o, name, null, f); // a dynamic property is created
+      return null;
+    },
     arr(f) {
       const name = nm(f);
-      const o = O.get(f);
+      const o = fetchO(f);
       if (!(o instanceof PHPObject)) {
         if (o === null || o === undefined) throwError('Error', `Attempt to modify property "${name}" on null`);
-        throwError('Error', `Attempt to modify property "${name}" on ${typeOf(o)}`);
+        throwError('Error', `Attempt to modify property "${name}" on ${valueName(o)}`);
       }
       return propArr(o, name, f);
     },

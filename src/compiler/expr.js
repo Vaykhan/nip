@@ -5,7 +5,7 @@ import {
   cp, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, normKey, PHPArray, PHPObject, Ref,
   ThrowSig
 } from '../values.js';
-import { toBool, toDbl, toInt, toStr, typeOf } from '../convert.js';
+import { toBool, toDbl, toInt, toStr, valueName } from '../convert.js';
 import { cmp, isNum, looseEq, strictEq } from '../compare.js';
 import {
   add, bitAnd, bitNot, bitOr, bitXor, concat, dec, div, inc, mod, mul, pow, shl, shr, sub
@@ -154,7 +154,7 @@ const EXPR = {
     }
     if (typeof n.cls !== 'string') {
       const E = cExpr(n.cls);
-      return (f) => { const v = E(f); if (v instanceof PHPObject) return v.cls.name; throwError('TypeError', `Cannot use "::class" on ${typeOf(v)}`); };
+      return (f) => { const v = E(f); if (v instanceof PHPObject) return v.cls.name; throwError('TypeError', `Cannot use "::class" on ${valueName(v)}`); };
     }
     const C = cClassRef(n.cls);
     return (f) => C(f).name;
@@ -454,7 +454,7 @@ const EXPR = {
       return (f) => {
         const o = O(f);
         const name = sname || toStr(N(f));
-        if (!(o instanceof PHPObject)) throwError('Error', `Call to a member function ${name}() on ${typeOf(o)}`);
+        if (!(o instanceof PHPObject)) throwError('Error', `Call to a member function ${name}() on ${valueName(o)}`);
         return methodClosure(o, name, f);
       };
     }
@@ -466,7 +466,7 @@ const EXPR = {
         if (nullsafe && (o === null || o === undefined)) return null;
         let name = sname;
         if (!name) { const nv = N(f); name = typeof nv === 'string' ? nv : '{closure}'; }
-        throwError('Error', `Call to a member function ${name}() on ${typeOf(o)}`);
+        throwError('Error', `Call to a member function ${name}() on ${valueName(o)}`);
       }
       let name = sname, ln = lname;
       if (!name) {

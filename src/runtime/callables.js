@@ -1,10 +1,10 @@
 // Callables (strings, arrays, closures) and Closure objects.
 
 import { PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { toStr } from '../convert.js';
+import { toStr, valueName } from '../convert.js';
 import { rt } from './state.js';
 import { deprecated, throwError } from './errors.js';
-import { callFunction, valueName } from './functions.js';
+import { callFunction } from './functions.js';
 import { canAccessMember, classExists, lookupClass } from './classes.js';
 import { argPos, deref } from '../lib/core.js';
 import { closureClass } from './native-classes.js';

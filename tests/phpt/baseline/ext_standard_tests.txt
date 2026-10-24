@@ -147,6 +147,7 @@ ext/standard/tests/array/array_intersect_variation6.phpt
 ext/standard/tests/array/array_intersect_variation7.phpt
 ext/standard/tests/array/array_intersect_variation8.phpt
 ext/standard/tests/array/array_key_exists_basic.phpt
+ext/standard/tests/array/array_key_exists_variation1.phpt
 ext/standard/tests/array/array_key_exists_variation3.phpt
 ext/standard/tests/array/array_key_exists_variation4.phpt
 ext/standard/tests/array/array_key_exists_variation5.phpt
@@ -223,6 +224,7 @@ ext/standard/tests/array/array_push_variation2.phpt
 ext/standard/tests/array/array_push_variation3.phpt
 ext/standard/tests/array/array_push_variation5.phpt
 ext/standard/tests/array/array_push_variation6.phpt
+ext/standard/tests/array/array_rand_variation5.phpt
 ext/standard/tests/array/array_reduce.phpt
 ext/standard/tests/array/array_reduce_return_by_ref.phpt
 ext/standard/tests/array/array_reduce_variation1.phpt
@@ -1619,6 +1621,7 @@ ext/standard/tests/strings/str_replace_array_refs.phpt
 ext/standard/tests/strings/str_replace_array_refs2.phpt
 ext/standard/tests/strings/str_replace_variation2.phpt
 ext/standard/tests/strings/str_rot13_basic.phpt
+ext/standard/tests/strings/str_shuffle.phpt
 ext/standard/tests/strings/str_split_variation6.phpt
 ext/standard/tests/strings/str_split_variation7.phpt
 ext/standard/tests/strings/str_starts_with.phpt

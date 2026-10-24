@@ -26,6 +26,7 @@ const UNTICKED = new Set(['Block', 'Label', 'FuncDecl', 'ClassDecl', 'If', 'Swit
 const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare']);
 
 export const LVAL_KINDS = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'List']);
+const CALL_TARGETS = new Set(['Call', 'MCall', 'NullsafeMCall', 'SCall']);
 
 export class Parser {
   constructor(toks, file, shared) {
@@ -56,18 +57,30 @@ export class Parser {
     }
     return attrs;
   }
+  // "syntax error, unexpected <token>" with the token described as PHP's grammar names it
   unexpected(tk) {
     tk = tk || this.tok;
     let d;
     switch (tk.t) {
       case 'eof': d = 'end of file'; break;
       case 'var': d = `variable "$${tk.v}"`; break;
-      case 'id': d = `identifier "${tk.v}"`; break;
-      case 'str': d = `double-quoted string "${tk.v}"`; break;
-      case 'int': case 'float': d = `integer "${tk.v}"`; break;
+      case 'id': {
+        const v = tk.v;
+        if (v[0] === '\\') d = `fully qualified name "${v}"`;
+        else if (/^namespace\\/i.test(v)) d = `namespace-relative name "${v}"`;
+        else if (v.includes('\\')) d = `namespaced name "${v}"`;
+        else d = PHP_KEYWORDS.has(v.toLowerCase()) ? `token "${v}"` : `identifier "${v}"`;
+        break;
+      }
+      case 'str': d = tk.heredoc ? `heredoc start "${tk.heredoc}"` : `${tk.sq ? 'single' : 'double'}-quoted string "${tk.v}"`; break;
+      case 'tpl': d = tk.heredoc ? `heredoc start "${tk.heredoc}"` : 'double-quote mark'; break;
+      case 'shell': d = 'token "`"'; break;
+      case 'cast': d = `token "(${tk.v})"`; break;
+      case 'int': d = `integer "${tk.raw ?? tk.v}"`; break;
+      case 'float': d = `floating-point number "${tk.raw ?? tk.v}"`; break;
       default: d = `token "${tk.v}"`;
     }
-    this.error(`syntax error, unexpected ${d}`, tk);
+    this.error(`syntax error, unexpected ${d}`, tk.heredoc ? { l: tk.l + 1 } : tk);
   }
   isOp(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'op' && t.v === v; }
   isId(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'id' && t.v.toLowerCase() === v; }
@@ -104,6 +117,13 @@ export class Parser {
     if (this.st.useConsts.has(name)) return [this.st.useConsts.get(name), null];
     if (this.st.ns) return [this.st.ns + '\\' + name, name];
     return [name, null];
+  }
+  // a class named by extends/implements/use: self, parent and static can't be (zend_resolve_const_class_name_reference)
+  classRefName(kind, name) {
+    const tk = this.tok;
+    if (name === undefined) name = this.ident();
+    if (/^(self|parent|static)$/i.test(name)) this.fatal(`Cannot use '${name}' as ${kind} name, as it is reserved`, tk);
+    return this.resolveClass(name);
   }
   nsName(name) { return this.st.ns ? this.st.ns + '\\' + name : name; }
 
@@ -269,6 +289,7 @@ export class Parser {
             const byRef = this.accept('&');
             const doc = this.takeDoc(this.tok);
             const name = this.ident();
+            this.declareSymbol('function', name);
             const fn = this.parseFunctionRest(this.nsName(name), byRef, l);
             fn.doc = doc;
             return { k: 'FuncDecl', fn, l, top: !!top };
@@ -325,12 +346,16 @@ export class Parser {
           this.p++;
           let name = '';
           if (this.tok.t === 'id') name = this.next().v;
-          this.st.ns = name; this.st.uses = new Map(); this.st.useFns = new Map(); this.st.useConsts = new Map();
           const mode = this.isOp('{') ? 'braced' : 'simple';
           if (this.st.nsMode && this.st.nsMode !== mode) this.fatal('Cannot mix bracketed namespace declarations with unbracketed namespace declarations');
+          if (this.st.inNsBlock) this.fatal('Namespace declarations cannot be nested');
+          if (name.toLowerCase() === 'namespace') this.fatal(`Cannot use '${name}' as namespace name`);
+          this.st.ns = name; this.st.uses = new Map(); this.st.useFns = new Map(); this.st.useConsts = new Map();
           this.st.nsMode = mode;
           if (this.isOp('{')) {
-            const b = this.parseBlock();
+            this.st.inNsBlock = true;
+            let b;
+            try { b = this.parseBlock(); } finally { this.st.inNsBlock = false; }
             b.top = true;
             return b;
           }
@@ -361,6 +386,7 @@ export class Parser {
             } else {
               let alias = name.split('\\').pop();
               if (this.acceptId('as')) alias = this.ident();
+              else if (!name.includes('\\') && !this.st.ns) this.compileWarning(`The use statement with non-compound name '${name}' has no effect`);
               this.addUse(kind, name, alias);
             }
           } while (this.accept(','));
@@ -370,7 +396,7 @@ export class Parser {
         case 'const': {
           this.p++;
           const items = [];
-          do { const name = this.ident(); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
+          do { const name = this.ident(); this.declareSymbol('const', name); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
           this.semi();
           return { k: 'ConstDecl', items, l };
         }
@@ -412,11 +438,31 @@ export class Parser {
     this.semi();
     return { k: 'ExprStmt', e, l };
   }
+  // imports (zend_compile_use): an alias can't name a symbol declared earlier in the file or be
+  // imported twice; declarations can't reuse an imported name (declareSymbol)
+  importsOf(kind) { return kind === 'function' ? this.st.useFns : kind === 'const' ? this.st.useConsts : this.st.uses; }
+  seenSymbols(kind) {
+    const seen = this.st.seen || (this.st.seen = { class: new Set(), function: new Set(), const: new Set() });
+    return seen[kind];
+  }
   addUse(kind, name, alias) {
     if (kind === 'class' && RESERVED_CLASS_NAMES.has(alias.toLowerCase())) this.fatal(`Cannot use ${name} as ${alias} because '${alias}' is a special class name`);
-    if (kind === 'function') this.st.useFns.set(alias.toLowerCase(), name);
-    else if (kind === 'const') this.st.useConsts.set(alias, name);
-    else this.st.uses.set(alias.toLowerCase(), name);
+    const key = kind === 'const' ? alias : alias.toLowerCase();
+    const what = kind === 'class' ? '' : ' ' + kind;
+    const local = this.st.ns ? this.st.ns.toLowerCase() + '\\' + key : key;
+    if (this.seenSymbols(kind).has(local) && name.toLowerCase() !== local.toLowerCase()) this.fatal(`Cannot use${what} ${name} as ${alias} because the name is already in use`);
+    const imports = this.importsOf(kind);
+    if (imports.has(key)) this.fatal(`Cannot use${what} ${name} as ${alias} because the name is already in use`);
+    imports.set(key, name);
+  }
+  // a warning PHP raises while compiling (checkProgram() reports them)
+  compileWarning(msg) { (this.st.compileWarnings || (this.st.compileWarnings = [])).push({ msg, l: this.tok.l }); }
+  declareSymbol(kind, short) {
+    if (kind === 'const' && /^(true|false|null)$/i.test(short)) this.fatal(`Cannot redeclare constant '${short}'`);
+    const full = this.nsName(short);
+    const imported = this.importsOf(kind).get(kind === 'const' ? short : short.toLowerCase());
+    if (imported !== undefined && (kind === 'const' ? imported !== full : imported.toLowerCase() !== full.toLowerCase())) this.fatal(`Cannot declare ${kind} ${full} because the name is already in use`);
+    this.seenSymbols(kind).add(kind === 'const' ? (this.st.ns ? this.st.ns.toLowerCase() + '\\' + short : short) : full.toLowerCase());
   }
 
   parseIf() {
@@ -454,14 +500,15 @@ export class Parser {
     const l = this.next().l;
     const body = this.parseBlock();
     const catches = []; let fin = null;
-    while (this.acceptId('catch')) {
+    while (this.isId('catch')) {
+      const cl = this.next().l;
       this.expect('(');
       const types = [this.resolveClass(this.ident())];
       while (this.accept('|')) types.push(this.resolveClass(this.ident()));
       let v = null;
       if (this.tok.t === 'var') v = this.next().v;
       this.expect(')');
-      catches.push({ types, v, body: this.parseBlock() });
+      catches.push({ types, v, body: this.parseBlock(), l: cl });
     }
     if (this.acceptId('finally')) fin = this.parseBlock();
     if (!catches.length && !fin) this.error('Cannot use try without catch or finally');
@@ -496,7 +543,14 @@ export class Parser {
     if (RESERVED_TYPES.has(ln)) return ln;
     const last = ln.slice(ln.lastIndexOf('\\') + 1);
     if (ln.includes('\\') && RESERVED_TYPES.has(last) && last !== 'self' && last !== 'parent' && last !== 'static') this.fatal(`Type declaration '${last}' must be unqualified`, tk);
-    return this.resolveClass(name);
+    const cls = this.resolveClass(name);
+    // a bare name that looks like a builtin type (zend_is_confusable_type)
+    if (ln in CONFUSABLE_TYPES && !this.st.uses.has(ln)) {
+      const correct = CONFUSABLE_TYPES[ln], extra = this.st.ns ? ' or import the class with "use"' : '';
+      this.compileWarning(correct ? `"${name}" will be interpreted as a class name. Did you mean "${correct}"? Write "\\${cls}"${extra} to suppress this warning`
+        : `"${name}" is not a supported builtin type and will be interpreted as a class name. Write "\\${cls}"${extra} to suppress this warning`);
+    }
+    return cls;
   }
   atTypeStart() {
     const t = this.tok;
@@ -513,6 +567,7 @@ export class Parser {
       for (;;) {
         if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (prm.promoteKw) this.fatal('Multiple access type modifiers are not allowed'); prm.promote = this.next().v.toLowerCase(); prm.promoteKw = true; continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
+        if (this.isId('static') || this.isId('abstract') || this.isId('final')) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a parameter`);
         break;
       }
       if (this.tok.t !== 'var' && !this.isOp('&') && !this.isOp('...')) prm.type = this.parseType();
@@ -554,9 +609,9 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------- classes
-  parseClass(anonArgs) {
+  parseClass(anonArgs, anonFlags) {
     const l = this.tok.l;
-    const flags = { abstract: false, final: false, readonly: false };
+    const flags = anonFlags || { abstract: false, final: false, readonly: false };
     while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) {
       const f = this.next().v.toLowerCase();
       if (flags[f]) this.fatal(`Multiple ${f} modifiers are not allowed`);
@@ -568,14 +623,14 @@ export class Parser {
     let name;
     const doc = this.takeDoc(this.tok);
     if (anonArgs !== undefined) name = 'class@anonymous';
-    else name = this.nsName(this.ident());
+    else { const short = this.ident(); this.declareSymbol('class', short); name = this.nsName(short); }
     const cd = { k: 'ClassDecl', kind, name, parent: null, interfaces: [], flags, consts: [], props: [], methods: [], traits: [], cases: [], enumType: null, l, file: this.file, anon: anonArgs !== undefined, doc, startLine, endLine: 0, attrs: null };
     if (kind === 'enum' && this.accept(':')) cd.enumType = this.parseType();
     if (this.acceptId('extends')) {
-      if (kind === 'interface') { do cd.interfaces.push(this.resolveClass(this.ident())); while (this.accept(',')); }
-      else cd.parent = this.resolveClass(this.ident());
+      if (kind === 'interface') { do cd.interfaces.push(this.classRefName('interface')); while (this.accept(',')); }
+      else cd.parent = this.classRefName('class');
     }
-    if (this.acceptId('implements')) { do cd.interfaces.push(this.resolveClass(this.ident())); while (this.accept(',')); }
+    if (this.acceptId('implements')) { do cd.interfaces.push(this.classRefName('interface')); while (this.accept(',')); }
     this.st.clsStack.push(cd);
     this.expect('{');
     while (!this.accept('}')) {
@@ -590,15 +645,15 @@ export class Parser {
     const attrs = this.parseAttributes();
     const l = this.tok.l;
     if (this.acceptId('use')) {
-      const names = [this.resolveClass(this.ident())];
-      while (this.accept(',')) names.push(this.resolveClass(this.ident()));
+      const names = [this.classRefName('trait')];
+      while (this.accept(',')) names.push(this.classRefName('trait'));
       const rules = [];
       if (this.accept('{')) {
         while (!this.accept('}')) {
           let tn = null, m = this.ident();
-          if (this.accept('::')) { tn = this.resolveClass(m); m = this.ident(); }
+          if (this.accept('::')) { tn = this.classRefName('trait', m); m = this.ident(); }
           if (this.acceptId('insteadof')) {
-            const ex = [this.resolveClass(this.ident())]; while (this.accept(',')) ex.push(this.resolveClass(this.ident()));
+            const ex = [this.classRefName('trait')]; while (this.accept(',')) ex.push(this.classRefName('trait'));
             rules.push({ kind: 'insteadof', trait: tn, method: m, excl: ex });
           } else {
             this.expectId('as');
@@ -613,7 +668,7 @@ export class Parser {
           this.semi();
         }
       } else this.semi();
-      cd.traits.push({ names, rules });
+      cd.traits.push({ names, rules, l });
       return;
     }
     if (this.acceptId('case')) {
@@ -681,7 +736,8 @@ export class Parser {
       else if (t.t === 'id') { op = t.v.toLowerCase(); if (!(op === 'or' || op === 'xor' || op === 'and' || op === 'instanceof')) break; }
       else break;
       if (ASSIGN_OPS.has(op)) {
-        if (!LVAL_KINDS.has(left.k) && left.k !== 'Arr') break;
+        // a call is parsed as a target too, for the compile error ("Can't use function return value in write context")
+        if (!LVAL_KINDS.has(left.k) && left.k !== 'Arr' && !CALL_TARGETS.has(left.k)) break;
         if (minBp > 5 && !(left.k === 'Var' || left.k === 'Index' || left.k === 'Prop' || left.k === 'SProp' || left.k === 'VarVar')) break;
         this.p++;
         const l = t.l;
@@ -802,6 +858,18 @@ export class Parser {
     const l = this.next().l;
     let cls;
     const attrs = this.parseAttributes();
+    // modifiers of an anonymous class: only readonly
+    let k = this.p;
+    while (this.toks[k].t === 'id' && /^(readonly|abstract|final)$/i.test(this.toks[k].v)) k++;
+    const anonFlags = { abstract: false, final: false, readonly: false };
+    if (k > this.p && this.toks[k].t === 'id' && this.toks[k].v.toLowerCase() === 'class') {
+      while (this.p < k) {
+        const tk = this.next(), m = tk.v.toLowerCase();
+        if (m !== 'readonly') this.fatal(`Cannot use the ${m} modifier on an anonymous class`, tk);
+        if (anonFlags.readonly) this.fatal('Multiple readonly modifiers are not allowed', tk);
+        anonFlags.readonly = true;
+      }
+    }
     if (attrs && !this.isId('class')) this.unexpected();
     if (this.isId('class')) {
       // anonymous class
@@ -810,7 +878,7 @@ export class Parser {
       if (this.isOp('(')) args = this.parseArgs();
       this.p--; // re-point at 'class' keyword for parseClass
       this.toks[this.p] = { t: 'id', v: 'class', l };
-      const cd = this.parseClass(args);
+      const cd = this.parseClass(args, anonFlags);
       cd.attrs = attrs;
       cd.name = 'class@anonymous' + (++this.st.anonCount);
       return { k: 'New', cls: cd, args, l };
@@ -1099,10 +1167,20 @@ export class Parser {
   }
 }
 
+// reserved words, which the lexer turns into tokens of their own
+const PHP_KEYWORDS = new Set(['abstract', 'and', 'array', 'as', 'break', 'callable', 'case', 'catch', 'class', 'clone', 'const', 'continue',
+  'declare', 'default', 'die', 'do', 'echo', 'else', 'elseif', 'empty', 'enddeclare', 'endfor', 'endforeach', 'endif', 'endswitch',
+  'endwhile', 'eval', 'exit', 'extends', 'final', 'finally', 'fn', 'for', 'foreach', 'function', 'global', 'goto', 'if', 'implements',
+  'include', 'include_once', 'instanceof', 'insteadof', 'interface', 'isset', 'list', 'match', 'namespace', 'new', 'or', 'print',
+  'private', 'protected', 'public', 'readonly', 'require', 'require_once', 'return', 'static', 'switch', 'throw', 'trait', 'try',
+  'unset', 'use', 'var', 'while', 'xor', 'yield', 'yield from', '__class__', '__dir__', '__file__', '__function__', '__line__',
+  '__method__', '__namespace__', '__trait__', '__halt_compiler']);
+const CONFUSABLE_TYPES = { boolean: 'bool', integer: 'int', double: 'float', resource: null };
 export function parsePHP(src, file) {
   const toks = lex(src, file);
   const p = new Parser(toks, file);
   const ast = p.parseProgram();
   ast.strict = !!p.st.strict; // declare(strict_types=1): applies to calls from the file's top-level code
+  ast.compileWarnings = p.st.compileWarnings || null;
   return ast;
 }
