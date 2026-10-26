@@ -459,12 +459,16 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
   };
   if (obj.cls === generatorClass) {
     const g = obj.gen;
+    if (g.started && g.done) throwError('Exception', 'Cannot traverse an already closed generator');
     g.ensure(true);
+    if (g.advanced) throwError('Exception', 'Cannot rewind a generator that was already run');
+    const line = rt.line; // the generator is resumed from the foreach line
     while (!g.done) {
       if (byRef) { const rr = g.curRef || new Ref(g.cur); V.bind(f, rr); } else assignV(g.cur);
       if (K) K.set(f, g.key);
       const h = handle(run());
       if (h === 1) return; if (h !== 0) return h;
+      rt.line = line;
       g.next();
     }
     return;

@@ -13,7 +13,7 @@ import { cLval } from './lvalue.js';
 import { cExpr, compileDeferred, matchRepr, PendingCall } from './expr.js';
 import { cStmt, GOTO, gotoTargets, iterateObject, tick } from './stmt.js';
 import { rt } from '../runtime/state.js';
-import { throwError, toThrowSig, warn } from '../runtime/errors.js';
+import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { callFunctionG } from '../runtime/functions.js';
 import { callMethodName } from '../runtime/classes.js';
 import { GenThrow } from '../runtime/generators.js';
@@ -57,12 +57,19 @@ function cExprG(n) {
       const K = n.key ? cExprG(n.key) : null;
       const V = n.v ? cExprG(n.v) : null;
       const Lv = n.v && isLvalNode(n.v) && !suspends(n.v) ? cLval(n.v) : null;
+      const isCall = !!n.v && ['Call', 'MCall', 'SCall', 'NullsafeMCall'].includes(n.v.k);
       return function* (f) {
         const k = K ? yield* K(f) : undefined;
         let v = null, ref = null;
         if (V) {
           if (Lv && f.fn && f.fn.byRef) { ref = Lv.ref(f); v = ref.v; }
-          else v = cp(yield* V(f));
+          else if (f.fn && f.fn.byRef) {
+            // a by-reference generator: a function's returned reference, else a notice
+            rt.lastRetRef = null;
+            v = yield* V(f);
+            const rr = isCall ? rt.lastRetRef : null;
+            if (rr instanceof Ref) { ref = rr; v = rr.v; } else { notice('Only variable references should be yielded by reference'); v = cp(v); }
+          } else v = cp(yield* V(f));
         }
         const sent = yield [k, v, false, ref];
         if (sent instanceof GenThrow) throw new ThrowSig(sent.obj);

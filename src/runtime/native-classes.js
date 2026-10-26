@@ -1,7 +1,7 @@
 // Classes implemented natively in JS: stdClass, Closure, Generator, WeakReference.
 
 import { cp, PHPArray, PHPObject, Ref } from '../values.js';
-import { typeOf } from '../convert.js';
+import { typeOf, valueName } from '../convert.js';
 import { rt } from './state.js';
 import { throwError, warn } from './errors.js';
 import { callFunction } from './functions.js';
@@ -55,10 +55,15 @@ export function bootNativeClasses() {
       valid: (self) => { self.gen.ensure(); return !self.gen.done; },
       rewind: (self) => { const g = self.gen; g.ensure(); if (g.advanced) throwError('Exception', 'Cannot rewind a generator that was already run'); return null; },
       send: (self, args) => self.gen.send(argv0(args, 0) === undefined ? null : argv0(args, 0)),
-      throw: (self, args) => self.gen.throwIn(argv0(args, 0)),
+      throw: (self, args) => {
+        const e = argv0(args, 0);
+        if (!(e instanceof PHPObject) || !e.cls.ancestors.has('throwable')) throwError('TypeError', `Generator::throw(): Argument #1 ($exception) must be of type Throwable, ${valueName(e)} given`);
+        return self.gen.throwIn(e);
+      },
       getReturn: (self) => {
         const g = self.gen;
-        if (!g.done) throwError('Exception', "Cannot get return value of a generator that hasn't returned");
+        g.ensure(); // an unstarted generator runs to its first yield (or its return)
+        if (!g.done || g.failed) throwError('Exception', "Cannot get return value of a generator that hasn't returned");
         return g.ret;
       },
     },

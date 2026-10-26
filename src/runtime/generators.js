@@ -47,7 +47,7 @@ class GenState {
     rt.stack.push(this.f);
     let r;
     try { r = this.it.next(val); }
-    catch (e) { this.done = true; this.cur = null; this.key = null; this.untrack(); throw e; }
+    catch (e) { this.done = true; this.failed = true; this.cur = null; this.key = null; this.untrack(); throw e; }
     finally { this.running = false; rt.stack.pop(); rt.frame = prevFrame; rt.file = prevFile; rt.line = prevLine; }
     if (r.done) { this.done = true; this.ret = r.value === undefined ? null : r.value; this.cur = null; this.key = null; this.curRef = null; this.untrack(); }
     else {
@@ -73,7 +73,7 @@ class GenState {
     // (FiberExit unwinds the body running finally blocks, as when a fiber is closed)
     try {
       const r = this.it.throw(new FiberExit());
-      if (!r.done) this.it.return(undefined);
+      if (!r.done) { this.it.return(undefined); throwError('Error', 'Cannot yield from finally in a force-closed generator'); }
     } catch (e) { if (!(e instanceof FiberExit)) throw e; }
     finally { this.running = false; this.done = true; this.cur = null; this.key = null; rt.stack.pop(); rt.frame = prevFrame; rt.file = prevFile; rt.line = prevLine; }
   }

@@ -48,7 +48,7 @@ export let compilingByRef = false;
 export function compileBody(fn) {
   const d = fn.decl;
   const saved = compilingByRef;
-  compilingByRef = !!d.byRef;
+  compilingByRef = !!d.byRef && !d.isGen; // (in a generator, & means yielding by reference)
   try {
     if (d.isGen) { if (!d._gbody) d._gbody = cStmtsG(d.body || []); fn.genBody = d._gbody; return null; }
     if (!d._body) d._body = cStmts(d.body || []);
