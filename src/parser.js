@@ -824,7 +824,10 @@ export class Parser {
         case '&': this.error('syntax error, unexpected token "&"');
       }
     }
-    if (t.t === 'cast') { this.p++; return { k: 'Cast', t: t.v, e: this.parseExpr(20), l }; }
+    if (t.t === 'cast') {
+      if (t.v === 'unset') this.fatal('The (unset) cast is no longer supported');
+      this.p++; return { k: 'Cast', t: t.v, e: this.parseExpr(20), l };
+    }
     if (t.t === 'id') {
       const kw = t.v.toLowerCase();
       switch (kw) {

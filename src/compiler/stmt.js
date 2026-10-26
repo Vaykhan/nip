@@ -1,6 +1,6 @@
 // Compilation of statements (control flow, declarations, foreach, try/catch, ...).
 
-import { cp, FatalSig, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, FatalSig, NOREF, normKey, objHandles, PHPArray, PHPObject, Ref } from '../values.js';
 import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
@@ -10,7 +10,7 @@ import { rt } from '../runtime/state.js';
 import { checkTimeLimit, notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { compilingByRef, declareFunction } from '../runtime/functions.js';
 import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
-import { dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
+import { caughtTemps, dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
 import { callValue } from '../runtime/callables.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
@@ -334,7 +334,7 @@ const STMT = {
     const catches = n.catches.map((c) => ({ types: c.types.map((t) => t.toLowerCase()), v: c.v, B: cBody(c.body) }));
     const F = n.fin ? cBody(n.fin) : null;
     // label: entering the try body (or a catch body, see below) at a goto label
-    const run = (f, label) => {
+    const run0 = (f, label, mark) => {
       let res;
       try {
         if (label !== undefined && catches.some((c) => c.B.labels && c.B.labels.has(label))) {
@@ -349,6 +349,10 @@ const STMT = {
         const sig = toThrowSig(e);
         if (!sig) throw e;
         const obj = sig.obj;
+        // objects the try block created that only the unwound expressions held are gone
+        const created = objHandles.recent.slice(mark);
+        objHandles.recent.length = mark;
+        if (created.length) caughtTemps(created);
         let handled = false;
         for (const c of catches) {
           if (c.types.some((t) => obj.cls.ancestors.has(t))) {
@@ -369,6 +373,12 @@ const STMT = {
       }
       if (F) { const fr = F(f); if (fr !== undefined) return fr; }
       return res;
+    };
+    const run = (f, label) => {
+      const outer = objHandles.recent, mark = outer === null ? 0 : outer.length;
+      if (outer === null) objHandles.recent = [];
+      try { return run0(f, label, mark); }
+      finally { if (outer === null) objHandles.recent = null; else if (outer.length > mark) outer.length = mark; }
     };
     return exposeLabels((f) => run(f, undefined), [B, ...catches.map((c) => c.B)], run);
   },

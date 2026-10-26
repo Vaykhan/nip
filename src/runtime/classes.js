@@ -131,13 +131,21 @@ export function declareClass(decl, f) {
     ifaces.forEach((ic, i) => {
       if (!ic.isInterface) throw new FatalSig(`${cls.name} cannot implement ${ic.name} - it is not an interface`, decl.l, decl.file);
       if (ifaces.indexOf(ic) < i) throw new FatalSig(`${what} ${cls.name} cannot implement previously implemented interface ${ic.name}`, decl.l, decl.file);
+      // a constant inherited from two places, and not redeclared, is ambiguous
+      for (const [k, v] of ic.consts) {
+        const ex = cls.consts.get(k);
+        if (ex && ex.cls !== v.cls && !decl.consts.some((c) => c.name === k)) {
+          if (v.final && ex.cls !== v.cls) throw new FatalSig(`${ex.cls.name}::${k} cannot override final constant ${v.cls.name}::${k}`, decl.l, decl.file);
+          throw new FatalSig(`${what} ${cls.name} inherits both ${ex.cls.name}::${k} and ${v.cls.name}::${k}, which is ambiguous`, decl.l, decl.file);
+        }
+      }
       addInterface(cls, ic);
     });
     if (!cls.isInterface) checkSpecialInterfaces(cls, decl, what);
     // constants
     for (const c of decl.consts) {
       const ex = cls.consts.get(c.name);
-      if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, c.l, decl.file);
+      if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, decl.l, decl.file);
       cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c });
     }
     // traits (their defaults may use the class's constants)
@@ -172,9 +180,17 @@ export function declareClass(decl, f) {
     if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
     checkInheritance(cls, decl, resolveForCheck);
     // abstract check
-    if (!cls.abstract && !cls.isInterface && !cls.isTrait) {
-      const abs = [...cls.methods.values()].filter((m) => m.abstract);
-      if (abs.length) throw new FatalSig(`Class ${cls.name} contains ${abs.length} abstract method${abs.length > 1 ? 's' : ''} and must therefore be declared abstract or implement the remaining methods (${abs.map((m) => m.cls.name + '::' + m.name).join(', ')})`, decl.l, decl.file);
+    // zend_verify_abstract_class: an abstract class still has to implement private abstract methods
+    if (!cls.isInterface && !cls.isTrait) {
+      const abs = [...cls.methods.values()].filter((m) => m.abstract && (!cls.abstract || m.vis === 'private'));
+      if (abs.length) {
+        const n = abs.length, s = n > 1 ? 's' : '';
+        const list = abs.slice(0, 3).map((m) => m.cls.name + '::' + m.name).join(', ') + (n > 3 ? ', ...' : '');
+        const what = cls.isEnum ? 'Enum' : 'Class';
+        throw new FatalSig(!cls.abstract && !cls.isEnum
+          ? `${what} ${cls.name} contains ${n} abstract method${s} and must therefore be declared abstract or implement the remaining methods (${list})`
+          : `${what} ${cls.name} must implement ${n} abstract private method${s} (${list})`, decl.l, decl.file);
+      }
     }
     if (cls.parent || decl.traits.length) {
       const own = new Map(), rest = [];
@@ -347,6 +363,7 @@ function bindTraits(cls, decl) {
     }
     if (own.has(ln)) return;
     if (prev && !prev.m.abstract) throw at(`Trait method ${t.name}::${m.name} has not been applied as ${cls.name}::${name}, because of collision with ${prev.t.name}::${prev.name}`);
+    if (prev) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(prev.m); // the method must satisfy the abstract one it replaces
     fromTrait.set(ln, { t, m, name, vis });
     addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final, origin: m.origin || t }, cls, name === m.name ? undefined : name);
   };

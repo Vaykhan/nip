@@ -222,6 +222,7 @@ export function lex(src, file) {
       const m = CAST_RE.exec(src.slice(i, i + 30));
       if (m) {
         let t = m[1].toLowerCase();
+        if (t === 'real') err('The (real) cast has been removed, use (float) instead');
         t = { integer: 'int', boolean: 'bool', double: 'float', real: 'float', binary: 'string' }[t] || t;
         push('cast', t); i += m[0].length; continue;
       }

@@ -105,8 +105,10 @@ function foldable(n) {
   }
   return false;
 }
-function defaultStr(n) {
+function defaultStr(n, scope) {
   if (n.k === 'Const' && !foldable(n)) return n.name.replace(/^\\/, '');
+  // self::class is resolved when the class is compiled (not in traits)
+  if (n.k === 'ClassName' && n.cls === 'self' && scope && !scope.isTrait) return `'${scope.name.length > 10 ? scope.name.slice(0, 10) + '...' : scope.name}'`;
   if (n.k === 'CConst' && typeof n.cls === 'string') return `${n.cls.replace(/^\\/, '')}::${n.name}`;
   if (!foldable(n)) return '<expression>';
   let v;
@@ -122,13 +124,14 @@ function defaultStr(n) {
 // { owner, name, byRef, params: [{ type, name, byRef, variadic, optional, def }], ret, tentative }
 // where def is the default value as PHP prints it.
 // `scope` resolves self (in a trait: the class using it); types print as declared in traits
-function userSig(m, scope = m.cls) {
+// owner: the class the method is named after in messages
+function userSig(m, scope = m.cls, owner = m.cls) {
   const fn = m.fn;
   let required = 0;
   fn.params.forEach((p, i) => { if (!p.defNode && !p.variadic) required = i + 1; });
   return {
-    owner: inhClsName(m.origin || m.cls), name: m.name, byRef: !!fn.decl.byRef, scope, printScope: m.origin || m.cls.isTrait ? null : m.cls, ret: fn.ret || null, tentative: false,
-    params: fn.params.map((p, i) => ({ type: p.type, name: p.name, byRef: !!p.byRef, variadic: !!p.variadic, optional: i >= required, def: p.defNode && !p.variadic ? defaultStr(p.defNode) : null })),
+    owner: inhClsName(owner), name: m.name, byRef: !!fn.decl.byRef, scope, printScope: m.origin || m.cls.isTrait ? null : m.cls, ret: fn.ret || null, tentative: false,
+    params: fn.params.map((p, i) => ({ type: p.type, name: p.name, byRef: !!p.byRef, variadic: !!p.variadic, optional: i >= required, def: p.defNode && !p.variadic ? defaultStr(p.defNode, m.cls) : null })),
   };
 }
 function parseTypeStr(str) {
@@ -251,11 +254,13 @@ function checkProps(cls, decl, resolve) {
 function checkConsts(cls, decl, resolve) {
   const P = cls.parent, at = (msg) => new FatalSig(msg, decl.l, decl.file);
   const ctx = { resolve: (n) => (lcName(n) === cls.lname ? cls : resolve(n)) };
-  for (const c of decl.consts) {
-    const pc = P.consts.get(c.name);
-    if (!pc || pc.case || pc.vis === 'private') continue;
+  // the parent's constants and the interfaces'
+  const sources = (P ? [P] : []).concat(cls.ifaceList.filter((ic) => !P || !P.ifaceList.includes(ic)));
+  for (const c of decl.consts) for (const S of sources) {
+    const pc = S.consts.get(c.name);
+    if (!pc || pc.case || pc.vis === 'private' || pc.cls === cls) continue;
     const vis = c.vis || 'public', pvis = pc.vis || 'public';
-    const owner = pc.cls ? inhClsName(pc.cls) : inhClsName(P);
+    const owner = pc.cls ? inhClsName(pc.cls) : inhClsName(S);
     if (VIS_RANK[vis] > VIS_RANK[pvis]) throw at(`Access level to ${inhClsName(cls)}::${c.name} must be ${pvis} (as in ${pc.cls && pc.cls.isInterface ? 'interface' : 'class'} ${owner})${pvis === 'protected' ? ' or weaker' : ''}`);
     const pt = pc.decl && pc.decl.type;
     if (pt && (!c.type || typeSub(normType(c.type, cls), cls, normType(pt, pc.cls), pc.cls, ctx) === false)) {
@@ -267,29 +272,30 @@ function checkConsts(cls, decl, resolve) {
 // All checks of a class being declared, in PHP's order: methods overriding the parent's, then
 // abstract methods of used traits, then the interfaces' methods.
 export function checkInheritance(cls, decl, resolve) {
-  if (cls.parent && decl.file !== PRELUDE_FILE) {
-    checkProps(cls, decl, resolve);
-    checkConsts(cls, decl, resolve);
-  }
+  if (cls.parent && decl.file !== PRELUDE_FILE) checkProps(cls, decl, resolve);
+  if ((cls.parent || cls.ifaceList.length) && decl.file !== PRELUDE_FILE) checkConsts(cls, decl, resolve);
   if (cls.parent) {
     for (const k of methodTableOrder(cls.parent)) {
       const pm = cls.parent.methods.get(k), cm = cls.methods.get(k);
-      if (pm && cm && cm !== pm) checkOverride(cls, cm, pm, resolve);
+      if (pm && cm && cm !== pm) checkOverride(cls, cm, pm, resolve, 'parent');
     }
   }
   if (cls.traitAbstracts) {
-    for (const am of cls.traitAbstracts) checkOverride(cls, cls.methods.get(am.name.toLowerCase()), am, resolve, true);
+    for (const am of cls.traitAbstracts) checkOverride(cls, cls.methods.get(am.name.toLowerCase()), am, resolve, 'trait');
     cls.traitAbstracts = null;
   }
   for (const iname of decl.interfaces) {
     const ic = resolve(iname);
-    if (ic) for (const [k, im] of ic.methods) { const fm = cls.methods.get(k); if (fm && fm !== im) checkOverride(cls, fm, im, resolve); }
+    if (ic) for (const [k, im] of ic.methods) { const fm = cls.methods.get(k); if (fm && fm !== im) checkOverride(cls, fm, im, resolve, 'iface'); }
   }
 }
 
 // Check method `child` of class `cls` against the method it overrides or implements.
-// resolve(name) returns a declared class or null.
-function checkOverride(cls, child, proto, resolve, fromTrait) {
+// resolve(name) returns a declared class or null. phase: 'parent' (overriding the parent's
+// methods), 'trait' (a used trait's abstract method) or 'iface'. Methods a trait brought are
+// named after the trait while traits are bound (parent and trait phases), else after the class.
+function checkOverride(cls, child, proto, resolve, phase) {
+  const fromTrait = phase === 'trait';
   if (!proto || proto === child || !proto.fn || !child.fn || child.fn.native || !child.fn.decl) return;
   if (child.fn.file === PRELUDE_FILE) return;
   const internal = proto.fn.native || proto.fn.file === PRELUDE_FILE;
@@ -302,18 +308,19 @@ function checkOverride(cls, child, proto, resolve, fromTrait) {
   const psig = internal ? internalSig(proto.name.toLowerCase(), proto.cls.isInterface ? proto.cls : cls.parent, proto.cls) : userSig(proto, proto.cls.isTrait ? cls : proto.cls);
   if (!psig) return; // an internal method PHP doesn't have
   const parentName = psig.owner;
+  const childOwner = phase !== 'iface' && child.origin ? child.origin : child.cls;
   if (!!child.static !== !!proto.static) {
-    throw at(child.static ? `Cannot make non static method ${parentName}::${proto.name}() static in class ${inhClsName(cls)}`
-      : `Cannot make static method ${parentName}::${proto.name}() non static in class ${inhClsName(cls)}`);
+    throw at(child.static ? `Cannot make non static method ${parentName}::${child.name}() static in class ${inhClsName(childOwner)}`
+      : `Cannot make static method ${parentName}::${child.name}() non static in class ${inhClsName(childOwner)}`);
   }
-  if (child.abstract && !proto.abstract) throw at(`Cannot make non abstract method ${parentName}::${proto.name}() abstract in class ${inhClsName(cls)}`);
+  if (child.abstract && !proto.abstract) throw at(`Cannot make non abstract method ${parentName}::${child.name}() abstract in class ${inhClsName(childOwner)}`);
   // constructors are only checked against abstract or interface constructors
   if (lcName(proto.name) === '__construct' && !proto.abstract) return;
   // (abstract trait methods don't enforce visibility, for backwards compatibility)
   if (!fromTrait && VIS_RANK[child.vis] > VIS_RANK[proto.vis]) {
-    throw at(`Access level to ${inhClsName(child.origin || child.cls)}::${child.name}() must be ${proto.vis} (as in class ${parentName})${proto.vis === 'protected' ? ' or weaker' : ''}`);
+    throw at(`Access level to ${inhClsName(childOwner)}::${child.name}() must be ${proto.vis} (as in class ${parentName})${proto.vis === 'protected' ? ' or weaker' : ''}`);
   }
-  const csig = userSig(child);
+  const csig = userSig(child, child.cls, childOwner);
   const ctx = { resolve: (n) => (lcName(n) === cls.lname ? cls : resolve(n)) };
   const r = compatible(csig, psig, ctx);
   if (r !== true && r !== false && r !== 'warning') {

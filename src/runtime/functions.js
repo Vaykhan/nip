@@ -288,7 +288,8 @@ function coerceParam(fn, p, i, v, strict, f) {
   if (r === FAIL) {
     const top = rt.stack[rt.stack.length - 1];
     const where = (top && top.native === true) || fn.file === PRELUDE_FILE ? '' : `, called in ${rt.file} on line ${rt.line}`;
-    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${p.name}) must be of type ${typeStr(p.type, fn.cls)}, ${valueName(v)} given${where}`);
+    // (variadic arguments have no parameter name)
+    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1}${p.variadic ? '' : ` ($${p.name})`} must be of type ${typeStr(p.type, fn.cls)}, ${valueName(v)} given${where}`);
   }
   return r;
 }
@@ -309,7 +310,8 @@ function checkReturn(fn, v, f, none) {
 }
 export function coercePropType(info, v, clsName, name) {
   const r = coerceType(info.type, v, rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict, { cls: info.cls, sc: info.cls });
-  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type, info.cls)}`);
+  // (self and parent are printed as declared)
+  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type, null)}`);
   return r;
 }
 
@@ -492,5 +494,5 @@ export const FRAME_FUNCS = {
     if (p && f.vars[p.name]) return f.vars[p.name].v;
     const a = f.args[i]; return a instanceof Ref ? a.v : (a === undefined ? null : a);
   },
-  get_called_class(f) { return f.sc ? f.sc.name : false; },
+  get_called_class(f) { if (!f.sc) throwError('Error', 'get_called_class() must be called from within a class'); return f.sc.name; },
 };

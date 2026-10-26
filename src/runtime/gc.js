@@ -216,6 +216,13 @@ export function frameExit(vars, ret, self) {
   // without budget, check them at a later statement start instead
   if (!sweep(cands, ret, self)) { for (const o of cands) idCands.add(o); idq.n = 1; }
 }
+// an exception was caught: objects created in the try block that only the unwound expressions
+// held are gone (checked at the next statement)
+export function caughtTemps(objs) {
+  if (budget <= 0) return;
+  for (const o of objs) if (!o.idFreed) idCands.add(o);
+  if (idCands.size) idq.n = 1;
+}
 // at the start of a statement
 export function idSafePoint() {
   idq.n = 0;
@@ -271,6 +278,7 @@ function sweep(cands, ret, self) {
       if (v.gen) { push(v.gen.f); push(v.gen.cur); push(v.gen.key); push(v.gen.ret); push(v.gen.sent); }
       if (v.refl) push(v.refl.obj);
       if (v.fiber) push(v.fiber);
+      if (v.trace) push(v.trace);
     } else if (v instanceof Ref) push(v.v);
     else if (v instanceof PHPArray) { const vs = v.v, ks = v.k; work += vs.length; for (let i = 0; i < vs.length; i++) { const x = vs[i]; if (x !== null && typeof x === 'object' && ks[i] !== undefined) stack.push(x); } }
     else if (v instanceof Frame) {

@@ -360,6 +360,7 @@ export function checkProgram(ast, file) {
       if (kind === 'enum' && ENUM_MAGIC.has(ln)) fail(`Enum ${name} cannot include magic method ${fn.name}`, n);
       if (kind === 'enum' && (ln === 'cases' || (n.enumType && (ln === 'from' || ln === 'tryfrom')))) fail(`Cannot redeclare ${name}::${fn.name}()`, n);
       if (ln.startsWith('__') && MAGIC_SIGS[ln]) checkMagicMethod(name, m, MAGIC_SIGS[ln]);
+      if (m.vis === 'private' && m.final && ln !== '__construct') compileWarning('Private methods cannot be final as they are never overridden by other classes', m);
       for (const p of fn.params) {
         if (!p.promote) continue;
         if (ln !== '__construct') fail('Cannot declare promoted property outside a constructor', m);
