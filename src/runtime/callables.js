@@ -53,7 +53,7 @@ export function resolveCallable(v, f, throwIt) {
       if (!m || (m.vis !== 'public' && !canAccessMember(m, scope))) {
         const mc = a.cls.methods.get('__call');
         if (mc) return { fn: magicCallFn(mc, mname), thisObj: a, cls: mc.cls, sc: a.cls, closure: null };
-        if (m) return fail(`Call to ${m.vis} method ${a.cls.name}::${m.name}() from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+        if (m) return fail(`Call to ${m.vis} method ${m.cls.name}::${mname}() from ${scope ? 'scope ' + scope.name : 'global scope'}`);
         return fail(`Call to undefined method ${a.cls.name}::${mname}()`);
       }
       return { fn: m.fn, thisObj: m.static ? null : a, cls: m.cls, sc: a.cls, closure: null };
@@ -100,7 +100,7 @@ function resolveMethodCallable(cname, mname, f, throwIt) {
     if (ms) return { fn: { native: (t, args) => callFunction(ms.fn, [mname, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null), isMethod: true, name: mname, refs: null }, thisObj: null, cls, sc: cls, closure: null };
     return fail(`Call to undefined method ${cls.name}::${mname}()`);
   }
-  if (m.vis !== 'public' && !canAccessMember(m, scope)) return fail(`Call to ${m.vis} method ${cls.name}::${m.name}() from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+  if (m.vis !== 'public' && !canAccessMember(m, scope)) return fail(`Call to ${m.vis} method ${m.cls.name}::${mname}() from ${scope ? 'scope ' + scope.name : 'global scope'}`);
   if (!m.static) {
     if (f && f.this && f.this.cls.ancestors.has(cls.lname)) return { fn: m.fn, thisObj: f.this, cls: m.cls, sc: f.this.cls, closure: null };
     return fail(`Non-static method ${cls.name}::${m.name}() cannot be called statically`);

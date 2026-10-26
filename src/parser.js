@@ -709,7 +709,7 @@ export class Parser {
       const doc = this.takeDoc(nameTok);
       const fn = this.parseFunctionRest(nameTok.v, byRef, l, { cls: cd.name });
       fn.cls = cd.name; fn.attrs = attrs; fn.doc = doc;
-      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', final: mods.final, l, seq: cd.seq = (cd.seq || 0) + 1 });
+      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', abstractKw: mods.abstract, final: mods.final, l, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
     // property
@@ -837,7 +837,7 @@ export class Parser {
         case 'yield': {
           this.p++;
           const fn = this.st.fnStack[this.st.fnStack.length - 1];
-          if (fn) fn.isGen = true; else this.error('The "yield" expression can only be used inside a function');
+          if (fn) fn.isGen = true; else this.fatal('The "yield" expression can only be used inside a function');
           if (this.isOp(';') || this.isOp(')') || this.isOp(',') || this.isOp(']') || this.tok.t === 'eof') return { k: 'Yield', key: null, v: null, l };
           let v = this.parseExpr(4), key = null;
           if (this.accept('=>')) { key = v; v = this.parseExpr(4); }
@@ -846,7 +846,7 @@ export class Parser {
         case 'yield from': {
           this.p++;
           const fn = this.st.fnStack[this.st.fnStack.length - 1];
-          if (fn) fn.isGen = true; else this.error('The "yield" expression can only be used inside a function');
+          if (fn) fn.isGen = true; else this.fatal('The "yield" expression can only be used inside a function');
           return { k: 'YieldFrom', e: this.parseExpr(4), l };
         }
         case 'throw': this.p++; return { k: 'Throw', e: this.parseExpr(0), l };

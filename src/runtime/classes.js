@@ -308,6 +308,11 @@ function bindTraits(cls, decl) {
     for (const n of tu.names) {
       const t = lookupClass(n, false, 'Trait');
       if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
+      if (cls.isEnum) {
+        const atUse = (msg) => new FatalSig(msg, tu.l || decl.l, decl.file);
+        if (t.slots.size || t.sprops.size) throw atUse(`Enum ${cls.name} cannot include properties`);
+        for (const [ln, m] of t.methods) if (ENUM_FORBIDDEN_MAGIC.has(ln)) throw atUse(`Enum ${cls.name} cannot include magic method ${m.name}`);
+      }
       traits.push(t);
     }
     rules.push(...tu.rules);
@@ -425,6 +430,7 @@ function bindTraits(cls, decl) {
   });
 }
 const constType = (c) => c.type || (c.decl && c.decl.type) || null;
+const ENUM_FORBIDDEN_MAGIC = new Set(['__construct', '__destruct', '__clone', '__get', '__set', '__unset', '__isset', '__tostring', '__debuginfo', '__serialize', '__unserialize', '__sleep', '__wakeup', '__set_state']);
 function hasTraitProp(t, name) { return t.sprops.has(name) || [...t.slots.values()].some((x) => x.decl && x.decl.name === name); }
 // a property's default value as declared (undefined: none, for typed properties)
 function declaredDefault(p, owner) {
@@ -528,12 +534,13 @@ export function instantiate(cls, A, f) {
     const what = cls.isInterface ? 'interface' : cls.isTrait ? 'trait' : cls.isEnum ? 'enum' : 'abstract class';
     throwError('Error', `Cannot instantiate ${what} ${cls.name}`);
   }
+  if (cls === generatorClass) throwError('Error', 'The "Generator" class is reserved for internal use and cannot be manually instantiated');
   const obj = new PHPObject(cls);
   initProps(obj);
   if (cls.ancestors.has('throwable')) initThrowable(obj);
   const ctor = cls.methods.get('__construct');
   if (ctor) {
-    if (ctor.vis !== 'public' && !canAccessMember(ctor, f ? f.cls : null)) throwError('Error', `Call to ${ctor.vis} ${cls.name}::__construct() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+    if (ctor.vis !== 'public' && !canAccessMember(ctor, f ? f.cls : null)) throwError('Error', `Call to ${ctor.vis} ${ctor.cls.name}::__construct() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
     const args = A ? A(f, ctor.fn) : [];
     if (cls.hasDestructor) {
       try { callFunction(ctor.fn, args, obj, ctor.cls, cls, null); }
@@ -561,6 +568,8 @@ export function callMethodName(obj, name, args) {
 export function callMethod(obj, m, args) { return callFunction(m.fn, args, obj, m.cls, obj.cls, null); }
 
 // ---------------------------------------------------------------- property access
+// names starting with NUL are how private and protected properties are mangled
+function badPropName() { throwError('Error', 'Cannot access property starting with "\\0"'); }
 function propInfoFor(obj, name, scope) {
   if (scope !== null && scope !== undefined) {
     const pi = scope.privProps.size ? scope.privProps.get(name) : undefined;
@@ -606,10 +615,12 @@ export function readProp(obj, name, f) {
   const r = magicGet(obj, name);
   if (r !== undefined) return r;
   if (info && info.type) throwError('Error', `Typed property ${info.cls.name}::$${name} must not be accessed before initialization`);
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
   warn(`Undefined property: ${obj.cls.name}::$${name}`);
   return null;
 }
 export function readPropQuiet(obj, name, f, issetOnly) {
+  if (name.charCodeAt(0) === 0 && name.length) return undefined;
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
   let key = name;
@@ -652,6 +663,7 @@ export function writeProp(obj, name, v, f) {
     if (obj.cls.nipHooks && nipHook(obj, '__nipset', [name, v]) !== undefined) return;
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
+    if (name.charCodeAt(0) === 0 && name.length) badPropName();
     newDynamicProp(obj, name);
   } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
@@ -681,6 +693,7 @@ function resolvePropKey(obj, name, f, forWrite) {
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, true);
   if (!info && !obj.props.has(key)) newDynamicProp(obj, name);
   obj.props.set(key, ref);
@@ -693,6 +706,7 @@ function newDynamicProp(obj, name) {
   if (!c.allowDynamic && rt.file !== PRELUDE_FILE) deprecated(`Creation of dynamic property ${c.anon ? displayName(c) : c.name}::$${name} is deprecated`);
 }
 export function propRef(obj, name, f) {
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, true);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) return slot;
@@ -708,6 +722,7 @@ export function propRef(obj, name, f) {
   return r;
 }
 export function propArr(obj, name, f) {
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, false);
   let slot = obj.props.get(key);
   if (slot === undefined && !info) {
@@ -754,7 +769,8 @@ export function unsetProp(obj, name, f) {
   if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
   if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
-  if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } }
+  if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
 }
 
 export function cloneObject(o, f) {

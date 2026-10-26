@@ -126,8 +126,13 @@ export function gcCollect(list, extra) {
   return survivors;
 }
 export function gcCheck(old) { // called when a reference to `old` is dropped
-  if (old instanceof PHPObject && old.cls.hasDestructor && !old.destructed && !rt.inShutdown) gcCollect([old], null);
+  if (old instanceof PHPObject && old.cls.hasDestructor && !old.destructed && !rt.inShutdown) {
+    if (old.gen !== undefined && !old.gen.needsDestroy()) return; // a generator with nothing left to run
+    gcCollect([old], null);
+  }
 }
+// an object whose destructor hasn't run yet keeps its handle
+const pendingDtor = (o) => o.cls.hasDestructor && !(o.gen !== undefined && !o.gen.needsDestroy());
 export function gcAfterCall(f, ret) {
   const list = f.destr; f.destr = null;
   const survivors = gcCollect(list, [ret]);
@@ -259,7 +264,7 @@ function visitIdRoots(push) {
 // the budget ran out first
 function sweep(cands, ret, self) {
   let pending = 0;
-  for (const o of cands) if (!o.idFreed && (!o.cls.hasDestructor || o.destructed)) pending++;
+  for (const o of cands) if (!o.idFreed && (!pendingDtor(o) || o.destructed)) pending++;
   if (pending === 0) return true;
   const seen = new Set(), stack = [];
   const push = (v) => { if (v !== null && typeof v === 'object' && !(v instanceof Flt)) stack.push(v); };
@@ -301,7 +306,7 @@ function sweep(cands, ret, self) {
   // PHP's reference counting doesn't free garbage cycles (until cycle collection runs), nor what
   // they refer to
   const dead = [];
-  for (const o of cands) if (!seen.has(o) && !o.idFreed && (!o.cls.hasDestructor || o.destructed)) dead.push(o);
+  for (const o of cands) if (!seen.has(o) && !o.idFreed && (!pendingDtor(o) || o.destructed)) dead.push(o);
   const kept = new Set();
   for (const o of dead) {
     if (kept.has(o)) continue;

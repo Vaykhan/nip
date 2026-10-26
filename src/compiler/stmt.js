@@ -206,6 +206,7 @@ const STMT = {
         const subj0 = LE.getq(f);
         if (subj0 instanceof PHPObject) {
           if (subj0.cls.ancestors.has('iterator') && subj0.cls.lname !== 'generator') throwError('Error', 'An iterator cannot be used with foreach by reference');
+          if (subj0.gen && !subj0.gen.fn.byRef) throwError('Exception', 'You can only iterate a generator by-reference if it declared that it yields by-reference');
           return foreachObject(f, subj0, K, V, B, true, isList);
         }
         if (subj0 !== undefined && subj0 !== null && !(subj0 instanceof PHPArray)) { warn(`foreach() argument must be of type array|object, ${valueName(subj0)} given`); return; }
@@ -422,7 +423,8 @@ const STMT = {
   },
   Unset(n) {
     const ls = n.list.map(cLval);
-    return (f) => { for (const lv of ls) lv.unset(f); };
+    const l = n.l;
+    return (f) => { rt.line = l; for (const lv of ls) lv.unset(f); };
   },
   ConstDecl(n) {
     const items = n.items.map((i) => ({ name: i.name, E: cExpr(i.e) }));

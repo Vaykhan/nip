@@ -82,7 +82,9 @@ function cExprG(n) {
           if (g.done) return g.ret;
           g.ensure(true);
           while (!g.done) {
-            const sent = yield [g.key, g.cur, true];
+            let sent;
+            // destroying this generator destroys the one it delegates to first
+            try { sent = yield [g.key, g.cur, true]; } catch (e) { if (e instanceof FiberExit) g.destroy(); throw e; }
             if (sent instanceof GenThrow) g.throwIn(sent.obj); else g.send(sent === undefined ? null : sent);
           }
           return g.ret;

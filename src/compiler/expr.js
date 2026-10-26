@@ -15,7 +15,7 @@ import { arrowFreeVars, isFresh, isLvalNode, SUPERGLOBALS, warnUndefVar } from '
 import { cClassRef, cLval } from './lvalue.js';
 import { iterateObject } from './stmt.js';
 import { rt } from '../runtime/state.js';
-import { deprecated, notice, PRELUDE_FILE, throwError } from '../runtime/errors.js';
+import { deprecated, notice, PRELUDE_FILE, setPrevious, throwError } from '../runtime/errors.js';
 import {
   callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
 } from '../runtime/functions.js';
@@ -157,7 +157,9 @@ const EXPR = {
       return (f) => { const v = E(f); if (v instanceof PHPObject) return v.cls.name; throwError('TypeError', `Cannot use "::class" on ${valueName(v)}`); };
     }
     const C = cClassRef(n.cls);
-    return (f) => C(f).name;
+    const rel = n.cls.toLowerCase();
+    // outside any class (top-level code, unbound closures)
+    return (f) => { if (!f.cls) throwError('Error', `Cannot use "${rel}" in the global scope`); return C(f).name; };
   },
   Assign(n) {
     if (n.t.k === 'List') {
@@ -373,7 +375,8 @@ const EXPR = {
     const E = cExpr(n.e);
     return (f) => {
       const v = E(f);
-      if (!(v instanceof PHPObject) || !v.cls.ancestors.has('throwable')) throwError('Error', 'Can only throw objects');
+      if (!(v instanceof PHPObject)) throwError('Error', 'Can only throw objects');
+      if (!v.cls.ancestors.has('throwable')) throwError('Error', 'Cannot throw objects that do not implement Throwable');
       throw new ThrowSig(v);
     };
   },
@@ -494,7 +497,8 @@ const EXPR = {
         const args = A(f, null);
         return call(magic.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], o, magic.cls, o.cls, null);
       }
-      if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${o.cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+      // (named after the declaring class, with the name as called)
+      if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
       throwError('Error', `Call to undefined method ${o.cls.name}::${name}()`);
     };
   },
@@ -530,7 +534,7 @@ const EXPR = {
         }
         const ms = cls.methods.get('__callstatic');
         if (ms) { const args = A(f, null); return call(ms.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null); }
-        if (m) throwError('Error', `Call to ${m.vis} method ${cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+        if (m) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
         throwError('Error', `Call to undefined method ${cls.name}::${name}()`);
       }
       if (m.abstract) throwError('Error', `Cannot call abstract method ${m.cls.name}::${m.name}()`);
@@ -617,7 +621,19 @@ function spreadInto(a, v) {
     return;
   }
   if (v instanceof PHPObject && v.cls.ancestors.has('traversable')) {
-    iterateObject(v, (k, x) => { if (typeof k === 'string') a.set(k, cp(x)); else a.push(cp(x)); });
+    try {
+      iterateObject(v, (k, x) => {
+        if (typeof k === 'string') a.set(k, cp(x));
+        else if (isInt(k)) a.push(cp(x));
+        else throwError('Error', 'Keys must be of type int|string during array unpacking');
+      });
+    } catch (e) {
+      // the unfinished generator is destroyed; an exception from its finally block wins
+      if (v.gen && e instanceof ThrowSig) {
+        try { v.gen.destroy(); } catch (e2) { if (e2 instanceof ThrowSig) setPrevious(e2.obj, e.obj); throw e2; }
+      }
+      throw e;
+    }
     return;
   }
   throwError('Error', 'Only arrays and Traversables can be unpacked');
@@ -747,7 +763,7 @@ function compileNamedCall(n, plain) {
       fn = rt.fns.get(lname);
       if (fn === undefined && lfb) fn = rt.fns.get(lfb);
       if (fn === undefined) fn = lazyFn(lfb || lname);
-      if (fn === undefined) { const sp = FRAME_FUNCS[lfb || lname]; if (sp) return sp(f, A(f, null)); throwError('Error', `Call to undefined function ${fb || name}()`); }
+      if (fn === undefined) { const sp = FRAME_FUNCS[lfb || lname]; if (sp) return sp(f, A(f, null)); throwError('Error', `Call to undefined function ${name}()`); }
       cached = fn; cachedEpoch = rt.epoch;
     }
     const args = A(f, fn);

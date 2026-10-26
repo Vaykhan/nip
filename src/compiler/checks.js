@@ -8,6 +8,7 @@ import { cExpr } from './expr.js';
 import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
+import { valueName } from '../convert.js';
 import { deprecated, warn } from '../runtime/errors.js';
 import { RESERVED_CLASS_NAMES } from '../parser.js';
 
@@ -81,9 +82,29 @@ export function checkProgram(ast, file) {
     if (Array.isArray(n)) { for (const x of n) visit(x, ctx); return; }
     seen.add(n);
     if (!n.k && Array.isArray(n.params) && Array.isArray(n.body)) { visitFunction(n); return; }
-    if (typeof n.cls === 'string' && CLASS_REF_NODES.has(n.k)) checkClassRef(n.cls, n, fnCtx);
+    if (typeof n.cls === 'string' && CLASS_REF_NODES.has(n.k)) checkClassRef(n.cls, n, fnCtx || (curClass ? { cls: curClass, closure: false } : null));
+    // a constant value as the class (zend_compile_class_ref)
+    if (n.cls && typeof n.cls === 'object' && CLASS_REF_NODES.has(n.k) && n.k !== 'New' && n.k !== 'Instanceof') {
+      const c = n.cls;
+      const literal = (c.k === 'Lit' && typeof c.v !== 'string') || c.k === 'Arr' || ((c.k === 'Neg' || c.k === 'Plus') && c.e && c.e.k === 'Lit');
+      if (literal) fail('Illegal class name', n);
+      if (n.k === 'ClassName' && isConstFoldable(c)) {
+        let v; try { v = cExpr(c)(new Frame(null, null, null, null)); } catch (e) { v = undefined; }
+        if (v !== undefined && !(v !== null && typeof v === 'object' && !(v instanceof Flt) && !(v instanceof PHPArray))) fail(`Cannot use "::class" on ${valueName(v)}`, n);
+      }
+    }
+    // $o->{0}(): the method name is a constant that isn't a string
+    if ((n.k === 'MCall' || n.k === 'SCall' || n.k === 'NullsafeMCall') && n.name && typeof n.name === 'object' && n.name.k === 'Lit' && typeof n.name.v !== 'string') fail('Method name must be a string', n);
     switch (n.k) {
       case 'Lit': return;
+      case 'Match': {
+        if (n.arms.filter((a) => !a.conds).length > 1) fail('Match expressions may only contain one default arm', n);
+        break;
+      }
+      case 'YieldFrom':
+        if (scope.byRef) fail('Cannot use "yield from" inside a by-reference generator', n);
+        break;
+      case 'Throw': break;
       case 'ClassDecl': {
         if (!n.anon) { const short = n.name.slice(n.name.lastIndexOf('\\') + 1); if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n); }
         checkClass(n);
@@ -246,6 +267,7 @@ export function checkProgram(ast, file) {
         visit(n.e, scope.byRef ? WRITE : READ); return; // function &f() { return $a[]; }
       }
       case 'While': case 'DoWhile': case 'For': case 'Foreach': case 'Switch': {
+        if (n.k === 'Foreach' && n.kv && (n.kv.k === 'List' || n.kv.k === 'Arr')) fail('Cannot use list as key element', n);
         const { body, cases, ...rest } = n;
         if (n.k === 'Switch') {
           const defaults = n.cases.filter((c) => !c.test);
@@ -266,6 +288,14 @@ export function checkProgram(ast, file) {
     for (const key in n) if (key !== 'l') visit(n[key], READ);
   }
 
+  // an expression PHP evaluates while compiling (literals and operators on them)
+  function isConstFoldable(e) {
+    if (!e || typeof e !== 'object') return false;
+    if (e.k === 'Lit') return true;
+    if (e.k === 'Bin') return isConstFoldable(e.a) && isConstFoldable(e.b);
+    if (e.k === 'Neg' || e.k === 'Plus' || e.k === 'Not' || e.k === 'BitNot') return isConstFoldable(e.e);
+    return false;
+  }
   function hasRefItem(list) { return (list.items || []).some((it) => it && (it.byRef || ((it.v.k === 'List' || it.v.k === 'Arr') && hasRefItem(it.v)))); }
   function isNullsafeChain(e) {
     for (let x = e; x && typeof x === 'object'; x = x.o) if (x.nullsafe || x.k === 'NullsafeMCall') return true;
@@ -323,6 +353,7 @@ export function checkProgram(ast, file) {
     for (const c of [...n.consts, ...n.cases].sort((a, b) => a.seq - b.seq)) {
       if (consts.has(c.name)) fail(`Cannot redefine class constant ${name}::${c.name}`, c);
       if (c.name.toLowerCase() === 'class') fail("A class constant must not be called 'class'; it is reserved for class name fetching", c);
+      if (c.vis === 'private' && c.final) fail(`Private constant ${name}::${c.name} cannot be final as it is not visible to other classes`, c);
       consts.add(c.name);
       if (kind === 'interface' && c.vis && c.vis !== 'public') fail(`Access type for interface constant ${name}::${c.name} must be public`, c);
     }
@@ -352,6 +383,7 @@ export function checkProgram(ast, file) {
       methods.add(ln);
       if (kind === 'interface') {
         if (m.vis !== 'public') fail(`Access type for interface method ${name}::${fn.name}() must be public`, m);
+        if (m.abstractKw) fail(`Interface method ${name}::${fn.name}() must not be abstract`, m);
         if (m.final) fail(`Interface method ${name}::${fn.name}() must not be final`, m);
         if (fn.body) fail(`Interface function ${name}::${fn.name}() cannot contain body`, m);
       } else if (m.abstract && m.vis === 'private' && kind !== 'trait') fail(`Abstract function ${name}::${fn.name}() cannot be declared private`, m);
@@ -368,6 +400,9 @@ export function checkProgram(ast, file) {
         if (p.variadic) fail('Cannot declare variadic promoted property', m);
         if (fn.params.filter((q) => q.name === p.name).length > 1) fail(`Redefinition of parameter $${p.name}`, m);
         checkProp({ name: p.name, readonly: p.readonly || n.flags.readonly, type: p.type, static: false, hasDef: false }, m, true);
+        if (p.type && p.type.alts.length === 1 && p.type.alts[0] === 'callable') fail(`Property ${name}::$${p.name} cannot have type callable`, m);
+        // promoted parameters aren't implicitly nullable
+        if (p.type && p.def && p.def.k === 'Lit' && p.def.v === null && !p.type.raw.includes('null') && !p.type.q && !p.type.alts.includes('mixed')) fail(`Cannot use null as default value for parameter $${p.name} of type ${typeStr(p.type, null, true)}`, m);
       }
     }
   }
@@ -521,6 +556,7 @@ export function checkProgram(ast, file) {
       if (p.type) checkTypeDecl(p.type, 'param', fn);
     }
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
+    if (!methods.has(fn) && fn.params.some((p) => p.promote)) fail('Cannot declare promoted property outside a constructor', fn);
     if (fn.isGen && fn.ret) {
       const { bits } = typeBits(fn.ret);
       const ok = bits.has('object') || fn.ret.alts.some((a) => typeof a === 'string' && /^(traversable|iterator|generator|iterable)$/i.test(a.replace(/^\\/, '')));

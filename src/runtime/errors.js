@@ -71,6 +71,18 @@ export function throwError(clsName, msg, code) {
   if (code !== undefined) obj.props.set('code', code);
   throw new ThrowSig(obj);
 }
+// zend_exception_set_previous: prev goes at the end of obj's chain of previous exceptions
+export function setPrevious(obj, prev) {
+  if (!prev || obj === prev) return;
+  let cur = obj;
+  for (let n = 0; n < 10000; n++) {
+    let p = cur.props.get('previous');
+    if (p instanceof Ref) p = p.v;
+    if (p === prev) return;
+    if (!(p instanceof PHPObject)) { cur.props.set('previous', prev); return; }
+    cur = p;
+  }
+}
 export function makeException(clsName, msg) {
   const cls = lookupClass(clsName);
   const obj = new PHPObject(cls);

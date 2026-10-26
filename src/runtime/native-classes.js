@@ -63,6 +63,8 @@ export function bootNativeClasses() {
       },
     },
   });
+  generatorClass.hasDestructor = true; // runs pending finally blocks (see GenState.destroy())
+  generatorClass.nativeDestruct = (o) => { if (o.gen) o.gen.destroy(); };
   nativeClass('__PHP_Incomplete_Class').allowDynamic = true;
   bootFibers();
   const weakRef = nativeClass('WeakReference', {
