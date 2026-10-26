@@ -13,3 +13,5 @@ ext/standard/tests/file/feof_basic.phpt
 ext/date/tests/gmdate_variation11.phpt
 Zend/tests/concat_003.phpt
 ext/standard/tests/file/ftruncate_bug76422.phpt
+ext/standard/tests/strings/str_shuffle.phpt
+ext/standard/tests/array/array_rand_variation5.phpt

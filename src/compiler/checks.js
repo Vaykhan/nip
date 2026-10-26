@@ -133,7 +133,6 @@ export function checkProgram(ast, file) {
         if (ctx === ASSIGN && n.name === 'this') fail('Cannot re-assign $this', n);
         if (ctx === ASSIGN && n.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', n);
         if (ctx === UNSET && n.name === 'this') fail('Cannot unset $this', n);
-        if (ctx === UNSET && n.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', n);
         return;
       case 'Prop':
         if (n.nullsafe && ctx !== READ && ctx !== ARG) fail("Can't use nullsafe operator in write context", n);
@@ -154,7 +153,12 @@ export function checkProgram(ast, file) {
         if (n.e && n.e.k === 'Var' && n.e.name === 'GLOBALS') fail('Cannot acquire reference to $GLOBALS', n);
         ensureWritable(n.t); visit(n.t, ASSIGN); visit(n.e, WRITE); return;
       case 'PreInc': case 'PreDec': case 'PostInc': case 'PostDec': ensureWritable(n.e); visit(n.e, WRITE); return;
-      case 'Unset': for (const x of n.list) ensureWritable(x); visit(n.list, UNSET); return;
+      case 'Unset':
+        for (const x of n.list) {
+          ensureWritable(x);
+          if (x && x.k === 'Var' && x.name === 'GLOBALS') fail('$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', x);
+        }
+        visit(n.list, UNSET); return;
       case 'Arr':
         if (ctx !== ASSIGN) {
           const empty = (n.items || []).indexOf(null);
@@ -186,12 +190,13 @@ export function checkProgram(ast, file) {
         visit(n.f, READ); visitArgs(n.args, typeof n.f === 'string' ? builtin(n) || knownFns.get(n.f.replace(/^\\/, '').toLowerCase()) : null, n); return;
       case 'FuncDecl':
         if (n.fn && /\\assert$/i.test(n.fn.name)) fail('Defining a custom assert() function is not allowed, as the function has special semantics', n);
-        // a top-level function is declared when compiled: later calls in the file know its parameters
+        visit(n.fn, READ);
+        // a top-level function is declared once compiled: later calls in the file know its parameters
         if (n.top && n.fn && n.fn.name) {
           const ps = n.fn.params, vi = ps.findIndex((p) => p.variadic);
           knownFns.set(n.fn.name.toLowerCase(), { refs: ps.map((p) => !!p.byRef), refRest: vi >= 0 && ps[vi].byRef ? vi : null });
         }
-        break;
+        return;
       case 'MCall': case 'NullsafeMCall':
         if (n.args === 'fcc' && isNullsafeChain(n)) fail('Cannot combine nullsafe operator with Closure creation', n);
         visit(n.o, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;

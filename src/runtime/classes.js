@@ -211,7 +211,7 @@ function checkSpecialInterfaces(cls, decl, what) {
   if (!cls.isEnum && anc.has('unitenum')) throw at(`Non-enum class ${cls.name} cannot implement interface ${anc.has('backedenum') && !decl.interfaces.some((n) => /^\\?unitenum$/i.test(n)) ? 'BackedEnum' : 'UnitEnum'}`);
   if (cls.isEnum && !decl.enumType && anc.has('backedenum')) throw at(`Non-backed enum ${cls.name} cannot implement interface BackedEnum`);
   if (anc.has('iterator') && anc.has('iteratoraggregate')) throw at(`${what} ${cls.name} cannot implement both Iterator and IteratorAggregate at the same time`);
-  if (anc.has('traversable') && !anc.has('iterator') && !anc.has('iteratoraggregate') && decl.file !== PRELUDE_FILE) {
+  if (anc.has('traversable') && !anc.has('iterator') && !anc.has('iteratoraggregate') && !cls.abstract && decl.file !== PRELUDE_FILE) {
     throw at(`${what} ${cls.name} must implement interface Traversable as part of either Iterator or IteratorAggregate`, 0, 'Unknown');
   }
 }

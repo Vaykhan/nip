@@ -337,9 +337,12 @@ function propOps(O, N, sname, nullsafe) {
       const name = nm(f);
       const o = fetchO(f);
       if (!(o instanceof PHPObject)) throwError('Error', `Attempt to modify property "${name}" on ${valueName(o)}`);
+      // handled by __get, or declared (maybe inaccessible or unset): read as usual
+      if (o.cls.methods.has('__get')) return readProp(o, name, f);
       const v = readPropQuiet(o, name, f);
       if (v !== undefined) return v;
-      if (!o.cls.methods.has('__get') && !o.cls.props.has(name)) writeProp(o, name, null, f); // a dynamic property is created
+      if (o.cls.props.has(name)) return readProp(o, name, f);
+      writeProp(o, name, null, f); // a dynamic property is created
       return null;
     },
     arr(f) {
