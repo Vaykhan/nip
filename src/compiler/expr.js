@@ -20,7 +20,7 @@ import {
   callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
 } from '../runtime/functions.js';
 import {
-  callableToClosure, findMethod, makeClosure, methodClosure, resolveCallable
+  callableToClosure, findMethod, magicArgs, makeClosure, methodClosure, resolveCallable
 } from '../runtime/callables.js';
 import {
   canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
@@ -510,7 +510,7 @@ const EXPR = {
       const magic = o.cls.methods.get('__call');
       if (magic) {
         const args = A(f, null);
-        return call(magic.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], o, magic.cls, o.cls, null);
+        return call(magic.fn, [name, magicArgs(args)], o, magic.cls, o.cls, null);
       }
       // (named after the declaring class, with the name as called)
       if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
@@ -545,10 +545,10 @@ const EXPR = {
         // __callStatic / __call
         if (f.this && f.this.cls.ancestors.has(cls.lname)) {
           const mc = cls.methods.get('__call');
-          if (mc) { const args = A(f, null); return call(mc.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], f.this, mc.cls, f.this.cls, null); }
+          if (mc) { const args = A(f, null); return call(mc.fn, [name, magicArgs(args)], f.this, mc.cls, f.this.cls, null); }
         }
         const ms = cls.methods.get('__callstatic');
-        if (ms) { const args = A(f, null); return call(ms.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null); }
+        if (ms) { const args = A(f, null); return call(ms.fn, [name, magicArgs(args)], null, ms.cls, cls, null); }
         if (m) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
         throwError('Error', `Call to undefined method ${cls.name}::${name}()`);
       }
@@ -732,7 +732,9 @@ function compileArgs(argNodes) {
         if (named.has(it.name)) throwError('Error', `Named parameter $${it.name} overwrites previous argument`);
         let pi = -1;
         if (fn && fn.params) pi = fn.params.findIndex((p) => p.name === it.name);
+        // (a plain value for a by-ref parameter is an error, see placeNamed())
         if (pi >= 0 && isRefParam(fn, pi) && it.L) named.set(it.name, it.L.ref(f));
+        else if (pi >= 0 && isRefParam(fn, pi) && it.tempRef) named.set(it.name, new Ref(it.E(f)));
         else named.set(it.name, it.E(f));
         continue;
       }

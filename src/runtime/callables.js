@@ -10,6 +10,12 @@ import { argPos, deref } from '../lib/core.js';
 import { closureClass } from './native-classes.js';
 import { lazyFn } from './boot.js';
 
+// the $arguments array of __call()/__callStatic(): named arguments keep their names
+export function magicArgs(args) {
+  const a = PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)));
+  if (args.named) for (const [k, v] of args.named) a.set(k, v instanceof Ref ? v.v : v);
+  return a;
+}
 export function makeClosure(fn, bound, thisObj, scope, sc) {
   const o = new PHPObject(closureClass);
   o.fn = fn; o.bound = bound; o.thisObj = thisObj || null; o.scope = scope || null; o.sc = sc || scope || null;
@@ -73,7 +79,7 @@ function forbiddenDynamic(lname) {
   return fn;
 }
 function magicCallFn(mc, name) {
-  return { native: (thisObj, args) => callFunction(mc.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], thisObj, mc.cls, thisObj ? thisObj.cls : mc.cls, null), isMethod: true, name: mc.name, refs: null };
+  return { native: (thisObj, args) => callFunction(mc.fn, [name, magicArgs(args)], thisObj, mc.cls, thisObj ? thisObj.cls : mc.cls, null), isMethod: true, name: mc.name, refs: null };
 }
 function resolveMethodCallable(cname, mname, f, throwIt) {
   const scope = f ? f.cls : null;
@@ -97,7 +103,7 @@ function resolveMethodCallable(cname, mname, f, throwIt) {
     const mc = cls.methods.get('__call');
     if (mc && f && f.this && f.this.cls.ancestors.has(cls.lname)) return { fn: magicCallFn(mc, mname), thisObj: f.this, cls: mc.cls, sc: f.this.cls, closure: null };
     const ms = cls.methods.get('__callstatic');
-    if (ms) return { fn: { native: (t, args) => callFunction(ms.fn, [mname, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null), isMethod: true, name: mname, refs: null }, thisObj: null, cls, sc: cls, closure: null };
+    if (ms) return { fn: { native: (t, args) => callFunction(ms.fn, [mname, magicArgs(args)], null, ms.cls, cls, null), isMethod: true, name: mname, refs: null }, thisObj: null, cls, sc: cls, closure: null };
     return fail(`Call to undefined method ${cls.name}::${mname}()`);
   }
   if (m.vis !== 'public' && !canAccessMember(m, scope)) return fail(`Call to ${m.vis} method ${m.cls.name}::${mname}() from ${scope ? 'scope ' + scope.name : 'global scope'}`);

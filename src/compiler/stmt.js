@@ -525,6 +525,8 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     }
     if (byRef) {
       let slot = obj.props.get(k);
+      const info = obj.cls.slots.get(k);
+      if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
       if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
       V.bind(f, slot);
     } else { const s = obj.props.get(k); assignV(s instanceof Ref ? s.v : s); }

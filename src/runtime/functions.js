@@ -89,14 +89,40 @@ function argCountError(fn, given, f) {
   throwInCallee(fn, f, 'ArgumentCountError', `Too few arguments to function ${fnDisplayName(fn)}(), ${given} passed${where} and ${word} ${fn.required} expected`);
 }
 
+// a skipped optional parameter before a named argument (filled with its default, see bindParams)
+const DEFAULT_ARG = {};
+// named arguments are moved to their parameters' positions (as PHP sends them); those of no
+// parameter stay named, for a variadic parameter
+function placeNamed(fn, f, args) {
+  const ps = fn.params, pos = args.slice(), extra = new Map();
+  const vi = ps.findIndex((p) => p.variadic);
+  let max = pos.length;
+  for (const [k, v] of args.named) {
+    const idx = ps.findIndex((p) => p.name === k && !p.variadic);
+    if (idx < 0) { if (vi >= 0) { extra.set(k, v); continue; } throwError('Error', `Unknown named parameter $${k}`); }
+    if (idx < args.length || pos[idx] !== undefined) throwError('Error', `Named parameter $${k} overwrites previous argument`);
+    if (ps[idx].byRef && !(v instanceof Ref)) throwError('Error', `${fnDisplayName(fn)}(): Argument #${idx + 1} ($${k}) could not be passed by reference`);
+    pos[idx] = v;
+    if (idx + 1 > max) max = idx + 1;
+  }
+  for (let i = args.length; i < max; i++) {
+    if (pos[i] !== undefined) continue;
+    if (!ps[i].def) throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${ps[i].name}) not passed`);
+    pos[i] = DEFAULT_ARG;
+    pos.defaults = true;
+  }
+  if (extra.size) pos.named = extra;
+  return pos;
+}
 function bindParams(fn, f, args) {
+  if (args.named !== undefined) args = placeNamed(fn, f, args);
   const ps = fn.params, np = ps.length, na = args.length;
   const named = args.named;
   if (na > np && fn.file === PRELUDE_FILE && !(np && ps[np - 1].variadic)) {
     // internal functions reject extra arguments
     throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${fn.required === np ? 'exactly' : 'at most'} ${np} argument${np === 1 ? '' : 's'}, ${na} given`);
   }
-  if (fn.simple === true && na >= np && named === undefined) {
+  if (fn.simple === true && na >= np && named === undefined && args.defaults === undefined) {
     const vars = f.vars;
     for (let i = 0; i < np; i++) {
       let v = args[i];
@@ -120,8 +146,7 @@ function bindParams(fn, f, args) {
       break;
     }
     let v;
-    if (i < na) v = args[i];
-    else if (named !== undefined && named.has(p.name)) v = named.get(p.name);
+    if (i < na && args[i] !== DEFAULT_ARG) v = args[i];
     else if (p.def) {
       v = p.defNode.kind === 'Lit' ? p.def(f) : evalDefault(fn, f, p);
       if (p.type && v !== null) v = coerceParam(fn, p, i, v, false, f);
@@ -141,13 +166,9 @@ function bindParams(fn, f, args) {
     f.vars[p.name] = new Ref(v);
     if (p.promote) promoteParam(f, p, v);
   }
-  if (named !== undefined) {
-    for (const k of named.keys()) {
-      const idx = ps.findIndex((p) => p.name === k);
-      if (idx < 0 && !ps.some((p) => p.variadic)) throwError('Error', `Unknown named parameter $${k}`);
-      if (idx >= 0 && idx < na && !ps[idx].variadic) throwError('Error', `Named parameter $${k} overwrites previous argument`);
-    }
-  }
+  // func_get_args() sees the defaults of the parameters named arguments skipped
+  for (let i = 0; i < na; i++) if (args[i] === DEFAULT_ARG) args[i] = f.vars[ps[i].name].v;
+  return args;
 }
 // a default that isn't a literal is evaluated in the callee: errors show it in the trace, at the
 // default's line
@@ -326,7 +347,7 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
     f.closure = closure;
     if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
   }
-  bindParams(fn, f, args);
+  args = bindParams(fn, f, args) || args;
   f.args = args;
   if (fn.isGen) return makeGenerator(fn, f);
   const body = fn.body || compileBody(fn);
@@ -372,7 +393,7 @@ export function* callFunctionG(fn, args, thisObj, cls, sc, closure) {
     f.closure = closure;
     if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
   }
-  bindParams(fn, f, args);
+  args = bindParams(fn, f, args) || args;
   f.args = args;
   const saved = compilingByRef;
   compilingByRef = !!fn.decl.byRef;

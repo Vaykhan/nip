@@ -661,7 +661,7 @@ export class Parser {
             if (this.isId('public') || this.isId('protected') || this.isId('private')) vis = this.next().v.toLowerCase();
             else if (this.isId('final')) { this.next(); final = true; }
             else if (this.isId('static') || this.isId('abstract')) this.fatal(`Cannot use "${this.next().v.toLowerCase()}" as method modifier in trait alias`);
-            else if (this.isId('readonly')) this.fatal("Cannot use 'readonly' as method modifier");
+            else if (this.isId('readonly')) this.fatal('Cannot use the readonly modifier on a method');
             if (this.tok.t === 'id') alias = this.ident();
             rules.push({ kind: 'as', trait: tn, method: m, vis, alias, final });
           }
@@ -691,6 +691,8 @@ export class Parser {
       break;
     }
     if (mods.abstract && mods.final && this.isId('function')) this.fatal('Cannot use the final modifier on an abstract method');
+    if (this.isId('const') && mods.readonlyKw) this.fatal('Cannot use the readonly modifier on a class constant');
+    if (this.isId('function') && mods.readonlyKw) this.fatal('Cannot use the readonly modifier on a method');
     if (this.acceptId('const')) {
       // optional type (PHP 8.3)
       let type = null;
@@ -713,6 +715,8 @@ export class Parser {
       return;
     }
     // property
+    if (mods.abstract) this.fatal('Cannot use the abstract modifier on a property');
+    if (mods.final) this.fatal('Cannot use the final modifier on a property');
     let type = null;
     if (this.tok.t !== 'var') type = this.parseType();
     do {

@@ -656,8 +656,9 @@ export function writeProp(obj, name, v, f) {
     }
     key = info.key;
     if (info.readonly) {
-      if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
-      if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${obj.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      // (named after the declaring class)
+      if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
+      if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
   } else if (!obj.props.has(name)) {
@@ -692,6 +693,10 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+// a readonly property modified other than by assignment
+function readonlyIndirect(obj, key, info, name) {
+  throwError('Error', `Cannot ${obj.props.has(key) ? '' : 'indirectly '}modify readonly property ${info.cls.name}::$${name}`);
+}
 // an inaccessible property handled by __get: a key no slot has, so callers take the magic path
 const MAGIC_KEY = '\0\0magic';
 function resolvePropKey(obj, name, f, forWrite) {
@@ -708,6 +713,7 @@ function resolvePropKey(obj, name, f, forWrite) {
 export function bindProp(obj, name, ref, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, true);
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   if (!info && !obj.props.has(key)) {
     // a property __get handles can't be bound to a reference
     if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) {
@@ -731,6 +737,7 @@ function newDynamicProp(obj, name) {
 export function propRef(obj, name, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, true);
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) return slot;
   if (slot === undefined && !info) {
@@ -762,7 +769,7 @@ export function propArr(obj, name, f) {
   const isRef = slot instanceof Ref;
   let v = isRef ? slot.v : slot;
   if (v instanceof PHPObject) return v;
-  if (info && info.readonly && obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   if (v instanceof PHPArray) {
     if (v.cow || v.fe) { v = v.clone(); if (isRef) slot.v = v; else obj.props.set(key, v); }
     return v;

@@ -439,6 +439,14 @@ export function checkProgram(ast, file) {
   function checkTypeDecl(t, where, n, propName) {
     const raw = t.raw;
     if (!raw) return;
+    // only class types can be intersected
+    for (const a of t.alts) {
+      if (typeof a !== 'object' || !a.inter) continue;
+      for (const m of a.inter) {
+        const lm = m.toLowerCase();
+        if (BUILTIN_TYPES.has(lm) || lm === 'self' || lm === 'parent' || lm === 'static') fail(`Type ${lm === 'iterable' ? 'Traversable|array' : lm} cannot be part of an intersection type`, n);
+      }
+    }
     const names = raw.filter((a) => typeof a === 'string');
     const ls = names.map((a) => a.toLowerCase());
     if (t.q) {
@@ -477,6 +485,12 @@ export function checkProgram(ast, file) {
     const seen = new Set();
     for (const a of attrs) {
       if (a.args === 'fcc') fail('Cannot create Closure as attribute argument', a);
+      const named = new Set();
+      for (const arg of Array.isArray(a.args) ? a.args : []) {
+        if (!arg || arg.spread) continue;
+        if (arg.name) { if (named.has(arg.name)) fail(`Duplicate named parameter $${arg.name}`, a); named.add(arg.name); }
+        else if (named.size) fail('Cannot use positional argument after named argument', a);
+      }
       for (const arg of Array.isArray(a.args) ? a.args : []) {
         if (arg && arg.spread) fail('Cannot use unpacking in attribute argument list', a);
         checkConstExpr(arg && arg.e !== undefined ? arg.e : arg, true);
