@@ -71,7 +71,10 @@ export function toInt(v) {
       const m = NUM_LEAD.exec(v);
       if (!m) return 0;
       const n = numFromText(m[0]);
-      return n instanceof Flt ? floatToInt(n.v) : n;
+      if (!(n instanceof Flt)) return n;
+      // (zend_dval_to_lval_cap: numeric strings saturate)
+      if (isFinite(n.v) && (n.v >= 9223372036854775808 || n.v < -9223372036854775808)) return n.v > 0 ? 9223372036854775807n : -9223372036854775808n;
+      return floatToInt(n.v);
     }
   }
   if (v === null || v === undefined) return 0;

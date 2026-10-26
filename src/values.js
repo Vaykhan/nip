@@ -241,11 +241,9 @@ export function normKey(k, ctx) {
     case 'object':
       if (k === null) return '';
       if (k instanceof Flt) {
-        const x = k.v;
-        if (!isFinite(x)) return 0;
-        const t = Math.trunc(x);
-        if (t !== x) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
-        return floatToInt(t);
+        const x = k.v, r = floatToInt(x);
+        if (Number(r) !== x) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
+        return r;
       }
       if (k instanceof PHPResource) { warn(`Resource ID#${k.id} used as offset, casting to integer (${k.id})`); return k.id; }
       if (k instanceof PHPArray || k instanceof PHPObject) illegalOffset(k, ctx);

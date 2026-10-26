@@ -192,11 +192,20 @@ export function lex(src, file) {
         line++;
         // find closing marker: a line consisting of optional whitespace + id, followed by non-id char
         let found = -1, indent = '';
-        const re = new RegExp('^([ \\t]*)' + id.replace(/[^\w]/g, '\\$&') + '(?![A-Za-z0-9_\\x80-\\xff])', 'gm');
-        re.lastIndex = bodyStart;
-        let mm;
-        while ((mm = re.exec(src))) {
-          if (mm.index === 0 || src[mm.index - 1] === '\n') { found = mm.index; indent = mm[1]; break; }
+        const inCode = new Set(); // lines of the body that start inside an interpolated expression
+        const marker = new RegExp('([ \\t]*)' + id.replace(/[^\w]/g, '\\$&') + '(?![A-Za-z0-9_\\x80-\\xff])', 'y');
+        // (in a heredoc, the marker isn't looked for inside {$...} and ${...})
+        for (let k = bodyStart, lineNo = 0, atStart = true; k < src.length;) {
+          if (atStart) { marker.lastIndex = k; const mm = marker.exec(src); if (mm) { found = k; indent = mm[1]; break; } atStart = false; }
+          const c = src[k];
+          if (c === '\n') { lineNo++; atStart = true; k++; }
+          else if (nowdoc) k++;
+          else if (c === '\\') { if (src[k + 1] === '\n') { lineNo++; atStart = true; } k += 2; }
+          else if ((c === '{' && src[k + 1] === '$') || (c === '$' && src[k + 1] === '{')) {
+            const end = matchBrace(src, c === '{' ? k : k + 1);
+            for (let q = k; q < end; q++) if (src[q] === '\n') inCode.add(++lineNo);
+            k = end + 1;
+          } else k++;
         }
         if (found < 0) err('syntax error, unexpected end of file');
         let body = found > bodyStart ? src.slice(bodyStart, found - 1) : '';
@@ -207,9 +216,10 @@ export function lex(src, file) {
         if (indent.length) {
           // the closing marker's indentation is removed from every line (it may not mix tabs and
           // spaces, and neither may the lines); errors are reported at the line they're found on
-          if (indent.includes(' ') && indent.includes('\t')) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine);
+          if (indent.includes(' ') && indent.includes('\t')) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine + 1);
           const ch = indent[0];
           body = body.split('\n').map((ln, idx) => {
+            if (inCode.has(idx)) return ln;
             let k = 0;
             while (k < indent.length && (ln[k] === ' ' || ln[k] === '\t')) {
               if (ln[k] !== ch) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine + 1 + idx);
@@ -263,6 +273,9 @@ export function lex(src, file) {
   function interp(raw, mode, startLine) {
     const parts = [];
     let cur = '', j = 0, ln = startLine;
+    // the line PHP is compiling at when it reaches a ${...}: the string's, then that of the last
+    // embedded expression
+    let compLine = startLine;
     const m = raw.length;
     const flush = () => { if (cur) { parts.push(cur); cur = ''; } };
     while (j < m) {
@@ -330,11 +343,11 @@ export function lex(src, file) {
           let q = k + opLen; while (q < m && isIdChar(raw.charCodeAt(q))) q++;
           code += raw.slice(k, q); k = q;
         }
-        flush(); parts.push({ code, line: ln }); j = k; continue;
+        flush(); parts.push({ code, line: ln }); compLine = ln; j = k; continue;
       }
       if (d === '{' && raw[j + 1] === '$') {
         const end = matchBrace(raw, j);
-        flush(); parts.push({ code: raw.slice(j + 1, end), line: ln });
+        flush(); parts.push({ code: raw.slice(j + 1, end), line: ln }); compLine = ln;
         ln += countNl(raw.slice(j, end)); j = end + 1; continue;
       }
       if (d === '$' && raw[j + 1] === '{') {
@@ -343,12 +356,13 @@ export function lex(src, file) {
         let code;
         if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*(\[|$)/.test(inner)) {
           code = '$' + inner;
-          deprecation('Using ${var} in strings is deprecated, use {$var} instead', ln);
+          deprecation('Using ${var} in strings is deprecated, use {$var} instead', compLine);
         } else {
           code = '${' + inner + '}';
-          deprecation('Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead', ln);
+          deprecation('Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead', compLine);
         }
-        flush(); parts.push({ code, line: ln }); j = end + 1; continue;
+        flush(); parts.push({ code, line: ln }); compLine = ln;
+        ln += countNl(raw.slice(j, end)); j = end + 1; continue;
       }
       cur += d; j++;
     }

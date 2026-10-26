@@ -152,7 +152,7 @@ export function concat(a, b) {
 }
 
 export function strInc(s) {
-  if (s === '') return '1';
+  if (s === '') { deprecated('Increment on non-alphanumeric string is deprecated'); return '1'; }
   const n = numericStr(s);
   if (n !== null) return n instanceof Flt ? mkf(n.v + 1) : intAdd(n, 1);
   // perl-style increment

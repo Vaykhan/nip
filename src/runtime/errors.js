@@ -112,7 +112,7 @@ export function captureTrace(withArgs) {
     const fr = new PHPArray();
     const calledFromNative = (i > 0 && st[i - 1].native === true) || fromPrelude;
     if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }
-    fr.set('function', s.fn.isClosure ? '{closure}' : s.fn.name);
+    fr.set('function', s.fn.name);
     // (an anonymous class's name is printed up to its NUL byte)
     if (s.fn.isMethod && (s.cls || s.this)) { fr.set('class', (s.fn.cls || s.cls || s.this.cls).name.split('\0')[0]); fr.set('type', s.this ? '->' : '::'); }
     if (withArgs !== false) {

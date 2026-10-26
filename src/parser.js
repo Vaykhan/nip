@@ -957,7 +957,7 @@ export class Parser {
     const doc = this.takeDoc(this.peek(0)) || this.takeDoc(this.peek(1));
     if (this.acceptId('fn')) {
       const byRef = this.accept('&');
-      const fn = { name: '{closure}', byRef, params: this.parseParams(), ret: null, body: null, isGen: false, l, file: this.file, arrow: true, static: isStatic, strict: this.st.strict };
+      const fn = { name: this.nsName('{closure}'), byRef, params: this.parseParams(), ret: null, body: null, isGen: false, l, file: this.file, arrow: true, static: isStatic, strict: this.st.strict };
       if (this.accept(':')) fn.ret = this.parseType();
       this.expect('=>');
       this.st.fnStack.push(fn);
@@ -971,7 +971,7 @@ export class Parser {
     }
     this.expectId('function');
     const byRef = this.accept('&');
-    const fn = this.parseFunctionRest('{closure}', byRef, l, { closure: true, static: isStatic });
+    const fn = this.parseFunctionRest(this.nsName('{closure}'), byRef, l, { closure: true, static: isStatic });
     fn.doc = doc;
     return { k: 'Closure', fn, l };
   }
@@ -1071,8 +1071,9 @@ export class Parser {
       case '__file__': return { k: 'Lit', v: this.file, l };
       case '__dir__': return { k: 'Lit', v: pathMod.dirname(this.file), l };
       case '__namespace__': return { k: 'Lit', v: this.st.ns, l };
-      case '__function__': return { k: 'Lit', v: fn ? (fn.name === '{closure}' ? '{closure}' : fn.name) : '', l };
-      case '__class__': return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
+      case '__function__': return { k: 'Lit', v: fn ? fn.name : '', l };
+      case '__class__': if (fn && fn.cls === undefined && !fn.name.endsWith('{closure}')) return { k: 'Lit', v: '', l }; // (a function declared in a method)
+        return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
       case '__trait__': return { k: 'Lit', v: cd && cd.kind === 'trait' ? cd.name : '', l };
       case '__method__': {
         if (!fn) return { k: 'Lit', v: '', l };
@@ -1099,6 +1100,19 @@ export class Parser {
   }
 
   parsePostfix(e) {
+    const top = this.postfixChain(e);
+    // a nullsafe operator short-circuits the rest of its chain: mark the inner ones and the top
+    if (top !== e) {
+      let short = false;
+      const inner = (x) => x.o || x.f || (x.cls && typeof x.cls === 'object' ? x.cls : null);
+      for (let x = inner(top); x && x !== e; x = inner(x)) if (x.nullsafe) { x.short = true; short = true; }
+      if (e.nullsafe && e !== top) { e.short = true; short = true; }
+      if (short) top.chainTop = true;
+    }
+    return top;
+  }
+
+  postfixChain(e) {
     for (;;) {
       const t = this.tok;
       if (t.t !== 'op') break;
@@ -1174,6 +1188,8 @@ export class Parser {
       if (typeof p === 'string') return p;
       const toks = lex('<?php ' + p.code + ';', this.file);
       for (const tk of toks) tk.l += p.line - 1;
+      // (diagnostics of the lexer for nested strings)
+      if (toks.compileDeprecations) for (const d of toks.compileDeprecations) (this.st.compileWarnings || (this.st.compileWarnings = [])).push({ ...d, l: d.l + p.line - 1 });
       const sub = new Parser(toks, this.file, this.st);
       const e = sub.parseExpr();
       if (!sub.isOp(';')) sub.unexpected();

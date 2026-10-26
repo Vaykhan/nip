@@ -19,7 +19,7 @@ function argsHoldObjects(args) {
 }
 export function fnDisplayName(fn) {
   if (!fn) return '';
-  if (fn.isMethod && fn.cls) return fn.cls.name + '::' + fn.name;
+  if (fn.isMethod && fn.cls) { const cn = fn.cls.name, z = cn.indexOf('\0'); return (z >= 0 ? cn.slice(0, z) : cn) + '::' + fn.name; } // (anonymous classes: up to the NUL)
   return fn.name;
 }
 
@@ -36,7 +36,7 @@ export function compileFunction(decl, opts = {}) {
     isCtor: !!opts.method && decl.name.toLowerCase() === '__construct', // see frameExit()
     file: decl.file, line: decl.l, strict: decl.strict,
     refs: refs.some(Boolean) ? refs : null, refRest: vi >= 0 && params[vi].byRef ? vi : null,
-    body: null, statics: null, isMethod: !!opts.method, cls: opts.cls || null, isClosure: decl.name === '{closure}',
+    body: null, statics: null, isMethod: !!opts.method, cls: opts.cls || null, isClosure: decl.name.endsWith('{closure}'),
     required: params.reduce((r, p, i) => (!p.def && !p.variadic ? i + 1 : r), 0), // optional params before required ones are required
     simple: params.every((p) => !p.byRef && !p.variadic && !p.type && !p.promote),
   };
@@ -156,6 +156,7 @@ function bindParams(fn, f, args) {
     } else argCountError(fn, na, f);
     if (p.byRef) {
       if (!(v instanceof Ref)) v = new Ref(v);
+      if (p.type !== null && p.type !== undefined) { const c = coerceParam(fn, p, i, v.v, strict, f); if (c !== v.v) v.v = c; }
       f.vars[p.name] = v;
       if (p.promote) promoteParam(f, p, v.v);
       continue;
@@ -197,16 +198,14 @@ const BUILTIN_TYPE_ORDER = ['static', 'callable', 'object', 'array', 'string', '
 // builtins; `iterable` stays itself when keepIterable, else becomes Traversable|array
 export function typeParts(t, scope, keepIterable) {
   const names = [], builtins = new Set();
-  let iterable = false;
   for (const a of t.alts) {
     if (typeof a === 'object') names.push(a.inter);
-    else if (a === 'iterable') { if (keepIterable) builtins.add('iterable'); else { iterable = true; builtins.add('array'); } }
+    else if (a === 'iterable') { if (keepIterable) builtins.add('iterable'); else { names.push('Traversable'); builtins.add('array'); } }
     else if (BUILTIN_TYPE_ORDER.includes(a) || a === 'mixed') builtins.add(a);
     else if (scope && a === 'self') names.push(scope.name);
     else if (scope && a === 'parent' && scope.parent) names.push(scope.parent.name);
     else names.push(a);
   }
-  if (iterable) names.push('Traversable');
   const order = keepIterable ? ['iterable', ...BUILTIN_TYPE_ORDER] : BUILTIN_TYPE_ORDER;
   return names.concat(order.filter((b) => builtins.has(b) && !((b === 'false' || b === 'true') && builtins.has('bool'))));
 }
@@ -251,7 +250,7 @@ export function coerceType(type, v, strict, ctx) {
   const alts = type.alts;
   for (let i = 0; i < alts.length; i++) if (matchType(alts[i], v, ctx)) return v;
   const hasInt = alts.includes('int'), hasFloat = alts.includes('float'), hasStr = alts.includes('string');
-  const hasBool = alts.includes('bool') || (alts.includes('true') && toBool(v)) || (alts.includes('false') && !toBool(v));
+  const hasBool = alts.includes('bool'); // (true and false alone don't coerce)
   if (strict) {
     if (isInt(v) && hasFloat) return mkf(Number(v));
     return FAIL;
@@ -263,9 +262,10 @@ export function coerceType(type, v, strict, ctx) {
     return FAIL;
   }
   if (v instanceof Flt) {
-    if (hasInt && isFinite(v.v)) {
-      if (!Number.isInteger(v.v)) { if (!hasStr) { deprecated(`Implicit conversion from float ${fmtRepr(v.v)} to int loses precision`); return floatToInt(v.v); } }
-      else return floatToInt(v.v);
+    // (zend_parse_arg_long_weak: finite and in range; a fractional part is deprecated)
+    if (hasInt && isFinite(v.v) && v.v >= -9223372036854775808 && v.v < 9223372036854775808) {
+      if (!Number.isInteger(v.v)) deprecated(`Implicit conversion from float ${fmtRepr(v.v)} to int loses precision`);
+      return floatToInt(v.v);
     }
     if (hasStr) return toStr(v);
     if (hasBool) return toBool(v);
@@ -305,10 +305,18 @@ function internalNullArg(fn, p, i) {
 }
 function coerceParam(fn, p, i, v, strict, f) {
   if (v === null && !strict && fn.file === PRELUDE_FILE && !p.type.nullable) { const d = internalNullArg(fn, p, i); if (d !== undefined) return d; }
-  const r = coerceType(p.type, v, strict, { cls: fn.cls, sc: f ? f.sc : (rt.frame ? rt.frame.sc : null) });
+  const ctx = { cls: fn.cls, sc: f ? f.sc : (rt.frame ? rt.frame.sc : null) };
+  let r;
+  if (fn.file !== PRELUDE_FILE && (v instanceof Flt || typeof v === 'string') && !strict) {
+    // a user function's parameters are received in the callee: deprecations show its line
+    const sl = rt.line, sf = rt.file;
+    rt.line = fn.line; rt.file = fn.file;
+    try { r = coerceType(p.type, v, strict, ctx); } finally { rt.line = sl; rt.file = sf; }
+  } else r = coerceType(p.type, v, strict, ctx);
   if (r === FAIL) {
     const top = rt.stack[rt.stack.length - 1];
-    const where = (top && top.native === true) || fn.file === PRELUDE_FILE ? '' : `, called in ${rt.file} on line ${rt.line}`;
+    const viaBuiltin = top && top.native === true && !/^call_user_func(_array)?$/.test(top.fn.name);
+    const where = viaBuiltin || fn.file === PRELUDE_FILE ? '' : `, called in ${rt.file} on line ${rt.line}`;
     // (variadic arguments have no parameter name)
     throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1}${p.variadic ? '' : ` ($${p.name})`} must be of type ${typeStr(p.type, fn.cls)}, ${valueName(v)} given${where}`);
   }
@@ -318,10 +326,12 @@ function checkReturn(fn, v, f, none) {
   const t = fn.ret;
   if (t.alts.length === 1) {
     const a = t.alts[0];
-    if (a === 'void' || a === 'mixed') return v;
+    if (a === 'void') return v;
     if (a === 'never') throwError('TypeError', `${fnDisplayName(fn)}(): never-returning function must not implicitly return`);
+    if (a === 'mixed' && !none) return v;
   }
-  const r = coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
+  // an implicit return satisfies only void
+  const r = none ? FAIL : coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
   if (r === FAIL) {
     // static reads as the called class
     const shown = t.alts.includes('static') && (f.sc || fn.cls) ? { ...t, alts: t.alts.map((a) => (a === 'static' ? (f.sc || fn.cls).name : a)) } : t;

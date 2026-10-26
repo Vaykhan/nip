@@ -9,6 +9,9 @@ import { def, S } from './core.js';
 import { JsonErr } from './json.js';
 import { closureClass } from '../runtime/native-classes.js';
 
+const NOT_SERIALIZABLE = new Set(['generator', 'weakreference', 'weakmap', 'fiber', 'sensitiveparametervalue']);
+// classes marked ZEND_ACC_NOT_SERIALIZABLE (and anonymous classes)
+const notSerializable = (cls) => cls === closureClass || cls.anon || NOT_SERIALIZABLE.has(cls.lname) || cls.lname.startsWith('reflection');
 function serializeVal(v, seen) {
   if (v instanceof Ref) v = v.v;
   if (v === null || v === undefined) return 'N;';
@@ -26,7 +29,7 @@ function serializeVal(v, seen) {
   if (v instanceof PHPObject) {
     const cn = v.cls.name;
     if (v.cls.isEnum) { const t = cn + ':' + v.props.get('name'); return `E:${t.length}:"${t}";`; }
-    if (v.cls === closureClass) throwError('Exception', "Serialization of 'Closure' is not allowed");
+    if (notSerializable(v.cls)) throwError('Exception', `Serialization of '${v.cls.anon ? 'class@anonymous' : cn}' is not allowed`);
     if (v.cls.methods.has('__serialize')) {
       const data = callMethodName(v, '__serialize', []);
       if (!(data instanceof PHPArray)) throwError('TypeError', `${cn}::__serialize() must return an array`);
@@ -103,6 +106,7 @@ function unserializeVal(s, opts) {
         const allowed = opts.allowed;
         if (allowed === false || (Array.isArray(allowed) && !allowed.includes(cn.toLowerCase()))) cls = rt.classes.get('__php_incomplete_class');
         if (!cls) { cls = rt.classes.get('__php_incomplete_class'); }
+        if (notSerializable(cls)) throwError('Exception', `Unserialization of '${cls.name}' is not allowed`);
         const obj = new PHPObject(cls);
         vals.push(obj);
         if (t === 'C') {

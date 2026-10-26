@@ -199,13 +199,20 @@ export function declareClass(decl, f) {
       cls.methods = own;
     }
     cls.allowDynamic = (!!cls.parent && cls.parent.allowDynamic) || hasAttr(decl.attrs, 'allowdynamicproperties'); // inherited
-    cls.noDynamic = cls.readonly;
+    // (internal classes implemented in the prelude that don't allow dynamic properties)
+    cls.noDynamic = cls.readonly || (decl.file === PRELUDE_FILE && (lname === 'sensitiveparametervalue' || lname === 'weakmap'));
     for (const m of cls.methods.values()) {
       // an abstract method of a used trait counts as the overridden method
       const fromTrait = () => decl.traits.some((tu) => tu.names.some((tn) => { const t = lookupClass(tn, true); const tm = t && t.methods.get(m.name.toLowerCase()); return !!tm && tm.abstract; }));
       if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto && !fromTrait()) {
         throw new FatalSig(`${displayName(cls)}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
       }
+    }
+    if (!cls.isInterface && cls.ancestors.has('serializable') && decl.file !== PRELUDE_FILE) {
+      if (!cls.abstract && (!cls.methods.has('__serialize') || !cls.methods.has('__unserialize'))) {
+        deprecated(`${displayName(cls)} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)`);
+      }
+      if (cls.isEnum) throw new FatalSig(`Enum ${cls.name} cannot implement the Serializable interface`, decl.l, decl.file);
     }
     cls.hasDestructor = cls.methods.has('__destruct');
     cls.nipHooks = cls.methods.has('__nipget');

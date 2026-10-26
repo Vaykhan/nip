@@ -72,7 +72,7 @@ function caseObj(cls, name) {
   return constObj(cls, name, entry, cls.enumBacked ? 'ReflectionEnumBackedCase' : 'ReflectionEnumUnitCase');
 }
 function propObj(r) { return mk('ReflectionProperty', r, { name: r.name, class: r.cls.name }); }
-function fnName(fn) { return fn.isClosure ? '{closure}' : fn.name; }
+function fnName(fn) { return fn.name; }
 
 // ---------------------------------------------------------------- types
 // t: { alts, nullable } as produced by the parser

@@ -3,12 +3,13 @@
 import { PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
 import { toStr, valueName } from '../convert.js';
 import { rt } from './state.js';
-import { deprecated, throwError } from './errors.js';
-import { callFunction } from './functions.js';
+import { deprecated, throwError, warn } from './errors.js';
+import { callFunction, fnDisplayName } from './functions.js';
 import { canAccessMember, classExists, lookupClass } from './classes.js';
 import { argPos, deref } from '../lib/core.js';
 import { closureClass } from './native-classes.js';
 import { lazyFn } from './boot.js';
+import { isRefParam } from '../compiler/expr.js';
 
 // the $arguments array of __call()/__callStatic(): named arguments keep their names
 export function magicArgs(args) {
@@ -114,6 +115,29 @@ function resolveMethodCallable(cname, mname, f, throwIt) {
   const sc = (lc === 'parent' || lc === 'self') && f && f.sc ? f.sc : cls;
   return { fn: m.fn, thisObj: null, cls: m.cls, sc, closure: null };
 }
+// call_user_func(_array) passes plain values: a by-ref parameter gets a temporary reference with a warning
+export function refCallArgs(c, args) {
+  const fn = c.fn;
+  if (!fn.refs && (fn.refRest === null || fn.refRest === undefined)) return args;
+  const names = fn.params ? fn.params.map((p) => p.name) : fn.pnames || [];
+  for (let i = 0; i < args.length; i++) {
+    if (!isRefParam(fn, i) || args[i] instanceof Ref) continue;
+    if (fn.name !== 'array_multisort') { // (its parameters are "prefer-ref")
+      const pn = names[Math.min(i, names.length - 1)];
+      warn(`${fnDisplayName(fn)}(): Argument #${i + 1}${pn ? ' ($' + pn + ')' : ''} must be passed by reference, value given`);
+    }
+    args[i] = new Ref(args[i]);
+  }
+  if (args.named) {
+    for (const [k, v] of args.named) {
+      const i = names.indexOf(k);
+      if (i < 0 || !isRefParam(fn, i) || v instanceof Ref) continue;
+      warn(`${fnDisplayName(fn)}(): Argument #${i + 1} ($${k}) must be passed by reference, value given`);
+      args.named.set(k, new Ref(v));
+    }
+  }
+  return args;
+}
 export function invokeCallable(c, args) { return callFunction(c.fn, args, c.thisObj, c.cls, c.sc, c.closure); }
 export function isCallable(v, f) {
   if (v instanceof PHPObject) return v.cls === closureClass || v.cls.methods.has('__invoke');
@@ -157,7 +181,7 @@ export function boundCallback(cb) {
 }
 export function callableFn(cb) { // returns a JS function for repeated invocation
   const c = nativeCallback(cb);
-  return (...args) => callFunction(c.fn, args, c.thisObj, c.cls, c.sc, c.closure);
+  return (...args) => callFunction(c.fn, refCallArgs(c, args), c.thisObj, c.cls, c.sc, c.closure);
 }
 export function callableToClosure(v, f) {
   if (v instanceof PHPObject && v.cls === closureClass) return v;

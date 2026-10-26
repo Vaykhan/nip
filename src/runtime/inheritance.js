@@ -165,8 +165,8 @@ export function internalMethodSig(cls, lname) { return internalSig(lname, cls, c
 function sigStr(sg) {
   const scope = sg.printScope;
   let s = (sg.byRef ? '& ' : '') + sg.owner + '::' + sg.name + '(';
-  s += sg.params.map((p) => (p.type ? typeStr(p.type, scope, true) + ' ' : '') + (p.byRef ? '&' : '') + (p.variadic ? '...' : '') + '$' + p.name + (p.def !== null ? ' = ' + p.def : '')).join(', ') + ')';
-  if (sg.ret) s += ': ' + typeStr(sg.ret, scope, true);
+  s += sg.params.map((p) => (p.type ? typeStr(p.type, scope) + ' ' : '') + (p.byRef ? '&' : '') + (p.variadic ? '...' : '') + '$' + p.name + (p.def !== null ? ' = ' + p.def : '')).join(', ') + ')';
+  if (sg.ret) s += ': ' + typeStr(sg.ret, scope);
   return s;
 }
 
@@ -246,7 +246,7 @@ function checkProps(cls, decl, resolve) {
     if (pt) {
       const a = ct && typeSub(normType(ct, cls), cls, normType(pt, pi.cls), pi.cls, ctx);
       const b = ct && typeSub(normType(pt, pi.cls), pi.cls, normType(ct, cls), cls, ctx);
-      if (a === false || b === false || !ct) throw at(`Type of ${cn} must be ${typeStr(pt, null, true)} (as in class ${inhClsName(pi.cls)})`);
+      if (a === false || b === false || !ct) throw at(`Type of ${cn} must be ${typeStr(pt, null)} (as in class ${inhClsName(pi.cls)})`);
     } else if (ct) throw at(`Type of ${cn} must not be defined (as in class ${inhClsName(pi.cls)})`);
   }
 }
@@ -264,7 +264,7 @@ function checkConsts(cls, decl, resolve) {
     if (VIS_RANK[vis] > VIS_RANK[pvis]) throw at(`Access level to ${inhClsName(cls)}::${c.name} must be ${pvis} (as in ${pc.cls && pc.cls.isInterface ? 'interface' : 'class'} ${owner})${pvis === 'protected' ? ' or weaker' : ''}`);
     const pt = pc.decl && pc.decl.type;
     if (pt && (!c.type || typeSub(normType(c.type, cls), cls, normType(pt, pc.cls), pc.cls, ctx) === false)) {
-      throw at(`Type of ${inhClsName(cls)}::${c.name} must be compatible with ${owner}::${c.name} of type ${typeStr(pt, null, true)}`);
+      throw at(`Type of ${inhClsName(cls)}::${c.name} must be compatible with ${owner}::${c.name} of type ${typeStr(pt, null)}`);
     }
   }
 }

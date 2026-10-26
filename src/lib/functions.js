@@ -1,13 +1,12 @@
 // Function and class introspection: function_exists, call_user_func, class_exists, get_object_vars, ...
 
-import { cp, normKey, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, normKey, PHPArray, PHPObject } from '../values.js';
 import { toBool, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
-import { isRefParam } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
 import { FRAME_FUNCS } from '../runtime/functions.js';
-import { callValue, invokeCallable, nativeCallback } from '../runtime/callables.js';
+import { callValue, invokeCallable, nativeCallback, refCallArgs } from '../runtime/callables.js';
 import {
   canAccessMember, classConst, classExists, lookupClass, lookupStaticProp, objVisibleProps,
   propAccessible, propDefault
@@ -16,15 +15,14 @@ import { A, def, S } from './core.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
 def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); if (rt.disabledFns && rt.disabledFns.has(n.toLowerCase())) return false; return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
-def('call_user_func', (callback, ...args) => invokeCallable(nativeCallback(callback), args));
+def('call_user_func', (callback, ...args) => { const c = nativeCallback(callback); return invokeCallable(c, refCallArgs(c, args)); });
 def('call_user_func_array', (callback, args) => {
   const a = A(args);
   const pos = []; let named = null;
   for (const [k, v] of a.entries()) { if (typeof k === 'string') { if (!named) named = new Map(); named.set(k, v); } else pos.push(v); }
   const c = nativeCallback(callback);
-  // by-ref params: wrap values in refs
-  if (c.fn.refs) for (let i = 0; i < pos.length; i++) if (isRefParam(c.fn, i)) pos[i] = new Ref(pos[i]);
   if (named) pos.named = named;
+  refCallArgs(c, pos);
   return invokeCallable(c, pos);
 });
 def('forward_static_call', (callback, ...args) => callValue(callback, args));
@@ -111,8 +109,9 @@ def('class_uses', (object_or_class) => {
   for (const tu of c.decl ? c.decl.traits : []) for (const n of tu.names) { const t = lookupClass(n); out.set(t.name, t.name); }
   return out;
 });
-def('spl_object_id', (object) => object.id);
-def('spl_object_hash', (object) => object.id.toString(16).padStart(32, '0'));
+const objArg = (fn, v) => { if (!(v instanceof PHPObject)) throwError('TypeError', `${fn}(): Argument #1 ($object) must be of type object, ${typeOf(v)} given`); return v; };
+def('spl_object_id', (object) => objArg('spl_object_id', object).id);
+def('spl_object_hash', (object) => objArg('spl_object_hash', object).id.toString(16).padStart(32, '0'));
 def('spl_autoload_register', (callback = null, _throw = true, prepend = false) => {
   if (callback === null) return true;
   if (toBool(prepend)) rt.autoloaders.unshift(callback); else rt.autoloaders.push(callback);

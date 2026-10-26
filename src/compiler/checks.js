@@ -119,7 +119,7 @@ export function checkProgram(ast, file) {
             if (bad) fail(`Class constant ${n.name}::${c.name} cannot have type ${bad.toLowerCase()}`, c);
             const lit = literalValue(c.e);
             if (lit !== NOT_LITERAL && (lit === null ? !c.type.nullable && !c.type.alts.some((a) => a === 'mixed' || a === 'null') : !validDefault(c.type, lit))) {
-              fail(`Cannot use ${literalType(lit)} as value for class constant ${n.name}::${c.name} of type ${typeStr(c.type, null, true)}`, c);
+              fail(`Cannot use ${literalType(lit)} as value for class constant ${n.name}::${c.name} of type ${typeStr(c.type, null)}`, c);
             }
           }
         }
@@ -127,7 +127,7 @@ export function checkProgram(ast, file) {
         for (const p of n.props) {
           checkConstExpr(p.def, false);
           if (p.type && p.hasDef && p.def) {
-            const lit = literalValue(p.def), ts = typeStr(p.type, null, true);
+            const lit = literalValue(p.def), ts = typeStr(p.type, null);
             if (lit === null && !p.type.nullable && !p.type.alts.some((a) => a === 'mixed' || a === 'null')) {
               if (p.type.alts.some((a) => typeof a === 'object')) fail(`Cannot use null as default value for property ${n.name}::$${p.name} of type ${ts}`, p);
               fail(`Default value for property of type ${ts} may not be null. Use the nullable type ?${ts} to allow null default value`, p);
@@ -347,7 +347,7 @@ export function checkProgram(ast, file) {
     if (kind === 'interface' && n.traits.length) fail(`Cannot use traits inside of interfaces. ${n.traits[0].names[0]} is used in ${name}`, n.traits[0].l ? n.traits[0] : n);
     if (kind === 'enum' && n.enumType) {
       const bt = n.enumType.raw && n.enumType.raw.length === 1 ? String(n.enumType.raw[0]).toLowerCase() : 'mixed';
-      if (bt !== 'int' && bt !== 'string') fail(`Enum backing type must be int or string, ${typeStr(n.enumType, null, true)} given`, n);
+      if (bt !== 'int' && bt !== 'string') fail(`Enum backing type must be int or string, ${typeStr(n.enumType, null)} given`, n);
     }
     const consts = new Set();
     for (const c of [...n.consts, ...n.cases].sort((a, b) => a.seq - b.seq)) {
@@ -402,7 +402,7 @@ export function checkProgram(ast, file) {
         checkProp({ name: p.name, readonly: p.readonly || n.flags.readonly, type: p.type, static: false, hasDef: false }, m, true);
         if (p.type && p.type.alts.length === 1 && p.type.alts[0] === 'callable') fail(`Property ${name}::$${p.name} cannot have type callable`, m);
         // promoted parameters aren't implicitly nullable
-        if (p.type && p.def && p.def.k === 'Lit' && p.def.v === null && !p.type.raw.includes('null') && !p.type.q && !p.type.alts.includes('mixed')) fail(`Cannot use null as default value for parameter $${p.name} of type ${typeStr(p.type, null, true)}`, m);
+        if (p.type && p.def && p.def.k === 'Lit' && p.def.v === null && !p.type.raw.includes('null') && !p.type.q && !p.type.alts.includes('mixed')) fail(`Cannot use null as default value for parameter $${p.name} of type ${typeStr(p.type, null)}`, m);
       }
     }
   }
@@ -462,7 +462,7 @@ export function checkProgram(ast, file) {
       const seen = new Set();
       names.forEach((a, i) => {
         const k = ls[i];
-        if (seen.has(k)) fail(`Duplicate type ${BUILTIN_TYPES.has(k) ? k : a} is redundant`, n);
+        if (seen.has(k)) fail(`Duplicate type ${k === 'iterable' ? 'array' : BUILTIN_TYPES.has(k) ? k : a} is redundant`, n);
         seen.add(k);
       });
       if (seen.has('iterable') && seen.has('array')) fail('Duplicate type array is redundant', n);
@@ -470,7 +470,34 @@ export function checkProgram(ast, file) {
       if (seen.has('bool') && seen.has('false')) fail('Duplicate type false is redundant', n);
       if (seen.has('bool') && seen.has('true')) fail('Duplicate type true is redundant', n);
       if (seen.has('true') && seen.has('false')) fail('Type contains both true and false, bool should be used instead', n);
-      if (seen.has('object') && ls.some((k) => !BUILTIN_TYPES.has(k))) fail(`Type ${typeStr(t, null, true)} contains both object and a class type, which is redundant`, n);
+      if (seen.has('object') && (ls.some((k) => !BUILTIN_TYPES.has(k) || k === 'static') || raw.some((a) => typeof a === 'object'))) fail(`Type ${typeStr(t, null)} contains both object and a class type, which is redundant`, n);
+    }
+    // DNF types: duplicates within an intersection, and intersections implied by another member
+    const inters = raw.filter((a) => typeof a === 'object' && a.inter);
+    for (const a of inters) {
+      const seenI = new Set();
+      for (const m of a.inter) { if (seenI.has(m.toLowerCase())) fail(`Duplicate type ${m} is redundant`, n); seenI.add(m.toLowerCase()); }
+    }
+    if (inters.length) {
+      const set = (a) => new Set(a.inter.map((m) => m.toLowerCase()));
+      const str = (a) => a.inter.join('&');
+      raw.forEach((a, i) => {
+        for (let j = 0; j < i; j++) {
+          const b = raw[j];
+          const ai = typeof a === 'object' && a.inter, bi = typeof b === 'object' && b.inter;
+          if (ai && bi) {
+            const [small, large] = b.inter.length <= a.inter.length ? [b, a] : [a, b];
+            const ls2 = set(large);
+            if (small.inter.every((m) => ls2.has(m.toLowerCase()))) {
+              if (small.inter.length === large.inter.length) fail(`Type ${str(b)} is redundant with type ${str(a)}`, n);
+              fail(`Type ${str(large)} is redundant as it is more restrictive than type ${str(small)}`, n);
+            }
+          } else if (ai !== bi) {
+            const [inter, single] = ai ? [a, b] : [b, a];
+            if (typeof single === 'string' && set(inter).has(single.toLowerCase())) fail(`Type ${str(inter)} is redundant as it is more restrictive than type ${single}`, n);
+          }
+        }
+      });
     }
     const one = ls.length === 1 && raw.length === 1 ? ls[0] : null;
     if (where === 'param' && (one === 'void' || one === 'never')) fail(`${one} cannot be used as a parameter type`, n);
@@ -550,13 +577,14 @@ export function checkProgram(ast, file) {
       case 'Arr':
         for (const it of e.items) if (it) { checkConstExpr(it.key, allowNew); checkConstExpr(it.v, allowNew); }
         return;
+      case 'Prop': e.constExpr = true; break; // (only enum properties may be fetched)
     }
     for (const key in e) if (key !== 'l' && e[key] && typeof e[key] === 'object') checkConstExpr(e[key], allowNew);
   }
   function within(kind, fn) { path.push({ kind }); try { fn(); } finally { path.pop(); } }
   function visitFunction(fn) {
     const outer = scope, outerPath = path, outerCtx = fnCtx;
-    const closure = fn.name === '{closure}';
+    const closure = fn.name.endsWith('{closure}');
     fnCtx = { cls: methods.has(fn) ? curClass : closure && fnCtx ? fnCtx.cls : closure ? curClass : null, closure };
     for (const p of fn.params) if (p.type) checkType(p.type, fn, fnCtx);
     if (fn.ret) checkType(fn.ret, fn, fnCtx);
@@ -574,7 +602,7 @@ export function checkProgram(ast, file) {
     if (fn.isGen && fn.ret) {
       const { bits } = typeBits(fn.ret);
       const ok = bits.has('object') || fn.ret.alts.some((a) => typeof a === 'string' && /^(traversable|iterator|generator|iterable)$/i.test(a.replace(/^\\/, '')));
-      if (!ok) fail(`Generator return type must be a supertype of Generator, ${typeStr(fn.ret, null, true)} given`, fn);
+      if (!ok) fail(`Generator return type must be a supertype of Generator, ${typeStr(fn.ret, null)} given`, fn);
     }
     const unames = new Set();
     for (const u of fn.uses || []) {
@@ -598,7 +626,7 @@ export function checkProgram(ast, file) {
       checkConstExpr(p.def, true);
       if (p.type && p.def) {
         const lit = literalValue(p.def);
-        if (lit !== NOT_LITERAL && lit !== null && !validDefault(p.type, lit)) fail(`Cannot use ${literalType(lit)} as default value for parameter $${p.name} of type ${typeStr(p.type, null, true)}`, p.def.l ? p.def : fn);
+        if (lit !== NOT_LITERAL && lit !== null && !validDefault(p.type, lit)) fail(`Cannot use ${literalType(lit)} as default value for parameter $${p.name} of type ${typeStr(p.type, null)}`, p.def.l ? p.def : fn);
       }
     }
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);

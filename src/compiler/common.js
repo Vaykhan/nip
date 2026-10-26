@@ -1,13 +1,14 @@
 // Compiler shared pieces: control signals, warnings, array/string element reads.
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
-import { Flt, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
+import { Flt, fmtRepr, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
 import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callMethodName } from '../runtime/classes.js';
 
 export const BREAK1 = { t: 1, n: 1 }, CONT1 = { t: 2, n: 1 }, RETURN = { t: 3 };
+export const NULLSAFE_SHORT = { short: true }; // thrown by a nullsafe operator to skip the rest of its chain
 export const mkBreak = (n) => (n === 1 ? BREAK1 : { t: 1, n });
 export const mkCont = (n) => (n === 1 ? CONT1 : { t: 2, n });
 export const SUPERGLOBALS = new Set(['_SERVER', '_GET', '_POST', '_ENV', '_COOKIE', '_FILES', '_REQUEST', '_SESSION']);
@@ -146,6 +147,7 @@ export function strOffsetKey(key, isset) {
   }
   if (key === null || key === undefined || typeof key === 'boolean' || key instanceof Flt) {
     if (!isset) warn('String offset cast occurred');
+    else if (key instanceof Flt && Number(floatToInt(key.v)) !== key.v) deprecated(`Implicit conversion from float ${fmtRepr(key.v)} to int loses precision`);
     return key instanceof Flt ? floatToInt(key.v) : key ? 1 : 0;
   }
   if (isset) return undefined;

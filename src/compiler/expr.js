@@ -11,11 +11,11 @@ import {
   add, bitAnd, bitNot, bitOr, bitXor, concat, dec, div, inc, mod, mul, pow, shl, shr, sub
 } from '../arith.js';
 import { fromBytes } from '../utf8.js';
-import { arrowFreeVars, isFresh, isLvalNode, SUPERGLOBALS, warnUndefVar } from './common.js';
+import { arrowFreeVars, CALL_KINDS, isFresh, isLvalNode, NULLSAFE_SHORT, SUPERGLOBALS, warnUndefVar, writableArrIn } from './common.js';
 import { cClassRef, cLval } from './lvalue.js';
 import { iterateObject } from './stmt.js';
 import { rt } from '../runtime/state.js';
-import { deprecated, notice, PRELUDE_FILE, setPrevious, throwError } from '../runtime/errors.js';
+import { deprecated, notice, PRELUDE_FILE, setPrevious, throwError, warn } from '../runtime/errors.js';
 import {
   callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
 } from '../runtime/functions.js';
@@ -23,7 +23,7 @@ import {
   callableToClosure, findMethod, magicArgs, makeClosure, methodClosure, resolveCallable
 } from '../runtime/callables.js';
 import {
-  canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
+  canAccessMember, classConst, cloneObject, declareClass, instantiate, readProp, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
 import { dropRef, frameExit, gcCheck } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
@@ -58,7 +58,10 @@ export function cValue(n) { // expression whose value will be stored: apply copy
 export function cExpr(n) {
   const fn = EXPR[n.k];
   if (!fn) throw new FatalSig(`Unsupported expression type ${n.k}`, n.l);
-  return fn(n);
+  return n.chainTop ? nullsafeChain(fn(n)) : fn(n);
+}
+export function nullsafeChain(E) {
+  return (f) => { try { return E(f); } catch (e) { if (e === NULLSAFE_SHORT) return null; throw e; } };
 }
 
 const EXPR = {
@@ -92,7 +95,18 @@ const EXPR = {
   },
   VarVar(n) { return cLval(n).get; },
   Index(n) { return cLval(n).get; },
-  Prop(n) { return cLval(n).get; },
+  Prop(n) {
+    if (!n.constExpr) return cLval(n).get;
+    const O = cExpr(n.o), N = typeof n.name === 'string' ? null : cExpr(n.name);
+    return (f) => {
+      const o = O(f);
+      if (n.nullsafe && (o === null || o === undefined)) { if (n.short) throw NULLSAFE_SHORT; return null; }
+      const name = N ? toStr(N(f)) : n.name;
+      if (!(o instanceof PHPObject)) { warn(`Attempt to read property "${name}" on ${o === null || o === undefined ? 'null' : valueName(o)}`); return null; }
+      if (!o.cls.isEnum) throwError('Error', 'Fetching properties on non-enums in constant expressions is not allowed');
+      return readProp(o, name, f);
+    };
+  },
   SProp(n) { return cLval(n).get; },
   List() { throw new FatalSig('Cannot use list() outside assignment context'); },
   Arr(n) {
@@ -165,6 +179,20 @@ const EXPR = {
   Assign(n) {
     if (n.t.k === 'List') {
       const T = cLval(n.t);
+      if (T.hasRef && CALL_KINDS.has(n.e.k)) {
+        // a call's result can only be destructured by reference when the function returns one
+        const E = cExpr(n.e);
+        return (f) => {
+          rt.lastRetRef = null;
+          const v = E(f);
+          const r = rt.lastRetRef; rt.lastRetRef = null;
+          if (r !== null && r !== NOREF && r.v === v) { T.listAssign(f, v, { arr: () => writableArrIn(r) }); return v; }
+          notice('Attempting to set reference to non referenceable value');
+          const tmp = new Ref(v instanceof PHPArray ? v.clone() : v);
+          T.listAssign(f, v, { arr: () => writableArrIn(tmp) });
+          return v;
+        };
+      }
       if (T.hasRef) {
         const S = cLval(n.e);
         return (f) => { const v = S.get(f); T.listAssign(f, v, S); return v; };
@@ -278,7 +306,10 @@ const EXPR = {
     }
     // constant folding for pure literal operands
     if (n.a.k === 'Lit' && n.b.k === 'Lit' && ['.', '+', '-', '*', '|', '&', '<<', '>>'].includes(op) && (isNum(n.a.v) || typeof n.a.v === 'string') && (isNum(n.b.v) || typeof n.b.v === 'string')) {
-      if (op === '.' || (isNum(n.a.v) && isNum(n.b.v))) { const v = BINOPS[op](n.a.v, n.b.v); return () => v; }
+      // (not when evaluating would raise a diagnostic: bitwise ops on fractional floats, negative shifts)
+      const bitwise = op === '|' || op === '&' || op === '<<' || op === '>>';
+      const safe = !bitwise || (isInt(n.a.v) && isInt(n.b.v) && !((op === '<<' || op === '>>') && n.b.v < 0));
+      if (op === '.' || (isNum(n.a.v) && isNum(n.b.v) && safe)) { const v = BINOPS[op](n.a.v, n.b.v); return () => v; }
     }
     switch (op) {
       case '+': return (f) => { const a = A(f), b = B(f); if (typeof a === 'number' && typeof b === 'number') { const r = a + b; if (r <= MAXS && r >= -MAXS) return r; } return add(a, b); };
@@ -481,7 +512,7 @@ const EXPR = {
     return (f) => {
       const o = O(f);
       if (!(o instanceof PHPObject)) {
-        if (nullsafe && (o === null || o === undefined)) return null;
+        if (nullsafe && (o === null || o === undefined)) { if (n.short) throw NULLSAFE_SHORT; return null; }
         let name = sname;
         if (!name) { const nv = N(f); name = typeof nv === 'string' ? nv : '{closure}'; }
         throwError('Error', `Call to a member function ${name}() on ${valueName(o)}`);

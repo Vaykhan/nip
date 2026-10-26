@@ -6,6 +6,11 @@ import assert from 'node:assert/strict';
 import { run } from '../../src/index.js';
 
 const CASES = [
+  ['interface A {} interface B {} function t(): (A&B)|A {}', 'Type A&B is redundant as it is more restrictive than type A'],
+  ['interface A {} interface B {} interface C {} function t(): (A&B)|(A&B&C) {}', 'Type A&B&C is redundant as it is more restrictive than type A&B'],
+  ['interface A {} interface B {} function t(): object|(A&B) {}', 'Type (A&B)|object contains both object and a class type, which is redundant'],
+  ['class T { function f(): static|object {} }', 'Type static|object contains both object and a class type, which is redundant'],
+  ['function t(): iterable|iterable {}', 'Duplicate type array is redundant'],
   ['$a = []; echo $a[];', 'Cannot use [] for reading'],
   ['$a = []; unset($a[]);', 'Cannot use [] for unsetting'],
   ['$a = []; isset($a[]);', 'Cannot use [] for reading'],

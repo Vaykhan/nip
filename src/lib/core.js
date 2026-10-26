@@ -71,7 +71,15 @@ export const I = (v) => {
   }
   if (v instanceof Ref) v = v.v;
   if (v instanceof PHPArray || v instanceof PHPObject) argTypeErr('int', v);
-  if (typeof v === 'string') { const n = numericStr(v); if (n === null) { const m = NUM_LEAD.exec(v); if (!m) argTypeErr('int', v); } }
+  if (typeof v === 'string') {
+    const n = numericStr(v);
+    if (n === null) { const m = NUM_LEAD.exec(v); if (!m) argTypeErr('int', v); }
+    else if (n instanceof Flt) {
+      if (!isFinite(n.v) || n.v >= 9223372036854775808 || n.v < -9223372036854775808) argTypeErr('int', v);
+      if (!Number.isInteger(n.v)) deprecated(`Implicit conversion from float-string "${v}" to int loses precision`);
+      return floatToInt(n.v);
+    }
+  }
   return toInt(v);
 };
 export const N = (v) => { // JS number from int|float param

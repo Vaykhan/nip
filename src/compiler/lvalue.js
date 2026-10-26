@@ -3,10 +3,10 @@
 import { cp, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
 import { toBool, toStr, valueName } from '../convert.js';
 import {
-  isLvalNode, keyRepr, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
+  isLvalNode, keyRepr, NULLSAFE_SHORT, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
   writableArrIn
 } from './common.js';
-import { cExpr } from './expr.js';
+import { cExpr, nullsafeChain } from './expr.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, notice, throwError, warn } from '../runtime/errors.js';
 import { coercePropType } from '../runtime/functions.js';
@@ -17,6 +17,14 @@ import {
 import { dropRef, gcCheck } from '../runtime/gc.js';
 
 export function cLval(n) {
+  if (n.chainTop) {
+    const lv = cLvalNode(n);
+    lv.get = nullsafeChain(lv.get); lv.getq = nullsafeChain(lv.getq); if (lv.isset) lv.isset = nullsafeChain(lv.isset);
+    return lv;
+  }
+  return cLvalNode(n);
+}
+function cLvalNode(n) {
   switch (n.k) {
     case 'Var': return typeof n.name === 'string' ? lvVar(n.name, n) : lvVarVar({ k: 'VarVar', e: n.name }, n);
     case 'VarVar': return lvVarVar(n);
@@ -296,11 +304,12 @@ function arrayAccessSet(o, k, v) {
 function lvProp(n) {
   const O = isLvalNode(n.o) ? cLval(n.o) : lvTemp(n.o);
   const N = typeof n.name === 'string' ? null : cExpr(n.name);
-  const lv = propOps(O, N, typeof n.name === 'string' ? n.name : null, n.nullsafe);
+  const nullsafe = n.nullsafe ? (n.short ? 'short' : true) : false;
+  const lv = propOps(O, N, typeof n.name === 'string' ? n.name : null, nullsafe);
   lv.place = (f) => {
     const op = O.place ? O.place(f) : constPlace(O.get(f));
     const name = N ? toStr(N(f)) : null;
-    return propOps(op, null, N ? name : n.name, n.nullsafe);
+    return propOps(op, null, N ? name : n.name, nullsafe);
   };
   return lv;
 }
@@ -317,7 +326,7 @@ function propOps(O, N, sname, nullsafe) {
     get(f) {
       const o = O.get(f);
       if (o instanceof PHPObject) return readProp(o, nm(f), f);
-      if ((o === null || o === undefined)) { if (nullsafe) return null; warn(`Attempt to read property "${nm(f)}" on null`); return null; }
+      if ((o === null || o === undefined)) { if (nullsafe) { if (nullsafe === 'short') throw NULLSAFE_SHORT; return null; } warn(`Attempt to read property "${nm(f)}" on null`); return null; }
       warn(`Attempt to read property "${nm(f)}" on ${valueName(o)}`); return null;
     },
     getq(f) {
@@ -405,7 +414,11 @@ function lvList(n) {
         const c = srcLv.arr(f);
         if (c instanceof PHPObject) {
           if (!c.cls.ancestors.has('arrayaccess')) throwError('Error', `Cannot use object of type ${c.cls.name} as array`);
+          rt.lastRetRef = null;
           const val = callMethodName(c, 'offsetGet', [key]);
+          const r = rt.lastRetRef; rt.lastRetRef = null;
+          // (&offsetGet() returns a reference to bind to)
+          if (r !== null && r !== NOREF && r.v === val) { it.L.bind(f, r); continue; }
           notice(`Indirect modification of overloaded element of ${c.cls.name} has no effect`);
           it.L.bind(f, new Ref(cp(val)));
           continue;
