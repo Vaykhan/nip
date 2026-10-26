@@ -428,7 +428,9 @@ const STMT = {
   },
   ConstDecl(n) {
     const items = n.items.map((i) => ({ name: i.name, E: cExpr(i.e) }));
+    const l = n.l;
     return (f) => {
+      rt.line = l;
       for (const it of items) {
         if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined`); continue; }
         const v = it.E(f);

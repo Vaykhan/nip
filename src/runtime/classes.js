@@ -591,6 +591,7 @@ function guardEnter(obj, kind, name) {
   return true;
 }
 function guardLeave(obj, kind, name) { obj.guards.delete(kind + name); }
+const guardFree = (obj, kind, name) => !obj.guards || !obj.guards.has(kind + name);
 export function magicGet(obj, name) {
   const m = obj.cls.methods.get('__get');
   if (!m || !guardEnter(obj, 'g', name)) return undefined;
@@ -684,18 +685,33 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+// an inaccessible property handled by __get: a key no slot has, so callers take the magic path
+const MAGIC_KEY = '\0\0magic';
 function resolvePropKey(obj, name, f, forWrite) {
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
   if (info === undefined) return [name, null];
-  if (info.vis !== 'public' && !propAccessible(info, scope)) throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
+  if (info.vis !== 'public' && !propAccessible(info, scope)) {
+    if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
+    throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
+  }
   if (forWrite && info.readonly && obj.props.has(info.key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
   const [key, info] = resolvePropKey(obj, name, f, true);
-  if (!info && !obj.props.has(key)) newDynamicProp(obj, name);
+  if (!info && !obj.props.has(key)) {
+    // a property __get handles can't be bound to a reference
+    if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) {
+      rt.lastRetRef = null;
+      const r = magicGet(obj, name);
+      const rr = rt.lastRetRef; rt.lastRetRef = null;
+      if (r !== undefined && (rr === null || rr === NOREF)) notice(`Indirect modification of overloaded property ${obj.cls.name}::$${name} has no effect`);
+      throwError('Error', 'Cannot assign by reference to overloaded object');
+    }
+    newDynamicProp(obj, name);
+  }
   obj.props.set(key, ref);
 }
 // PHP 8.2: creating an undeclared property is deprecated unless the class (or a parent) has
