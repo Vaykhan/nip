@@ -74,10 +74,12 @@ export function throwError(clsName, msg, code) {
 // zend_exception_set_previous: prev goes at the end of obj's chain of previous exceptions
 export function setPrevious(obj, prev) {
   if (!prev || obj === prev) return;
+  const prevOf = (o) => { const p = o.props.get('previous'); return p instanceof Ref ? p.v : p; };
+  // (zend_exception_set_previous: nothing is done when that would make the chain a cycle)
   let cur = obj;
   for (let n = 0; n < 10000; n++) {
-    let p = cur.props.get('previous');
-    if (p instanceof Ref) p = p.v;
+    for (let a = prevOf(prev), m = 0; a instanceof PHPObject && m < 10000; a = prevOf(a), m++) if (a === cur) return;
+    const p = prevOf(cur);
     if (p === prev) return;
     if (!(p instanceof PHPObject)) { cur.props.set('previous', prev); return; }
     cur = p;

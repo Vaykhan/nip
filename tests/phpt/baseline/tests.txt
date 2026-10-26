@@ -223,6 +223,7 @@ tests/classes/tostring_004.phpt
 tests/classes/type_hinting_001.phpt
 tests/classes/type_hinting_002.phpt
 tests/classes/type_hinting_003.phpt
+tests/classes/type_hinting_004.phpt
 tests/classes/type_hinting_005a.phpt
 tests/classes/type_hinting_005c.phpt
 tests/classes/type_hinting_005d.phpt

@@ -335,6 +335,7 @@ ext/standard/tests/array/array_values_variation_64bit.phpt
 ext/standard/tests/array/array_walk.phpt
 ext/standard/tests/array/array_walk_basic1.phpt
 ext/standard/tests/array/array_walk_basic2.phpt
+ext/standard/tests/array/array_walk_closure.phpt
 ext/standard/tests/array/array_walk_error2.phpt
 ext/standard/tests/array/array_walk_object2.phpt
 ext/standard/tests/array/array_walk_recursive.phpt
@@ -426,6 +427,7 @@ ext/standard/tests/array/bug50006_1.phpt
 ext/standard/tests/array/bug50006_2.phpt
 ext/standard/tests/array/bug51552.phpt
 ext/standard/tests/array/bug52534.phpt
+ext/standard/tests/array/bug52719.phpt
 ext/standard/tests/array/bug61058.phpt
 ext/standard/tests/array/bug61730.phpt
 ext/standard/tests/array/bug61967.phpt
@@ -464,6 +466,7 @@ ext/standard/tests/array/bug79868.phpt
 ext/standard/tests/array/bug79930.phpt
 ext/standard/tests/array/compact_basic.phpt
 ext/standard/tests/array/compact_order.phpt
+ext/standard/tests/array/compact_this.phpt
 ext/standard/tests/array/compact_variation2.phpt
 ext/standard/tests/array/count_basic.phpt
 ext/standard/tests/array/count_recursive.phpt
@@ -1052,6 +1055,7 @@ ext/standard/tests/general_functions/bug31190.phpt
 ext/standard/tests/general_functions/bug35229.phpt
 ext/standard/tests/general_functions/bug36011.phpt
 ext/standard/tests/general_functions/bug41518.phpt
+ext/standard/tests/general_functions/bug41970.phpt
 ext/standard/tests/general_functions/bug42272.phpt
 ext/standard/tests/general_functions/bug47857.phpt
 ext/standard/tests/general_functions/bug49847.phpt
@@ -1272,6 +1276,7 @@ ext/standard/tests/math/pow_basic_64bit.phpt
 ext/standard/tests/math/rad2deg_basic.phpt
 ext/standard/tests/math/rad2deg_variation.phpt
 ext/standard/tests/math/round.phpt
+ext/standard/tests/math/round_basic.phpt
 ext/standard/tests/math/round_basiclong_64bit.phpt
 ext/standard/tests/math/round_bug71201.phpt
 ext/standard/tests/math/round_large_exp.phpt
@@ -1321,16 +1326,20 @@ ext/standard/tests/serialize/bug46882.phpt
 ext/standard/tests/serialize/bug55798.phpt
 ext/standard/tests/serialize/bug62373.phpt
 ext/standard/tests/serialize/bug62836_1.phpt
+ext/standard/tests/serialize/bug64146.phpt
 ext/standard/tests/serialize/bug64354_1.phpt
 ext/standard/tests/serialize/bug64354_2.phpt
+ext/standard/tests/serialize/bug64354_3.phpt
 ext/standard/tests/serialize/bug68594.phpt
 ext/standard/tests/serialize/bug69139.phpt
 ext/standard/tests/serialize/bug69210.phpt
+ext/standard/tests/serialize/bug71940.phpt
 ext/standard/tests/serialize/bug73052.phpt
 ext/standard/tests/serialize/bug73154.phpt
 ext/standard/tests/serialize/bug76300.phpt
 ext/standard/tests/serialize/bug78438.phpt
 ext/standard/tests/serialize/overwrite_untyped_ref.phpt
+ext/standard/tests/serialize/ref_to_failed_serialize.phpt
 ext/standard/tests/serialize/serialization_error_002.phpt
 ext/standard/tests/serialize/serialization_objects_001.phpt
 ext/standard/tests/serialize/serialization_objects_003.phpt
@@ -1344,6 +1353,7 @@ ext/standard/tests/serialize/sleep_deref.phpt
 ext/standard/tests/serialize/sleep_uninitialized_typed_prop.phpt
 ext/standard/tests/serialize/typed_property_ref_overwrite.phpt
 ext/standard/tests/serialize/unserializeS.phpt
+ext/standard/tests/serialize/unserialize_classes.phpt
 ext/standard/tests/serialize/unserialize_neg_iv_edge_cases.phpt
 ext/standard/tests/serialize/unserialize_ref_to_overwritten_declared_prop.phpt
 ext/standard/tests/serialize/unserialize_subclasses.phpt
