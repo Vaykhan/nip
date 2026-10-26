@@ -111,7 +111,10 @@ function runDestructor(o) {
   if (i >= 0) rt.destructibles.splice(i, 1);
   if (o.cls.nativeDestruct) { o.cls.nativeDestruct(o); return; } // internal classes (Fiber)
   const m = o.cls.methods.get('__destruct');
-  if (m) callFunction(m.fn, [], o, m.cls, o.cls, null);
+  if (m) {
+    rt.fiberSwitchBlocked++; // destructors can't switch fibers
+    try { callFunction(m.fn, [], o, m.cls, o.cls, null); } finally { rt.fiberSwitchBlocked--; }
+  }
   if (!rt.inShutdown) idCands.add(o);
 }
 export function gcCollect(list, extra) {

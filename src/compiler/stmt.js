@@ -96,7 +96,8 @@ export function tick(every) {
   for (const t of rt.tickFns.slice()) {
     if (t.calling) continue;
     t.calling = true;
-    try { callValue(t.cb, t.args); } finally { t.calling = false; }
+    rt.fiberSwitchBlocked++; // nor can tick functions
+    try { callValue(t.cb, t.args); } finally { t.calling = false; rt.fiberSwitchBlocked--; }
   }
 }
 

@@ -76,6 +76,7 @@ export function bootFibers() {
       },
       start(self, args) {
         const st = state(self);
+        if (rt.fiberSwitchBlocked) fiberError('Cannot switch fibers in current execution context');
         if (st.status !== 'init') fiberError('Cannot start a fiber that has already been started');
         const c = resolveCallable(st.cb, rt.frame, true);
         st.gen = callFunctionG(c.fn, args.map((a) => (a instanceof Ref ? a.v : a)), c.thisObj, c.cls, c.sc, c.closure);
@@ -83,12 +84,14 @@ export function bootFibers() {
       },
       resume(self, args) {
         const st = state(self);
+        if (rt.fiberSwitchBlocked) fiberError('Cannot switch fibers in current execution context');
         if (st.status !== 'suspended') fiberError('Cannot resume a fiber that is not suspended');
         const v = arg(args, 0);
         return drive(self, (g) => g.next(v));
       },
       throw(self, args) {
         const st = state(self);
+        if (rt.fiberSwitchBlocked) fiberError('Cannot switch fibers in current execution context');
         if (st.status !== 'suspended') fiberError('Cannot resume a fiber that is not suspended');
         const e = arg(args, 0);
         return drive(self, (g) => g.next(new GenThrow(e)));
@@ -105,6 +108,7 @@ export function bootFibers() {
       // reached only outside fiber-mode code: from a builtin's callback or a generator body
       'static suspend'() {
         if (!rt.currentFiber) fiberError('Cannot suspend outside of a fiber');
+        if (rt.fiberSwitchBlocked) fiberError('Cannot switch fibers in current execution context');
         fiberError('Cannot suspend a fiber from a callback called by a builtin function or from a generator (not supported by NIP)');
       },
       'static getCurrent': () => rt.currentFiber || null,

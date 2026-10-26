@@ -599,14 +599,13 @@ export function readProp(obj, name, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
-  }
+  } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
   if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipget', [name]); if (r !== undefined) return r; }
   const r = magicGet(obj, name);
   if (r !== undefined) return r;
   if (info && info.type) throwError('Error', `Typed property ${info.cls.name}::$${name} must not be accessed before initialization`);
-  if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   warn(`Undefined property: ${obj.cls.name}::$${name}`);
   return null;
 }
@@ -654,7 +653,7 @@ export function writeProp(obj, name, v, f) {
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
     newDynamicProp(obj, name);
-  }
+  } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
   if (slot !== v && slot !== null && typeof slot === 'object' && !(slot instanceof Ref)) { dropRef(slot); if (slot instanceof PHPObject && slot.cls.hasDestructor) gcCheck(slot); }

@@ -479,7 +479,8 @@ const EXPR = {
       if (scope !== null && scope.privMethods !== null) { const pm = scope.privMethods.get(ln); if (pm !== undefined && o.cls.ancestors.has(scope.lname)) m = pm; }
       if (m === undefined) m = o.cls.methods.get(ln);
       if (m !== undefined && (m.vis === 'public' || canAccessMember(m, f.cls))) {
-        const args = A(f, m.fn);
+        // Closure::__invoke() passes arguments as the closure takes them (by reference too)
+        const args = A(f, o.cls === closureClass && ln === '__invoke' ? o.fn : m.fn);
         if (m.static) return call(m.fn, args, null, m.cls, o.cls, null);
         return call(m.fn, args, o, m.cls, o.cls, null);
       }
