@@ -309,7 +309,7 @@ function bindTraits(cls, decl) {
       const t = lookupClass(n, false, 'Trait');
       if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
       if (cls.isEnum) {
-        const atUse = (msg) => new FatalSig(msg, tu.l || decl.l, decl.file);
+        const atUse = (msg) => new FatalSig(msg, decl.l, decl.file);
         if (t.slots.size || t.sprops.size) throw atUse(`Enum ${cls.name} cannot include properties`);
         for (const [ln, m] of t.methods) if (ENUM_FORBIDDEN_MAGIC.has(ln)) throw atUse(`Enum ${cls.name} cannot include magic method ${m.name}`);
       }

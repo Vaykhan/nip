@@ -117,11 +117,35 @@ export function captureTrace(withArgs) {
     if (s.fn.isMethod && (s.cls || s.this)) { fr.set('class', (s.fn.cls || s.cls || s.this.cls).name.split('\0')[0]); fr.set('type', s.this ? '->' : '::'); }
     if (withArgs !== false) {
       const a = s.args || [];
-      fr.set('args', PHPArray.from(Array.from(a, (x) => (x instanceof Ref ? x.v : x))));
+      const vals = Array.from(a, (x) => (x instanceof Ref ? x.v : x));
+      const sens = sensitiveParams(s.fn);
+      if (sens) vals.forEach((v, i) => { if (sens.has(Math.min(i, sens.variadic ?? i))) vals[i] = sensitiveValue(v); });
+      fr.set('args', PHPArray.from(vals));
     }
     tr.push(fr);
   }
   return tr;
+}
+// #[\SensitiveParameter] parameters: their arguments show in traces wrapped in a
+// SensitiveParameterValue (a variadic one covers all its arguments)
+function sensitiveParams(fn) {
+  if (!fn || !fn.decl || !fn.decl.params) return null;
+  if (fn.sensitive !== undefined) return fn.sensitive;
+  let set = null;
+  fn.decl.params.forEach((p, i) => {
+    if (!(p.attrs || []).some((a) => a.name.replace(/^\\/, '').toLowerCase() === 'sensitiveparameter')) return;
+    if (!set) set = new Set();
+    set.add(i);
+    if (p.variadic) set.variadic = i;
+  });
+  return (fn.sensitive = set);
+}
+function sensitiveValue(v) {
+  const cls = lookupClass('SensitiveParameterValue');
+  const o = new PHPObject(cls);
+  initProps(o);
+  o.props.set('\0SensitiveParameterValue\0value', v);
+  return o;
 }
 // Code in src/prelude/*.php runs as if it were internal: errors raised there are reported at
 // the user's call site, and calls between prelude functions don't appear in traces.

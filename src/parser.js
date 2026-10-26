@@ -58,7 +58,7 @@ export class Parser {
     return attrs;
   }
   // "syntax error, unexpected <token>" with the token described as PHP's grammar names it
-  unexpected(tk) {
+  unexpected(tk, expecting) {
     tk = tk || this.tok;
     let d;
     switch (tk.t) {
@@ -80,7 +80,8 @@ export class Parser {
       case 'float': d = `floating-point number "${tk.raw ?? tk.v}"`; break;
       default: d = `token "${tk.v}"`;
     }
-    this.error(`syntax error, unexpected ${d}`, tk.heredoc ? { l: tk.l + 1 } : tk);
+    // (expecting: what PHP's grammar lists where only a few tokens may follow)
+    this.error(`syntax error, unexpected ${d}${expecting ? ', expecting ' + expecting : ''}`, tk.heredoc ? { l: tk.l + 1 } : tk);
   }
   isOp(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'op' && t.v === v; }
   isId(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'id' && t.v.toLowerCase() === v; }
@@ -373,16 +374,22 @@ export class Parser {
               this.accept('\\');
               const prefix = name.replace(/\\$/, '');
               this.expect('{');
+              const startExpect = kind === 'class' ? 'identifier or namespaced name or "function" or "const"' : 'identifier or namespaced name';
+              let first = true;
               do {
-                if (this.isOp('}')) break;
+                if (this.isOp('}')) { if (first) this.unexpected(this.tok, startExpect); break; }
+                if (this.isOp(',') || (this.tok.t === 'id' && this.tok.v[0] === '\\')) this.unexpected(this.tok, first ? startExpect : '"}"');
                 let k2 = kind;
-                if (this.isId('function')) { this.p++; k2 = 'function'; } else if (this.isId('const')) { this.p++; k2 = 'const'; }
+                if (kind === 'class') { if (this.isId('function')) { this.p++; k2 = 'function'; } else if (this.isId('const')) { this.p++; k2 = 'const'; } }
+                else if (this.isId('function') || this.isId('const')) this.unexpected(this.tok, first ? startExpect : '"}"');
+                first = false;
                 const sub = this.ident();
                 let alias = sub.split('\\').pop();
                 if (this.acceptId('as')) alias = this.ident();
                 this.addUse(k2, prefix + '\\' + sub, alias);
               } while (this.accept(','));
-              this.expect('}');
+              if (!this.isOp('}')) this.unexpected(this.tok, '"}"');
+              this.p++;
             } else {
               let alias = name.split('\\').pop();
               if (this.acceptId('as')) alias = this.ident();
@@ -922,6 +929,7 @@ export class Parser {
         args.push({ e: this.parseExpr(), name });
       } else args.push({ e: this.parseExpr() });
       if (!this.accept(',')) break;
+      if (this.isOp(',')) this.unexpected(this.tok, '")"'); // f($a,,$b)
     }
     this.expect(')');
     return args;

@@ -7,7 +7,7 @@ import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
-import { checkTimeLimit, notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
+import { checkTimeLimit, notice, setPrevious, throwError, toThrowSig, warn } from '../runtime/errors.js';
 import { compilingByRef, declareFunction } from '../runtime/functions.js';
 import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
 import { caughtTemps, dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
@@ -101,6 +101,12 @@ export function tick(every) {
   }
 }
 
+// a finally block run while exception `pending` unwinds: an exception it throws gets the pending
+// one as previous (zend_exception_set_previous)
+function finallyAfter(F, f, pending) {
+  if (!pending) return F(f);
+  try { return F(f); } catch (e) { const s = toThrowSig(e); if (s && s.obj !== pending.obj) setPrevious(s.obj, pending.obj); throw e; }
+}
 const STMT = {
   Block(n) { return cStmts(n.body); },
   Echo(n) {
@@ -369,15 +375,16 @@ const STMT = {
             if (c.v) { const r = f.vars[c.v]; if (r) { const old = r.v; r.v = obj; if (old !== obj && old !== null && typeof old === 'object') dropRef(old); } else f.vars[c.v] = new Ref(obj); }
             handled = true;
             if (F) {
-              try { res = c.B(f); }
-              finally { const fr = F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+              let pending = null;
+              try { res = c.B(f); } catch (e2) { pending = toThrowSig(e2); throw e2; }
+              finally { const fr = finallyAfter(F, f, pending); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
               return res;
             }
             return c.B(f);
           }
         }
         if (!handled) {
-          if (F) { const fr = F(f); if (fr !== undefined) return fr; }
+          if (F) { const fr = finallyAfter(F, f, sig); if (fr !== undefined) return fr; }
           throw sig;
         }
       }
