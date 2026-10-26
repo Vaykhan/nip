@@ -66,7 +66,7 @@ export function checkProgram(ast, file) {
     try { raiseFn(msg); } finally { rt.file = prevFile; rt.line = prevLine; }
   };
   const compileDeprecated = atNode(deprecated), compileWarning = atNode(warn);
-  for (const w of ast.compileWarnings || []) compileWarning(w.msg, w); // found by the parser
+  for (const w of ast.compileWarnings || []) (w.deprecated ? compileDeprecated : compileWarning)(w.msg, w); // found by the lexer and parser
   // goto: labels and gotos of the current function, and the loops/switches/finally blocks
   // enclosing the statement being visited
   let scope = newScope(), path = [];

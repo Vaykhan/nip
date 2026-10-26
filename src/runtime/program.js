@@ -4,7 +4,7 @@ import pathMod from 'node:path';
 import fs from 'node:fs';
 import { FatalSig, ParseErr, ThrowSig } from '../values.js';
 import { lex } from '../lexer.js';
-import { parsePHP, Parser } from '../parser.js';
+import { mergeCompileWarnings, parsePHP, Parser } from '../parser.js';
 import { RETURN } from '../compiler/common.js';
 import { checkProgram } from '../compiler/checks.js';
 import { cStmts } from '../compiler/stmt.js';
@@ -103,7 +103,7 @@ export function doEval(code, f, st) {
       const toks = lex('<?php ' + code, file);
       const p = new Parser(toks, file, Object.assign({ fnStack: [], clsStack: [], anonCount: 0, strict: false }, st));
       ast = p.parseProgram();
-      ast.compileWarnings = p.st.compileWarnings || null;
+      ast.compileWarnings = mergeCompileWarnings(toks, p);
     } catch (e) {
       if (!(e instanceof ParseErr)) throw e;
       const ex = makeException('ParseError', e.msg);

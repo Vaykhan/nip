@@ -1178,12 +1178,17 @@ const PHP_KEYWORDS = new Set(['abstract', 'and', 'array', 'as', 'break', 'callab
   'private', 'protected', 'public', 'readonly', 'require', 'require_once', 'return', 'static', 'switch', 'throw', 'trait', 'try',
   'unset', 'use', 'var', 'while', 'xor', 'yield', 'yield from', '__class__', '__dir__', '__file__', '__function__', '__line__',
   '__method__', '__namespace__', '__trait__', '__halt_compiler']);
+// the lexer's and the parser's compile-time diagnostics, in source order
+export function mergeCompileWarnings(toks, p) {
+  const all = [...(toks.compileDeprecations || []), ...(p.st.compileWarnings || [])];
+  return all.length ? all.sort((a, b) => a.l - b.l) : null;
+}
 const CONFUSABLE_TYPES = { boolean: 'bool', integer: 'int', double: 'float', resource: null };
 export function parsePHP(src, file) {
   const toks = lex(src, file);
   const p = new Parser(toks, file);
   const ast = p.parseProgram();
   ast.strict = !!p.st.strict; // declare(strict_types=1): applies to calls from the file's top-level code
-  ast.compileWarnings = p.st.compileWarnings || null;
+  ast.compileWarnings = mergeCompileWarnings(toks, p);
   return ast;
 }

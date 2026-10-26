@@ -164,7 +164,12 @@ export function lex(src, file) {
     }
     if (ch === '"' || ch === '`') {
       let j = i + 1;
-      while (j < n && src[j] !== ch) { if (src[j] === '\\') j++; j++; }
+      while (j < n && src[j] !== ch) {
+        if (src[j] === '\\') { j += 2; continue; }
+        // {$...} and ${...} hold code, which may contain quotes
+        if ((src[j] === '{' && src[j + 1] === '$') || (src[j] === '$' && src[j + 1] === '{')) { j = matchBrace(src, src[j] === '{' ? j : j + 1) + 1; continue; }
+        j++;
+      }
       if (j >= n) err('syntax error, unexpected end of file');
       const raw = src.slice(i + 1, j);
       const startLine = line;
@@ -200,10 +205,18 @@ export function lex(src, file) {
         line += countNl(src.slice(bodyStart, found));
         i = found + indent.length + id.length;
         if (indent.length) {
-          body = body.split('\n').map((ln) => {
-            if (ln.startsWith(indent)) return ln.slice(indent.length);
-            if (/^[ \t]*$/.test(ln)) return '';
-            throw new ParseErr('Invalid body indentation level (expecting an indentation level of at least ' + indent.length + ')', startLine);
+          // the closing marker's indentation is removed from every line (it may not mix tabs and
+          // spaces, and neither may the lines); errors are reported at the line they're found on
+          if (indent.includes(' ') && indent.includes('\t')) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine);
+          const ch = indent[0];
+          body = body.split('\n').map((ln, idx) => {
+            let k = 0;
+            while (k < indent.length && (ln[k] === ' ' || ln[k] === '\t')) {
+              if (ln[k] !== ch) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine + 1 + idx);
+              k++;
+            }
+            if (k < indent.length && k < ln.length && ln.slice(k) !== '\r') throw new ParseErr('Invalid body indentation level (expecting an indentation level of at least ' + indent.length + ')', startLine + 1 + idx);
+            return ln.slice(k);
           }).join('\n');
         }
         const heredoc = '<<<' + (m[1] ? m[1] : '') + id; // as PHP shows it in syntax errors
@@ -328,9 +341,13 @@ export function lex(src, file) {
         const end = matchBrace(raw, j + 1);
         const inner = raw.slice(j + 2, end);
         let code;
-        if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$/.test(inner)) code = '$' + inner;
-        else if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*\[/.test(inner)) code = '$' + inner;
-        else code = '${' + inner + '}';
+        if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*(\[|$)/.test(inner)) {
+          code = '$' + inner;
+          deprecation('Using ${var} in strings is deprecated, use {$var} instead', ln);
+        } else {
+          code = '${' + inner + '}';
+          deprecation('Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead', ln);
+        }
         flush(); parts.push({ code, line: ln }); j = end + 1; continue;
       }
       cur += d; j++;
@@ -338,6 +355,8 @@ export function lex(src, file) {
     flush();
     return parts;
   }
+  // deprecations PHP raises while compiling (checkProgram() reports them)
+  function deprecation(msg, l) { (toks.compileDeprecations || (toks.compileDeprecations = [])).push({ msg, l, deprecated: true }); }
   function matchBrace(s, start) {
     let depth = 0;
     for (let k = start; k < s.length; k++) {
