@@ -258,13 +258,15 @@ export function cp(v) { if (v instanceof PHPArray) v.cow = true; return v; }
 
 // ---------------------------------------------------------------- objects
 // Object handles: freed handles are reused, most recently freed first (see runtime/gc.js)
-// recent: inside try blocks, the objects created there (see Try in compiler/stmt.js)
-export const objHandles = { next: 0, free: [], allocs: 0, recent: null };
+// recent: inside try blocks, the objects created there (see Try in compiler/stmt.js); fresh:
+// those created by the expression statement running (see ExprStmt)
+export const objHandles = { next: 0, free: [], allocs: 0, recent: null, fresh: null };
 export class PHPObject {
   constructor(cls) {
     this.cls = cls; this.props = new Map();
     objHandles.allocs++;
     if (objHandles.recent !== null && objHandles.recent.length < 64) objHandles.recent.push(this);
+    if (objHandles.fresh !== null && objHandles.fresh.length < 16) objHandles.fresh.push(this);
     this.id = objHandles.free.length ? objHandles.free.pop() : ++objHandles.next;
   }
 }

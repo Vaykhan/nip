@@ -27,6 +27,7 @@ function gcVisitRoots(push, extra) {
   for (const a of rt.autoloaders) push(a);
   for (const ob of rt.obStack) if (ob.cb) push(ob.cb);
   if (extra) for (const x of extra) push(x);
+  for (const x of rt.inflight) push(x);
 }
 function gcTraverse(cands, extra, countMode) {
   const seen = new Set();
@@ -115,7 +116,8 @@ function runDestructor(o) {
     rt.fiberSwitchBlocked++; // destructors can't switch fibers
     try { callFunction(m.fn, [], o, m.cls, o.cls, null); } finally { rt.fiberSwitchBlocked--; }
   }
-  if (!rt.inShutdown) idCands.add(o);
+  // its handle is free once the destructor is done (unless the destructor kept the object)
+  if (!rt.inShutdown && (budget <= 0 || !sweep(new Set([o])))) { idCands.add(o); idq.n = 1; }
 }
 export function gcCollect(list, extra) {
   const cands = new Set(list.filter((o) => !o.destructed));
@@ -313,8 +315,38 @@ function sweep(cands, ret, self) {
     const r = reachFrom(o);
     if (r.has(o)) for (const x of r) kept.add(x);
   }
-  for (const o of dead) {
-    if (kept.has(o)) continue;
+  // an object is freed after what it holds (zend_objects_store_del), so its handle is the first
+  // one reused
+  const gone = new Set(dead.filter((o) => !kept.has(o)));
+  // what only the freed objects held goes with them (a dead candidate means the traversal from the
+  // roots completed, so `seen` has everything reachable)
+  const more = [...gone];
+  while (more.length) {
+    const o = more.pop();
+    const add = (x) => {
+      if (x instanceof Ref) x = x.v;
+      if (x instanceof PHPObject) { if (!seen.has(x) && !gone.has(x) && !x.idFreed && !pendingDtor(x) && !kept.has(x)) { gone.add(x); more.push(x); } }
+      else if (x instanceof PHPArray && x.size <= 64) for (const y of x.values()) add(y);
+    };
+    for (const x of o.props.values()) add(x);
+    if (o.bound) for (const x of o.bound.values()) add(x);
+    if (o.thisObj) add(o.thisObj);
+  }
+  const order = [], visited = new Set();
+  const held = (o) => {
+    const out = [];
+    const add = (x) => { if (x instanceof Ref) x = x.v; if (x instanceof PHPObject && gone.has(x)) out.push(x); else if (x instanceof PHPArray && x.size <= 64) for (const y of x.values()) add(y); };
+    for (const x of o.props.values()) add(x);
+    if (o.bound) for (const x of o.bound.values()) add(x);
+    if (o.thisObj) add(o.thisObj);
+    return out;
+  };
+  const visit = (o) => { if (visited.has(o)) return; visited.add(o); for (const c of held(o)) visit(c); order.push(o); };
+  const inner = new Set();
+  for (const o of gone) for (const c of held(o)) inner.add(c);
+  for (const o of gone) if (!inner.has(o)) visit(o);
+  for (const o of gone) visit(o); // (cycles)
+  for (const o of order) {
     o.idFreed = true;
     objHandles.free.push(o.id);
   }

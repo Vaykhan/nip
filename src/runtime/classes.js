@@ -669,7 +669,14 @@ export function writeProp(obj, name, v, f) {
   } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
-  if (slot !== v && slot !== null && typeof slot === 'object' && !(slot instanceof Ref)) { dropRef(slot); if (slot instanceof PHPObject && slot.cls.hasDestructor) gcCheck(slot); }
+  if (slot !== v && slot !== null && typeof slot === 'object' && !(slot instanceof Ref)) {
+    dropRef(slot);
+    if (slot instanceof PHPObject && slot.cls.hasDestructor) {
+      // the assigned value is the assignment's result: the old value's destructor can't free it
+      rt.inflight.push(v);
+      try { gcCheck(slot); } finally { rt.inflight.pop(); }
+    }
+  }
 }
 // Prelude classes can handle accesses to undefined properties before the magic methods do
 // (ArrayObject::ARRAY_AS_PROPS): __nipGet/__nipIsset/__nipSet/__nipUnset return [true, value]

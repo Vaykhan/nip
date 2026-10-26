@@ -3,6 +3,7 @@ ext/reflection/tests/003.phpt
 ext/reflection/tests/004.phpt
 ext/reflection/tests/005.phpt
 ext/reflection/tests/006.phpt
+ext/reflection/tests/007.phpt
 ext/reflection/tests/012.phpt
 ext/reflection/tests/017.phpt
 ext/reflection/tests/018.phpt
@@ -31,6 +32,7 @@ ext/reflection/tests/ReflectionClass_getExtension_variation.phpt
 ext/reflection/tests/ReflectionClass_getInterfaceNames_basic.phpt
 ext/reflection/tests/ReflectionClass_getInterfaces_001.phpt
 ext/reflection/tests/ReflectionClass_getInterfaces_003.phpt
+ext/reflection/tests/ReflectionClass_getMethod_001.phpt
 ext/reflection/tests/ReflectionClass_getMethod_002.phpt
 ext/reflection/tests/ReflectionClass_getMethods_004.phpt
 ext/reflection/tests/ReflectionClass_getModifierNames_basic.phpt
@@ -39,6 +41,7 @@ ext/reflection/tests/ReflectionClass_getName_basic.phpt
 ext/reflection/tests/ReflectionClass_getName_error1.phpt
 ext/reflection/tests/ReflectionClass_getNamespaceName.phpt
 ext/reflection/tests/ReflectionClass_getParentClass.phpt
+ext/reflection/tests/ReflectionClass_getProperty_001.phpt
 ext/reflection/tests/ReflectionClass_getProperty_002.phpt
 ext/reflection/tests/ReflectionClass_getReflectionConstant.phpt
 ext/reflection/tests/ReflectionClass_getStaticPropertyValue_001.phpt
@@ -191,6 +194,7 @@ ext/reflection/tests/bug36434.phpt
 ext/reflection/tests/bug37816.phpt
 ext/reflection/tests/bug38132.phpt
 ext/reflection/tests/bug38194.phpt
+ext/reflection/tests/bug38217.phpt
 ext/reflection/tests/bug38465.phpt
 ext/reflection/tests/bug38653.phpt
 ext/reflection/tests/bug39001.phpt
@@ -201,6 +205,7 @@ ext/reflection/tests/bug41061.phpt
 ext/reflection/tests/bug41884.phpt
 ext/reflection/tests/bug43926.phpt
 ext/reflection/tests/bug45139.phpt
+ext/reflection/tests/bug46064.phpt
 ext/reflection/tests/bug46064_2.phpt
 ext/reflection/tests/bug46103.phpt
 ext/reflection/tests/bug47254.phpt
@@ -219,6 +224,7 @@ ext/reflection/tests/bug61388.phpt
 ext/reflection/tests/bug62384.phpt
 ext/reflection/tests/bug63399.phpt
 ext/reflection/tests/bug63614.phpt
+ext/reflection/tests/bug64007.phpt
 ext/reflection/tests/bug64239.phpt
 ext/reflection/tests/bug66430.phpt
 ext/reflection/tests/bug70674.phpt

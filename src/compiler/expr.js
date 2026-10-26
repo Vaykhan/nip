@@ -25,7 +25,7 @@ import {
 import {
   canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
-import { dropRef, gcCheck } from '../runtime/gc.js';
+import { dropRef, frameExit, gcCheck } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
 import { deref } from '../lib/core.js';
 import { closureClass } from '../runtime/native-classes.js';
@@ -62,6 +62,7 @@ export function cExpr(n) {
 }
 
 const EXPR = {
+  TempObj(n) { return n.get; }, // an already compiled object expression (see MCall)
   Lit(n) { const v = n.v; return () => v; },
   Paren(n) { return cExpr(n.e); },
   Temp(n) { const id = n.id; return (f) => f.temps[id]; },
@@ -448,6 +449,20 @@ const EXPR = {
     };
   },
   MCall(n) {
+    if (n.o.k === 'New' && n.args !== 'fcc' && !deferCalls) {
+      // (new Foo)->m(): the object is a temporary, released when the call returns
+      const objs = [];
+      const O0 = cExpr(n.o);
+      const run = EXPR.MCall(Object.assign({}, n, { o: { k: 'TempObj', get: (f) => { const o = O0(f); objs[objs.length - 1] = o; return o; }, l: n.l } }));
+      return (f) => {
+        objs.push(null);
+        let r;
+        try { r = run(f); } catch (e) { objs.pop(); throw e; }
+        const o = objs.pop();
+        if (o instanceof PHPObject) frameExit([o], r);
+        return r;
+      };
+    }
     const O = cExpr(n.o);
     const N = typeof n.name === 'string' ? null : cExpr(n.name);
     const sname = typeof n.name === 'string' ? n.name : null;

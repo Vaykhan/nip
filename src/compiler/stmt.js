@@ -118,7 +118,15 @@ const STMT = {
     return (f) => {
       rt.line = l;
       if (idq.n) idSafePoint();
-      const v = E(f);
+      // objects the statement created and nothing kept (temporaries) give their handles back
+      const outer = objHandles.fresh;
+      objHandles.fresh = [];
+      let v;
+      try { v = E(f); } finally {
+        const fresh = objHandles.fresh;
+        objHandles.fresh = outer;
+        if (fresh.length) caughtTemps(fresh);
+      }
       if (v instanceof PHPObject) { dropRef(v); if (v.cls.hasDestructor && !v.destructed) gcCheck(v); }
     };
   },
