@@ -94,14 +94,22 @@ function axEncaps(parts, quote, ind) {
 function axParams(ps, ind) {
   return ps.map((p) => {
     let s = axAttrs(p.attrs, ind, false);
-    if (p.promote) s += (p.promoteKw || !p.setVis ? p.promote + ' ' : '') + (p.setVis ? p.setVis + '(set) ' : '');
+    if (p.promote) s += (p.promoteKw || !p.setVis ? p.promote + ' ' : '') + (p.setVis ? p.setVis + '(set) ' : '') + (p.final ? 'final ' : '');
     if (p.type) s += axTypeStr(p.type) + ' ';
     if (p.byRef) s += '&';
     if (p.variadic) s += '...';
     s += '$' + p.name;
     if (p.def) s += ' = ' + axExp(p.def, 0, ind);
-    return s;
+    return s + axHooks(p.hooks, ind);
   }).join(', ');
+}
+// property hooks (zend_ast_export_hook_list)
+function axHooks(hooks, ind) {
+  if (!hooks) return '';
+  const list = Object.values(hooks);
+  return ' {\n' + axIndentStr(ind + 1) + list.map((h) => (h.final ? 'final ' : '') + h.hook + (h.body === null
+    ? ';'
+    : h.shortExpr ? ' => ' + axExp(h.shortExpr, 0, ind + 1) + ';' : ' {\n' + axStmts(h.body, ind + 2) + axIndentStr(ind + 1) + '}')).join('\n' + axIndentStr(ind + 1)) + '\n' + axIndentStr(ind) + '}';
 }
 function axFuncDecl(fn, ind, kind, mods = '', inParens = false) {
   let s = '';
@@ -148,7 +156,7 @@ function axClassBody(cd, ind) {
   for (const ps of groups.values()) {
     const p0 = ps[0];
     members.push([p0.seq, () => axAttrs(p0.attrs, ind + 1, true) + (p0.visKw ? p0.visKw + ' ' : '') + (p0.setVis ? p0.setVis + '(set) ' : '') + (p0.static ? 'static ' : '') + (p0.readonly ? 'readonly ' : '') + (p0.type ? axTypeStr(p0.type) + ' ' : '') +
-      ps.map((p) => '$' + p.name + (p.hasDef ? ' = ' + axExp(p.def, 0, ind + 2) : '')).join(', ') + ';']);
+      ps.map((p) => '$' + p.name + (p.hasDef ? ' = ' + axExp(p.def, 0, ind + 2) : '') + axHooks(p.hooks, ind + 1)).join(', ') + (p0.hooks ? '' : ';')]);
   }
   for (const m of cd.methods) {
     const mods = m.vis + ' ' + (m.static ? 'static ' : '') + (m.abstractKw ? 'abstract ' : '') + (m.final ? 'final ' : '');
@@ -183,6 +191,7 @@ export function axExp(n, priority = 0, ind = 0) {
     case 'Lit': return n.magic ? n.magic : axZval(n.v);
     case 'MagicClass': return '__CLASS__';
     case 'MagicMethod': return '__METHOD__';
+    case 'ParentHook': return 'parent::$' + n.prop + '::' + n.hook + '(' + axArgs(n.args, ind) + ')';
     case 'Paren': return axExp(n.e, priority, ind);
     case 'Interp': return '"' + axEncaps(n.parts, '"', ind) + '"';
     case 'Shell': return '`' + axEncaps(n.parts, '`', ind) + '`';

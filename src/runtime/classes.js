@@ -326,7 +326,7 @@ export function parentHook(f, prop, hook, args) {
   if (hook === 'get') {
     const sl = obj.props.get(pinfo.key);
     if (sl === undefined) {
-      if (pinfo.type) throwError('Error', `Typed property ${pinfo.cls.name}::$${prop} must not be accessed before initialization`);
+      if (pinfo.type) throwError('Error', `Typed property ${obj.cls.name}::$${prop} must not be accessed before initialization`);
       warn(`Undefined property: ${obj.cls.name}::$${prop}`);
       return null;
     }

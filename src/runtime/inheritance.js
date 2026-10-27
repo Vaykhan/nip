@@ -249,6 +249,9 @@ function checkProps(cls, decl, resolve) {
     if (pt) {
       const a = ct && typeSub(normType(ct, cls), cls, normType(pt, pi.cls), pi.cls, ctx);
       const b = ct && typeSub(normType(pt, pi.cls), pi.cls, normType(ct, cls), cls, ctx);
+      // (a virtual property's type only has to be covariant without set, contravariant without get)
+      const getOnly = pi.virtual && pi.hooks && !pi.hooks.set, setOnly = pi.virtual && pi.hooks && !pi.hooks.get;
+      if (ct && ((getOnly && a !== false) || (setOnly && b !== false))) continue;
       if (a === false || b === false || !ct) throw at(`Type of ${cn} must be ${typeStr(pt, null)} (as in class ${inhClsName(pi.cls)})`);
     } else if (ct) throw at(`Type of ${cn} must not be defined (as in class ${inhClsName(pi.cls)})`);
   }
@@ -274,7 +277,31 @@ function checkConsts(cls, decl, resolve) {
 
 // All checks of a class being declared, in PHP's order: methods overriding the parent's, then
 // abstract methods of used traits, then the interfaces' methods.
+// property hooks (PHP 8.4): a set hook's parameter accepts the property's type; overriding hooks
+// are checked like methods
+function checkHooks(cls, decl, resolve) {
+  const ctx = { resolve: (n) => (lcName(n) === cls.lname ? cls : resolve(n)) };
+  for (const info of cls.props.values()) {
+    if (info.cls !== cls || !info.hooks) continue;
+    const set = info.hooks.set;
+    if (set && set.cls === cls && set.decl.explicitParams && set.params[0]) {
+      const pt = info.decl.type, at = set.params[0].type;
+      if (pt && at && typeSub(normType(pt, cls), cls, normType(at, cls), cls, ctx) === false) {
+        throw new FatalSig(`Type of parameter $${set.params[0].name} of hook ${cls.name}::$${info.name}::set must be compatible with property type`, info.decl.l, decl.file);
+      }
+    }
+    const parent = cls.parent && cls.parent.props.get(info.name);
+    if (parent && parent.hooks) {
+      for (const kind of ['get', 'set']) {
+        const ch = info.hooks[kind], ph = parent.hooks[kind];
+        if (ch && ph && ch !== ph && ch.cls === cls) checkOverride(cls, asMethod(ch), asMethod(ph), resolve, 'parent');
+      }
+    }
+  }
+}
+const asMethod = (fn) => ({ name: fn.name, fn, cls: fn.cls, vis: 'public', static: false, abstract: !!fn.abstractHook, final: false });
 export function checkInheritance(cls, decl, resolve) {
+  if (decl.file !== PRELUDE_FILE && rt.phpVersion >= 80400) checkHooks(cls, decl, resolve);
   if (cls.parent && decl.file !== PRELUDE_FILE) checkProps(cls, decl, resolve);
   if ((cls.parent || cls.ifaceList.length) && decl.file !== PRELUDE_FILE) checkConsts(cls, decl, resolve);
   if (cls.parent) {

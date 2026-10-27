@@ -1164,7 +1164,7 @@ export class Parser {
           case 'match': if (nxOp === '(') return this.parseMatch(); break;
           case 'new': return this.newExpr();
         }
-        if (MAGIC.has(kw) && nxOp !== '(' && nxOp !== '::') {
+        if ((MAGIC.has(kw) || (kw === '__property__' && rt.phpVersion >= 80400)) && nxOp !== '(' && nxOp !== '::') {
           this.p++;
           return this.magic(kw, l);
         }
@@ -1206,6 +1206,14 @@ export class Parser {
       case '__class__': if (fn && fn.cls === undefined && !fn.closure && !fn.arrow) return { k: 'Lit', v: '', l }; // (a function declared in a method)
         return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
       case '__trait__': return { k: 'Lit', v: cd && cd.kind === 'trait' ? cd.name : '', l };
+      case '__property__': { // (PHP 8.4) the property of the enclosing hook
+        for (let i = this.st.fnStack.length - 1; i >= 0; i--) {
+          const g = this.st.fnStack[i];
+          if (g.hookProp) return { k: 'Lit', v: g.hookProp, l };
+          if (!g.closure && !g.arrow) break;
+        }
+        return { k: 'Lit', v: '', l };
+      }
       case '__method__': {
         if (!fn) return { k: 'Lit', v: '', l };
         if (cd && fn.cls !== undefined) return cd.kind === 'trait' ? { k: 'MagicMethod', name: fn.name, l } : { k: 'Lit', v: (cd.anon ? 'class@anonymous' : cd.name) + '::' + fn.name, l };
@@ -1304,6 +1312,7 @@ export class Parser {
             const args = this.parseArgs();
             // parent::$prop::get() / ::set($v): the parent's hook (PHP 8.4)
             if (cls && typeof cls === 'object' && cls.k === 'SProp' && cls.cls === 'parent' && typeof cls.name === 'string' && /^(get|set)$/i.test(nt.v) && rt.phpVersion >= 80400) {
+              if (args === 'fcc') this.fatal('Cannot create Closure for parent property hook call');
               e = { k: 'ParentHook', prop: cls.name, hook: nt.v.toLowerCase(), args, l }; continue;
             }
             e = { k: 'SCall', cls, rawCls, name: nt.v, args, l }; continue;

@@ -130,7 +130,14 @@ export function checkProgram(ast, file) {
           checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); checkSetVis(n, p, p.vis, p.l);
           if (p.hooks) for (const h of Object.values(p.hooks)) { methods.add(h); checkAttrs(h.attrs, T_METHOD, h); }
         }
-        for (const m of n.methods) if (m.fn.name.toLowerCase() === '__construct') for (const p of m.fn.params) if (p.promote) checkSetVis(n, p, p.promote, m.l);
+        for (const m of n.methods) {
+          if (m.fn.name.toLowerCase() !== '__construct') continue;
+          for (const p of m.fn.params) {
+            if (!p.promote) continue;
+            checkSetVis(n, p, p.promote, m.l);
+            if (p.hooks) { if (p.readonly || n.flags.readonly) fail('Hooked properties cannot be readonly', m); for (const h of Object.values(p.hooks)) methods.add(h); }
+          }
+        }
         for (const c of n.consts) {
           checkAttrs(c.attrs, T_CLASS_CONSTANT, c);
           checkConstExpr(c.e, false);
@@ -409,9 +416,13 @@ export function checkProgram(ast, file) {
         if (p.static) fail('Cannot declare hooks for static property', p);
         const hs = Object.values(p.hooks);
         for (const h of hs) {
-          if (h.abstract && h.final) fail('Property hook cannot be both abstract and final', h);
           if (h.final && p.vis === 'private') fail('Property hook cannot be both final and private', h);
+          if (h.abstract && h.final) fail('Property hook cannot be both abstract and final', h);
           if (h.abstract && p.vis === 'private') fail('Property hook cannot be both abstract and private', h);
+          const sp = h.hook === 'set' && h.explicitParams ? h.params[0] : null;
+          if (sp && sp.byRef) fail(`Parameter $${sp.name} of set hook ${name}::$${p.name} must not be pass-by-reference`, h);
+          if (sp && sp.variadic) fail(`Parameter $${sp.name} of set hook ${name}::$${p.name} must not be variadic`, h);
+          if (sp && !!p.type !== !!sp.type) fail(`Type of parameter $${sp.name} of hook ${name}::$${p.name}::set must be compatible with property type`, p);
           if (h.hook === 'set' && h.explicitParams && h.params[0] && h.params[0].def) fail(`Parameter $${h.params[0].name} of set hook ${name}::$${p.name} must not have a default value`, h);
           if (h.abstract && kind !== 'interface' && !n.flags.abstract && !p.abstract && kind !== 'trait') fail(`Class ${name} declares abstract property hook ${name}::$${p.name}::${h.hook} and must therefore be declared abstract`, h);
           if (h.hook === 'get' && h.explicitParams) fail(`get hook of property ${name}::$${p.name} must not have a parameter list`, h);
