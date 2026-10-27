@@ -16,6 +16,7 @@ import { deref } from '../lib/core.js';
 import { INI_DEFAULTS } from '../lib/errors.js';
 import { obApply, obEmit } from '../lib/output.js';
 import { boot, resetRuntime } from './boot.js';
+import { applyVersion } from './version.js';
 
 function writeUncaught(obj) {
   let s;
@@ -108,6 +109,7 @@ export function runScript(code, file, argv, opts = {}) {
   boot();
   resetRuntime();
   if (opts.ini) for (const [k, raw] of Object.entries(opts.ini)) { const v = iniValue(raw); if (!(k in INI_DEFAULTS)) rt.ini.set(k, v); callNative(rt.fns.get('ini_set'), [k, v]); }
+  applyVersion();
   disableFunctions(rt.ini.get('disable_functions'));
   if (opts.capture) rt.capture = [];
   try { rt.ttyOut = !opts.capture && tty.isatty(1); } catch (e) { rt.ttyOut = false; }

@@ -357,6 +357,7 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
     f.closure = closure;
     if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
   }
+  f.args = args; // (an error while binding shows the arguments in the trace)
   args = bindParams(fn, f, args) || args;
   f.args = args;
   if (fn.isGen) return makeGenerator(fn, f);
@@ -403,6 +404,7 @@ export function* callFunctionG(fn, args, thisObj, cls, sc, closure) {
     f.closure = closure;
     if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
   }
+  f.args = args; // (an error while binding shows the arguments in the trace)
   args = bindParams(fn, f, args) || args;
   f.args = args;
   const saved = compilingByRef;

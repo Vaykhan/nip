@@ -10,6 +10,7 @@ import { throwError, warn } from '../runtime/errors.js';
 import { callableFn, callValue, findMethod } from '../runtime/callables.js';
 import { callMethodName, magicGet, magicIsset, objVisibleProps, writeProp } from '../runtime/classes.js';
 import { A, alias, def, deref, I, R1, refArr, slotCp } from './core.js';
+import { since } from '../runtime/version.js';
 import { lower, natCmp, sgn, upper } from './string.js';
 import { mtRange } from './math.js';
 
@@ -431,6 +432,10 @@ def('array_find', (array, callback) => { const fn = callableFn(callback); for (c
 def('array_find_key', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (toBool(fn(v, k))) return k; return null; });
 def('array_any', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (toBool(fn(v, k))) return true; return false; });
 def('array_all', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (!toBool(fn(v, k))) return false; return true; });
+since(80400, 'fn', 'array_find', 'array_find_key', 'array_any', 'array_all');
+def('array_first', (array) => { const a = A(array); const k = a.firstKey(); return k === null ? null : cp(a.get(k)); });
+def('array_last', (array) => { const a = A(array); const k = a.lastKey(); return k === null ? null : cp(a.get(k)); });
+since(80500, 'fn', 'array_first', 'array_last');
 def('array_flip_dummy', () => 0); rt.fns.delete('array_flip_dummy');
 def('array_change_key_case', (array, _case = 0) => { const out = new PHPArray(); for (const [k, v] of A(array).entries()) out.set(typeof k === 'string' ? (I(_case) ? upper(k) : lower(k)) : k, cp(v)); return out; });
 // internal pointer

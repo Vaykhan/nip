@@ -13,7 +13,6 @@ import { boundCallback, callableFn, callValue } from '../runtime/callables.js';
 import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
 import { sgn } from './string.js';
-import { PHP_VERSION } from '../runtime/native-classes.js';
 
 def('error_reporting', (error_level = null) => { const old = rt.silence ? rt.errorReporting & 4437 : rt.errorReporting; if (error_level !== null) rt.errorReporting = I(error_level); return old; });
 export const INI_DEFAULTS = {
@@ -124,11 +123,11 @@ def('http_response_code', (response_code = 0) => false);
 def('setcookie', (name, ...rest) => true); def('setrawcookie', (name, ...rest) => true);
 def('session_start', () => true); def('session_id', () => ''); def('session_destroy', () => true);
 def('php_sapi_name', () => 'cli');
-def('phpversion', (extension = null) => (extension === null ? PHP_VERSION : (['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl'].includes(S(extension).toLowerCase()) ? PHP_VERSION : false)));
+def('phpversion', (extension = null) => (extension === null ? rt.phpVersionStr : (['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl'].includes(S(extension).toLowerCase()) ? rt.phpVersionStr : false)));
 def('php_uname', (mode = 'a') => { const m = S(mode); if (m === 's') return osMod.type(); if (m === 'n') return osMod.hostname(); if (m === 'r') return osMod.release(); if (m === 'm') return osMod.machine ? osMod.machine() : process.arch; if (m === 'v') return osMod.version ? osMod.version() : ''; return `${osMod.type()} ${osMod.hostname()} ${osMod.release()} ${osMod.version ? osMod.version() : ''} ${process.arch}`; });
 def('php_ini_loaded_file', () => false);
 def('php_ini_scanned_files', () => false);
-def('zend_version', () => '4.3.' + PHP_VERSION.split('.')[2]);
+def('zend_version', () => '4.' + rt.phpVersionStr.split('.').slice(1).join('.'));
 def('extension_loaded', (extension) => ['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl', 'hash', 'random', 'reflection', 'tokenizer', 'iconv', 'filter'].includes(S(extension).toLowerCase()));
 def('get_included_files', () => PHPArray.from([...rt.mainFile ? [rt.mainFile] : [], ...rt.included]));
 alias('get_required_files', 'get_included_files');

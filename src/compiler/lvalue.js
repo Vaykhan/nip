@@ -162,6 +162,15 @@ function indexOps(P, I) {
       if (!I) noIdx();
       return readIndex(base, I(f), true);
     },
+    // isset($obj[k]) on an ArrayAccess object only asks offsetExists()
+    isset(f) {
+      const base = P.getq(f);
+      if (base === undefined || base === null) return undefined;
+      if (!I) noIdx();
+      const key = I(f);
+      if (base instanceof PHPObject && base.cls.ancestors.has('arrayaccess')) return toBool(callMethodName(base, 'offsetExists', [key])) ? true : undefined;
+      return readIndex(base, key, true);
+    },
     // the element as a container being written to ($a[k]->p = v): a missing one is created as null
     fetchW(f) {
       const base = P.getq(f);

@@ -5,7 +5,7 @@ import {
   cp, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, normKey, PHPArray, PHPObject, Ref,
   ThrowSig
 } from '../values.js';
-import { toBool, toDbl, toInt, toStr, valueName } from '../convert.js';
+import { toBool, toDbl, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { cmp, isNum, looseEq, strictEq } from '../compare.js';
 import {
   add, bitAnd, bitNot, bitOr, bitXor, concat, dec, div, inc, mod, mul, pow, shl, shr, sub
@@ -25,7 +25,7 @@ import {
 import {
   canAccessMember, classConst, cloneObject, declareClass, instantiate, readProp, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
-import { dropRef, frameExit, gcCheck } from '../runtime/gc.js';
+import { dropRef, frameExit, gcCheck, gcCollect } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
 import { deref } from '../lib/core.js';
 import { closureClass } from '../runtime/native-classes.js';
@@ -160,6 +160,14 @@ const EXPR = {
   CConst(n) {
     const C = cClassRef(n.cls);
     const name = n.name;
+    if (typeof name !== 'string') { // C::{expr}
+      const N = cExpr(name);
+      return (f) => {
+        const c = C(f), nm = N(f);
+        if (typeof nm !== 'string') throwError('TypeError', `Cannot use value of type ${typeOf(nm)} as class constant name`);
+        return classConst(c, nm, f, true);
+      };
+    }
     return (f) => classConst(C(f), name, f, true);
   },
   ClassName(n) {
@@ -490,7 +498,10 @@ const EXPR = {
         let r;
         try { r = run(f); } catch (e) { objs.pop(); throw e; }
         const o = objs.pop();
-        if (o instanceof PHPObject) frameExit([o], r);
+        if (o instanceof PHPObject) {
+          if (o.cls.hasDestructor && !o.destructed && !rt.inShutdown) gcCollect([o], [r]); // its destructor runs now
+          frameExit([o], r);
+        }
         return r;
       };
     }

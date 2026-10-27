@@ -4,6 +4,7 @@ import pathMod from 'node:path';
 import { I64MIN, mkf, ParseErr } from './values.js';
 import { neg } from './arith.js';
 import { lex } from './lexer.js';
+import { rt } from './runtime/state.js';
 
 const BIN_BP = {
   'or': [1, 'L'], 'xor': [2, 'L'], 'and': [3, 'L'],
@@ -198,7 +199,7 @@ export class Parser {
           this.p++;
           const args = [this.parseExpr()];
           while (this.accept(',')) args.push(this.parseExpr());
-          this.semi();
+          if (!this.accept(';') && this.tok.t !== 'eof') this.unexpected(this.tok, '"," or ";"');
           return { k: 'Echo', args, l };
         }
         case 'if': return this.parseIf();
@@ -336,7 +337,13 @@ export class Parser {
           if (!(nx.t === 'op' && nx.v === '(')) break;
           this.p++; this.expect('(');
           const list = [];
-          if (!this.isOp(')')) { list.push(this.parseExpr()); while (this.accept(',')) { if (this.isOp(')')) break; list.push(this.parseExpr()); } }
+          // (the grammar wants variables: `new C()` is one only once dereferenced)
+          const item = () => {
+            const start = this.tok, e = this.parseExpr();
+            if (e.k === 'New') this.unexpected(rt.phpVersion >= 80400 ? this.tok : start, rt.phpVersion >= 80400 ? '"->" or "?->" or "["' : undefined);
+            return e;
+          };
+          if (!this.isOp(')')) { list.push(item()); while (this.accept(',')) { if (this.isOp(')')) break; list.push(item()); } }
           this.expect(')'); this.semi();
           return { k: 'Unset', list, l };
         }
@@ -842,7 +849,7 @@ export class Parser {
     if (t.t === 'id') {
       const kw = t.v.toLowerCase();
       switch (kw) {
-        case 'new': return this.parsePostfix(this.parseNew());
+        case 'new': return this.parsePostfix(this.newExpr());
         case 'clone': this.p++; return { k: 'Clone', e: this.parseUnary(), l };
         case 'print': this.p++; return { k: 'Print', e: this.parseExpr(4), l };
         case 'yield': {
@@ -866,6 +873,13 @@ export class Parser {
       }
     }
     return this.parsePostfix(this.parsePrimary());
+  }
+
+  // `new` dereferenced without parentheses: new C()->m(), new class {}::C (PHP 8.4)
+  newExpr() {
+    const n = this.parseNew();
+    if (!(rt.phpVersion >= 80400 && (n.parens || (n.cls && n.cls.k === 'ClassDecl')))) n.noDeref = true;
+    return n;
   }
 
   parseNew() {
@@ -895,11 +909,17 @@ export class Parser {
       const cd = this.parseClass(args, anonFlags);
       cd.attrs = attrs;
       cd.name = 'class@anonymous' + (++this.st.anonCount);
-      return { k: 'New', cls: cd, args, l };
+      return { k: 'New', cls: cd, args, l, parens: true };
     }
     if (this.tok.t === 'id') {
       const name = this.next().v;
       cls = this.resolveClass(name);
+      // new A::$prop: the class named by a static property
+      while (this.isOp('::')) {
+        this.p++;
+        if (this.tok.t !== 'var') this.unexpected(this.tok, 'variable or "$"');
+        cls = { k: 'SProp', cls, name: this.next().v, l };
+      }
     } else if (this.tok.t === 'var') {
       cls = { k: 'Var', name: this.next().v, l };
       // allow $obj->prop / $a['x'] / Foo::$x as class name expression
@@ -913,9 +933,9 @@ export class Parser {
       cls = this.parseExpr(); this.expect(')');
     } else if (this.isId('static')) { this.p++; cls = 'static'; }
     else this.unexpected();
-    let args = [];
-    if (this.isOp('(')) args = this.parseArgs();
-    return { k: 'New', cls, args, l };
+    let args = [], parens = false;
+    if (this.isOp('(')) { args = this.parseArgs(); parens = true; }
+    return { k: 'New', cls, args, l, parens };
   }
 
   parseArgs() {
@@ -993,7 +1013,7 @@ export class Parser {
           e.fn.attrs = attrs;
           return e;
         }
-        if (t.v === '(') { this.p++; const e = this.parseExpr(); this.expect(')'); return e; }
+        if (t.v === '(') { this.p++; const e = this.parseExpr(); this.expect(')'); if (e.noDeref) e.noDeref = false; return e; }
         if (t.v === '[') { this.p++; return { k: 'Arr', items: this.parseArrayItems(']'), l }; }
         if (t.v === '$') {
           this.p++;
@@ -1036,7 +1056,7 @@ export class Parser {
             if (nx.t === 'id' && (nx.v.toLowerCase() === 'function' || nx.v.toLowerCase() === 'fn')) { this.p++; return this.parseClosure(true); }
             break;
           case 'match': if (nxOp === '(') return this.parseMatch(); break;
-          case 'new': return this.parseNew();
+          case 'new': return this.newExpr();
         }
         if (MAGIC.has(kw) && nxOp !== '(' && nxOp !== '::') {
           this.p++;
@@ -1100,6 +1120,7 @@ export class Parser {
   }
 
   parsePostfix(e) {
+    if (e.noDeref) return e;
     const top = this.postfixChain(e);
     // a nullsafe operator short-circuits the rest of its chain: mark the inner ones and the top
     if (top !== e) {
@@ -1160,7 +1181,11 @@ export class Parser {
             if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, name: ne, args, l }; continue; }
             e = { k: 'SProp', cls, name: ne.k === 'VarVar' ? ne.e : ne, l }; continue;
           }
-          if (nt.t === 'op' && nt.v === '{') { this.p++; const ne = this.parseExpr(); this.expect('}'); const args = this.parseArgs(); e = { k: 'SCall', cls, name: ne, args, l }; continue; }
+          if (nt.t === 'op' && nt.v === '{') {
+            this.p++; const ne = this.parseExpr(); this.expect('}');
+            if (!this.isOp('(')) { e = { k: 'CConst', cls, name: ne, l }; continue; } // C::{expr} (PHP 8.3)
+            const args = this.parseArgs(); e = { k: 'SCall', cls, name: ne, args, l }; continue;
+          }
           if (nt.t !== 'id') this.unexpected();
           this.p++;
           if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, name: nt.v, args, l }; continue; }

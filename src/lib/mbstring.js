@@ -7,6 +7,7 @@ import { rt } from '../runtime/state.js';
 import { throwError } from '../runtime/errors.js';
 import { callNative } from '../runtime/functions.js';
 import { def, I, S } from './core.js';
+import { since } from '../runtime/version.js';
 
 const mbChars = (s) => Array.from(utf8Decode(s));
 def('mb_strlen', (string, encoding = null) => (encoding !== null && /^(8bit|ascii|latin1|iso-8859-1)$/i.test(S(encoding)) ? S(string).length : mbChars(S(string)).length));
@@ -75,7 +76,20 @@ def('mb_strrev', (string) => utf8Encode(mbChars(S(string)).reverse().join('')));
 rt.fns.delete('mb_strrev');
 def('mb_ucfirst', (string, encoding = null) => { const c = mbChars(S(string)); if (c.length) c[0] = c[0].toUpperCase(); return utf8Encode(c.join('')); });
 def('mb_lcfirst', (string, encoding = null) => { const c = mbChars(S(string)); if (c.length) c[0] = c[0].toLowerCase(); return utf8Encode(c.join('')); });
-def('mb_trim', (string, characters = null, encoding = null) => utf8Encode(utf8Decode(S(string)).trim()));
+// mb_trim() and friends (PHP 8.4): Unicode whitespace by default
+const MB_TRIM_DEFAULT = ' \f\n\r\t\v\0\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\u0085\u180E';
+function mbTrim(string, characters, mode) {
+  const c = mbChars(S(string));
+  const set = new Set(characters === null ? Array.from(MB_TRIM_DEFAULT) : mbChars(S(characters)));
+  let a = 0, b = c.length;
+  if (mode !== 'r') while (a < b && set.has(c[a])) a++;
+  if (mode !== 'l') while (b > a && set.has(c[b - 1])) b--;
+  return utf8Encode(c.slice(a, b).join(''));
+}
+def('mb_trim', (string, characters = null, encoding = null) => mbTrim(string, characters, ''));
+def('mb_ltrim', (string, characters = null, encoding = null) => mbTrim(string, characters, 'l'));
+def('mb_rtrim', (string, characters = null, encoding = null) => mbTrim(string, characters, 'r'));
+since(80400, 'fn', 'mb_trim', 'mb_ltrim', 'mb_rtrim', 'mb_ucfirst', 'mb_lcfirst');
 def('mb_substitute_character', () => true);
 def('mb_language', () => 'neutral');
 def('mb_list_encodings', () => PHPArray.from(['UTF-8', 'ASCII', 'ISO-8859-1']));

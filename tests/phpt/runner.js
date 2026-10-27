@@ -10,6 +10,10 @@
 //     --baseline FILE      fail if a test listed in FILE (one name per line) no longer passes
 //     --update-baseline FILE  write the names of all passing tests to FILE
 //     --bundle             test dist/nip.cjs instead of bin/nip.js
+//     --expect             compare with the test's --EXPECT-- / --EXPECTF-- / --EXPECTREGEX-- section
+//                          instead of running `php` (for tests of PHP versions newer than the local
+//                          php; SKIPIF runs with NIP)
+//     --nip-ini K=V        extra -d setting for NIP only (e.g. nip.php_version=8.5)
 import fs from 'node:fs';
 import path from 'node:path';
 import cp from 'node:child_process';
@@ -18,7 +22,8 @@ import os from 'node:os';
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const args = process.argv.slice(2);
 let jobs = os.cpus().length, filter = null, show = false, outFile = null, baseline = null, updateBaseline = null;
-let root = process.env.PHPSRC || '/tmp/php-src', bundle = false;
+let root = process.env.PHPSRC || '/tmp/php-src', bundle = false, expectMode = false;
+const nipIni = [];
 const list = [];
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
@@ -30,6 +35,8 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--baseline') baseline = args[++i];
   else if (a === '--update-baseline') updateBaseline = args[++i];
   else if (a === '--bundle') bundle = true;
+  else if (a === '--expect') expectMode = true;
+  else if (a === '--nip-ini') nipIni.push('-d', args[++i]);
   else if (a.startsWith('--')) { console.error(`unknown option ${a}`); process.exit(2); }
   else list.push(a);
 }
@@ -77,6 +84,33 @@ function run(cmd, argv, cwd, timeout) {
     p.on('close', (code) => { clearTimeout(t); res({ out: out.toString('latin1'), code, killed }); });
   });
 }
+// run-tests.php's EXPECTF placeholders
+function expectfRegex(exp) {
+  let re = '';
+  const parts = exp.split('%r');
+  parts.forEach((part, i) => {
+    if (i % 2) { re += '(' + part + ')'; return; }
+    re += part.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
+      .replace(/%e/g, '\\/').replace(/%s/g, '[^\\r\\n]+').replace(/%S/g, '[^\\r\\n]*')
+      .replace(/%a/g, '[\\s\\S]+').replace(/%A/g, '[\\s\\S]*').replace(/%w/g, '\\s*')
+      .replace(/%i/g, '[+-]?\\d+').replace(/%d/g, '\\d+').replace(/%x/g, '[0-9a-fA-F]+')
+      .replace(/%f/g, '[+-]?\\.?\\d+\\.?\\d*(?:[Ee][+-]?\\d+)?').replace(/%c/g, '.').replace(/%0/g, '\\x00');
+  });
+  return new RegExp('^' + re + '$');
+}
+function matchesExpected(s, out) {
+  const norm = (t) => t.replace(/\r\n/g, '\n').trim();
+  const got = norm(out);
+  if (s.EXPECT !== undefined) return got === norm(s.EXPECT);
+  if (s.EXPECTF !== undefined) return expectfRegex(norm(s.EXPECTF)).test(got);
+  if (s.EXPECTREGEX !== undefined) return new RegExp('^' + norm(s.EXPECTREGEX) + '$').test(got);
+  return false;
+}
+const siblingCache = new Map();
+function siblings(d) {
+  if (!siblingCache.has(d)) siblingCache.set(d, fs.readdirSync(d).filter((f) => /\.(inc|php|txt|data)$/.test(f) && fs.statSync(path.join(d, f)).isFile()));
+  return siblingCache.get(d);
+}
 const results = { pass: [], fail: [], skip: [], timeout: [] };
 let idx = 0;
 async function one(file) {
@@ -86,14 +120,25 @@ async function one(file) {
   const dir = path.join(work, String(idx++)); fs.mkdirSync(dir);
   const name = path.basename(file).replace(/\.phpt$/, '.php');
   fs.writeFileSync(path.join(dir, name), s.FILE, 'latin1');
+  // (expect mode: helper files next to the test, which it includes relative to __DIR__)
+  if (expectMode) for (const f of siblings(path.dirname(file))) fs.copyFileSync(path.join(path.dirname(file), f), path.join(dir, f));
   const ini = ['-d', 'display_errors=1', '-d', 'log_errors=0', '-d', 'error_reporting=32767', '-d', 'html_errors=0'];
+  // (run-tests.php's defaults; differential runs get the local php.ini's, like NIP)
+  if (expectMode) ini.push('-d', 'zend.exception_ignore_args=0', '-d', 'zend.exception_string_param_max_len=15', '-d', 'zend.assertions=1', '-d', 'precision=14', '-d', 'serialize_precision=-1', '-d', 'short_open_tag=0', '-d', 'output_buffering=0', '-d', 'memory_limit=128M');
   if (s.INI) for (const l of s.INI.split('\n')) { const t = l.trim(); if (t && !t.startsWith(';')) ini.push('-d', t); }
   if (s.SKIPIF) {
     fs.writeFileSync(path.join(dir, 'skip.php'), s.SKIPIF, 'latin1');
-    const r = await run('php', [...ini, 'skip.php'], dir, 10000);
+    const r = expectMode ? await run('node', [NIP, ...ini, ...nipIni, 'skip.php'], dir, 10000) : await run('php', [...ini, 'skip.php'], dir, 10000);
     if (/^\s*skip/i.test(r.out)) { results.skip.push(file); return; }
   }
-  const [a, b] = await Promise.all([run('php', [...ini, name], dir, 20000), run('node', [NIP, ...ini, name], dir, 30000)]);
+  if (expectMode) {
+    const b = await run('node', [NIP, ...ini, ...nipIni, name], dir, 30000);
+    if (b.killed) { results.timeout.push(file); return; }
+    if (matchesExpected(s, b.out)) results.pass.push(file);
+    else { results.fail.push(file); if (show) console.log('=== FAIL ' + file + '\n--- expected\n' + (s.EXPECT ?? s.EXPECTF ?? s.EXPECTREGEX ?? '').slice(0, 3000) + '\n--- nip (' + b.code + ')\n' + b.out.slice(0, 3000)); }
+    return;
+  }
+  const [a, b] = await Promise.all([run('php', [...ini, name], dir, 20000), run('node', [NIP, ...ini, ...nipIni, name], dir, 30000)]);
   if (a.killed) { results.skip.push(file); return; }
   if (b.killed) { results.timeout.push(file); return; }
   if (a.out === b.out && a.code === b.code) results.pass.push(file);
