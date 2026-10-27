@@ -241,6 +241,9 @@ function checkProps(cls, decl, resolve) {
     const pn = `${inhClsName(pi.cls)}::$${n}`, cn = `${inhClsName(cls)}::$${n}`;
     if (pStatic !== cStatic) throw at(`Cannot redeclare ${pStatic ? '' : 'non '}static ${pn} as ${cStatic ? '' : 'non '}static ${cn}`);
     if (!!pi.readonly !== !!ci.readonly) throw at(`Cannot redeclare ${pi.readonly ? '' : 'non-'}readonly property ${pn} as ${ci.readonly ? '' : 'non-'}readonly ${cn}`);
+    if (pi.final) throw at(`Cannot override final property ${pn}`);
+    // set visibility (PHP 8.4): the same or weaker than the parent's (its visibility when it has none)
+    if (ci.setVis && VIS_RANK[ci.setVis] > VIS_RANK[pi.setVis || pi.vis]) throw at(`Set access level of ${cn} must be ${pi.setVis ? pi.setVis + '(set)' : 'omitted'} (as in class ${inhClsName(pi.cls)})${pi.setVis ? ' or weaker' : ''}`);
     if (VIS_RANK[ci.vis] > VIS_RANK[pi.vis]) throw at(`Access level to ${cn} must be ${pi.vis} (as in class ${inhClsName(pi.cls)})${pi.vis === 'protected' ? ' or weaker' : ''}`);
     const pt = pi.decl ? pi.decl.type : pi.type, ct = ci.decl ? ci.decl.type : ci.type;
     if (pt) {

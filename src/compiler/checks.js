@@ -118,7 +118,8 @@ export function checkProgram(ast, file) {
           const lm = m.fn.name.toLowerCase();
           if ((lm === '__construct' || lm === '__clone') && rt.phpVersion >= 80500 && hasAttrName(m.fn.attrs, 'nodiscard')) fail(`Method ${n.name}::${m.fn.name} cannot be #[\\NoDiscard]`, m);
         }
-        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
+        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); checkSetVis(n, p, p.vis, p.l); }
+        for (const m of n.methods) if (m.fn.name.toLowerCase() === '__construct') for (const p of m.fn.params) if (p.promote) checkSetVis(n, p, p.promote, m.l);
         for (const c of n.consts) {
           checkAttrs(c.attrs, T_CLASS_CONSTANT, c);
           checkConstExpr(c.e, false);
@@ -515,6 +516,13 @@ export function checkProgram(ast, file) {
   // the attribute classes of the engine are validated at compile time; user ones only by
   // ReflectionAttribute::newInstance()
   // errors are reported at the line of the declaration (owner) the attributes belong to
+  // asymmetric visibility (PHP 8.4)
+  function checkSetVis(cd, p, vis, l) {
+    if (!p.setVis) return;
+    if (!p.type) fail(`Property with asymmetric visibility ${cd.name}::$${p.name} must have type`, { l });
+    const rank = { public: 0, protected: 1, private: 2 };
+    if (rank[vis] > rank[p.setVis]) fail(`Visibility of property ${cd.name}::$${p.name} must not be weaker than set visibility`, { l });
+  }
   function checkAttrs(attrs, target, owner) {
     if (!attrs) return;
     const fail = (msg) => { throw new FatalSig(msg, (owner || attrs[0]).l); };

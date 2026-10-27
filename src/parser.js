@@ -579,12 +579,23 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------- functions
+  // private(set) / protected(set) / public(set): asymmetric visibility (PHP 8.4)
+  setVisMod() {
+    if (rt.phpVersion < 80400 || !(this.isId('public') || this.isId('protected') || this.isId('private'))) return null;
+    const a = this.peek(1), b = this.peek(2), c = this.peek(3);
+    if (!(a.t === 'op' && a.v === '(' && b.t === 'id' && b.v.toLowerCase() === 'set' && c.t === 'op' && c.v === ')')) return null;
+    const vis = this.tok.v.toLowerCase();
+    this.p += 4;
+    return vis;
+  }
   parseParams() {
     this.expect('(');
     const params = [];
     while (!this.isOp(')')) {
       const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false, attrs: this.parseAttributes() };
       for (;;) {
+        const sv = this.setVisMod();
+        if (sv) { if (prm.setVis) this.fatal('Multiple access type modifiers are not allowed'); prm.setVis = sv; if (!prm.promote) prm.promote = 'public'; continue; }
         if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (prm.promoteKw) this.fatal('Multiple access type modifiers are not allowed'); prm.promote = this.next().v.toLowerCase(); prm.promoteKw = true; continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
         if (this.isId('static') || this.isId('abstract') || this.isId('final')) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a parameter`);
@@ -713,6 +724,8 @@ export class Parser {
     const mods = { vis: null, static: false, abstract: false, final: false, readonly: cd.flags.readonly, var: false };
     const once = (key, word) => { if (mods[key] && (key !== 'readonly' || !cd.flags.readonly || mods.readonlyKw)) this.fatal(`Multiple ${word} modifiers are not allowed`); mods[key] = true; };
     for (;;) {
+      const sv = this.setVisMod();
+      if (sv) { if (mods.setVis) this.fatal('Multiple access type modifiers are not allowed'); mods.setVis = sv; continue; }
       if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (mods.vis) this.fatal('Multiple access type modifiers are not allowed'); mods.vis = this.next().v.toLowerCase(); continue; }
       if (this.isId('static') && !this.isOp('::', 1)) { once('static', 'static'); this.p++; continue; }
       if (this.isId('abstract')) { once('abstract', 'abstract'); this.p++; continue; }
@@ -757,7 +770,7 @@ export class Parser {
       const doc = this.takeDoc(v);
       let def; let hasDef = false;
       if (this.accept('=')) { def = this.parseExpr(); hasDef = true; }
-      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', visKw: mods.vis || (mods.var ? 'public' : null), group, type, readonly: mods.readonly, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
+      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', visKw: mods.vis || (mods.var ? 'public' : null), setVis: mods.setVis || null, group, type, readonly: mods.readonly, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
     } while (this.accept(','));
     if (this.isOp('{')) this.error('Property hooks are not supported');
     this.semi();

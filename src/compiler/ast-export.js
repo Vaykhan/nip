@@ -94,7 +94,7 @@ function axEncaps(parts, quote, ind) {
 function axParams(ps, ind) {
   return ps.map((p) => {
     let s = axAttrs(p.attrs, ind, false);
-    if (p.promote) s += p.promote + ' ';
+    if (p.promote) s += (p.promoteKw || !p.setVis ? p.promote + ' ' : '') + (p.setVis ? p.setVis + '(set) ' : '');
     if (p.type) s += axTypeStr(p.type) + ' ';
     if (p.byRef) s += '&';
     if (p.variadic) s += '...';
@@ -147,7 +147,7 @@ function axClassBody(cd, ind) {
   for (const p of cd.props) { const g = p.group ?? p.seq; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
   for (const ps of groups.values()) {
     const p0 = ps[0];
-    members.push([p0.seq, () => axAttrs(p0.attrs, ind + 1, true) + (p0.visKw ? p0.visKw + ' ' : '') + (p0.static ? 'static ' : '') + (p0.readonly ? 'readonly ' : '') + (p0.type ? axTypeStr(p0.type) + ' ' : '') +
+    members.push([p0.seq, () => axAttrs(p0.attrs, ind + 1, true) + (p0.visKw ? p0.visKw + ' ' : '') + (p0.setVis ? p0.setVis + '(set) ' : '') + (p0.static ? 'static ' : '') + (p0.readonly ? 'readonly ' : '') + (p0.type ? axTypeStr(p0.type) + ' ' : '') +
       ps.map((p) => '$' + p.name + (p.hasDef ? ' = ' + axExp(p.def, 0, ind + 2) : '')).join(', ') + ';']);
   }
   for (const m of cd.methods) {

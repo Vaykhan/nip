@@ -176,7 +176,7 @@ export function declareClass(decl, f) {
     for (const m of decl.methods) addMethod(cls, m.fn, m, cls);
     // promoted ctor params
     const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
-    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
+    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, setVis: prm.setVis || null, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
     if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
     checkInheritance(cls, decl, resolveForCheck);
     // abstract check
@@ -264,9 +264,18 @@ function addProp(cls, p, owner) {
     internal: isInternalName(owner, p.name),
   };
   if (info.internal) cls.hasInternal = true;
+  // asymmetric visibility (PHP 8.4): public readonly is protected(set); a set visibility equal
+  // to the visibility is none; private(set) is final
+  if (rt.phpVersion >= 80400) {
+    let sv = p.setVis || null;
+    if (!sv && p.readonly && p.vis === 'public') sv = 'protected';
+    if (sv === p.vis) sv = null;
+    info.setVis = sv;
+    if (sv === 'private') info.final = true;
+  }
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
-    const si = { name: p.name, cls: owner, vis: p.vis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
+    const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
     if (!info.hasDef && info.type && !info.type.nullable) si.uninit = true;
     cls.sprops.set(p.name, si);
     return;
@@ -608,6 +617,8 @@ function guardEnter(obj, kind, name) {
 }
 function guardLeave(obj, kind, name) { obj.guards.delete(kind + name); }
 const guardFree = (obj, kind, name) => !obj.guards || !obj.guards.has(kind + name);
+// declared properties removed with unset() (as opposed to never initialized ones)
+const wasUnset = (obj, key) => obj.unsetKeys !== undefined && obj.unsetKeys.has(key);
 export function magicGet(obj, name) {
   const m = obj.cls.methods.get('__get');
   if (!m || !guardEnter(obj, 'g', name)) return undefined;
@@ -629,7 +640,8 @@ export function readProp(obj, name, f) {
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
   if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipget', [name]); if (r !== undefined) return r; }
-  const r = magicGet(obj, name);
+  // (a typed property that was never initialized doesn't fall back to __get; an unset() one does)
+  const r = info && info.type && !wasUnset(obj, key) ? undefined : magicGet(obj, name);
   if (r !== undefined) return r;
   if (info && info.type) throwError('Error', `Typed property ${info.cls.name}::$${name} must not be accessed before initialization`);
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
@@ -674,7 +686,11 @@ export function writeProp(obj, name, v, f) {
     if (info.readonly && !consumeReinit(obj, key)) {
       // (named after the declaring class)
       if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
-      if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      if (info.setVis === undefined && scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'modify', f);
+    } else if (info.setVis && !setAccessible(info, scope) && !(obj.reinit !== undefined && obj.reinit.has(key))) {
+      if (!obj.props.has(key) && wasUnset(obj, key) && magicSet(obj, name, v)) return;
+      asymError(info, 'modify', f);
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
   } else if (!obj.props.has(name)) {
@@ -709,6 +725,16 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+// asymmetric visibility (PHP 8.4): may the scope write the property?
+export function setAccessible(info, scope) {
+  if (!info.setVis || info.cls === scope) return true;
+  return info.setVis === 'protected' && !!scope && (scope.ancestors.has(info.cls.lname) || info.cls.ancestors.has(scope.lname));
+}
+export function asymError(info, op, f) {
+  const scope = f ? (f.sc || f.cls) : null;
+  const vis = info.setVis === 'private' ? 'private(set)' : info.readonly ? 'protected(set) readonly' : 'protected(set)';
+  throwError('Error', `Cannot ${op} ${vis} property ${info.cls.name}::$${info.name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+}
 // while an object is being cloned, each of its readonly properties may be modified once
 function consumeReinit(obj, key) {
   if (obj.reinit === undefined || !obj.reinit.has(key)) return false;
@@ -729,6 +755,10 @@ function resolvePropKey(obj, name, f, forWrite) {
   if (info.vis !== 'public' && !propAccessible(info, scope)) {
     if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
     throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
+  }
+  if (forWrite && info.setVis && !info.readonly && !setAccessible(info, scope)) {
+    const sl = obj.props.get(info.key);
+    if (!((sl instanceof Ref ? sl.v : sl) instanceof PHPObject)) asymError(info, 'indirectly modify', f); // (objects can be modified)
   }
   if (forWrite && info.readonly && obj.props.has(info.key) && !(obj.reinit !== undefined && obj.reinit.has(info.key))) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
   return [info.key, info];
@@ -793,6 +823,7 @@ export function propArr(obj, name, f) {
   let v = isRef ? slot.v : slot;
   if (v instanceof PHPObject) return v;
   if (info && info.readonly) readonlyIndirect(obj, key, info, name);
+  if (info && info.setVis && !setAccessible(info, f ? f.cls : null)) asymError(info, 'indirectly modify', f);
   if (v instanceof PHPArray) {
     if (v.cow || v.fe) { v = v.clone(); if (isRef) slot.v = v; else obj.props.set(key, v); }
     return v;
@@ -818,6 +849,12 @@ export function unsetProp(obj, name, f) {
     }
     if (info.readonly) throwError('Error', `Cannot unset readonly property ${obj.cls.name}::$${name}`);
     key = info.key;
+    if (info.setVis && !setAccessible(info, scope)) {
+      const m = obj.cls.methods.get('__unset');
+      if (!obj.props.has(key) && wasUnset(obj, key) && m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
+      asymError(info, 'unset', f);
+    }
+    (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key);
   }
   if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
   if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;

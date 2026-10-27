@@ -11,7 +11,7 @@ import { rt } from '../runtime/state.js';
 import { deprecated, notice, throwError, warn } from '../runtime/errors.js';
 import { coercePropType } from '../runtime/functions.js';
 import {
-  bindProp, callMethodName, findStaticProp, lookupClass, lookupStaticProp, propArr, propRef, readProp,
+  asymError, bindProp, callMethodName, findStaticProp, lookupClass, lookupStaticProp, propArr, propRef, readProp, setAccessible,
   readPropQuiet, unsetProp, writeProp
 } from '../runtime/classes.js';
 import { dropRef, gcCheck } from '../runtime/gc.js';
@@ -395,15 +395,17 @@ function spropOps(C, N, sname) {
   const n = { name: sname };
   const nm = N ? (f) => toStr(N(f)) : () => n.name;
   const info = (f) => findStaticProp(C(f), nm(f), f);
+  // (asymmetric visibility, PHP 8.4)
+  const winfo = (f, op) => { const i = info(f); if (i.setVis && !setAccessible(i, f.cls)) asymError(i, op, f); return i; };
   return {
     get: (f) => info(f).ref.v,
     getq: (f) => { const cls = C(f); const i = lookupStaticProp(cls, nm(f)); return i ? i.ref.v : undefined; },
-    set: (f, v) => { const i = info(f); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
-    bind: (f, r) => { info(f).ref = r; },
-    ref: (f) => info(f).ref,
-    arr: (f) => writableArrIn(info(f).ref),
+    set: (f, v) => { const i = winfo(f, 'modify'); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
+    bind: (f, r) => { winfo(f, 'modify').ref = r; },
+    ref: (f) => winfo(f, 'indirectly modify').ref,
+    arr: (f) => writableArrIn(winfo(f, 'indirectly modify').ref),
     unset: () => throwError('Error', 'Attempt to unset static property'),
-    modify: (f, fn) => { const i = info(f); const nv = fn(i.ref.v); i.ref.v = i.type ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return nv; },
+    modify: (f, fn) => { const i = winfo(f, 'indirectly modify'); const nv = fn(i.ref.v); i.ref.v = i.type ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return nv; },
   };
 }
 

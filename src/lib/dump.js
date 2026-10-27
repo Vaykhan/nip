@@ -38,7 +38,7 @@ function varDump0(v, ind, seen, rc) {
     if (seen.has(v)) return pad + '*RECURSION*\n';
     seen.add(v);
     const entries = debugProps(v);
-    let s = pad + `object(${v.cls.anon ? displayName(v.cls) : v.cls.name})#${v.id} (${entries.length}) {\n`;
+    let s = pad + `object(${v.cls.anon ? displayName(v.cls) : v.cls.name})#${v.id} (${entries.filter((e) => !e[2]).length}) {\n`;
     for (const [label, x, uninit] of entries) {
       s += pad + `  [${label}]=>\n`;
       s += uninit ? pad + `  uninitialized(${uninit})\n` : varDump(x, ind + 2, seen, rc);
