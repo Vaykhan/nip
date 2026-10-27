@@ -101,11 +101,18 @@ export function canAccessMember(m, scope) {
 
 let anonSerial = 0;
 export const displayName = (cls) => { const i = cls.name.indexOf('\0'); return i < 0 ? cls.name : cls.name.slice(0, i); };
+// (zend_class_redeclaration_error, PHP 8.4)
+export function redeclareMsg(ex, name) {
+  const kind = ex.isInterface ? 'interface' : ex.isTrait ? 'trait' : ex.isEnum ? 'enum' : 'class';
+  if (!ex.decl || ex.decl.file === PRELUDE_FILE) return `Cannot redeclare ${kind} ${name}`;
+  return `Cannot redeclare ${kind} ${name} (previously declared in ${ex.decl.file}:${ex.decl.startLine || ex.decl.l})`;
+}
 export function declareClass(decl, f) {
   const lname = decl.name.toLowerCase();
   if (!decl.anon && rt.classes.has(lname)) {
     const ex = rt.classes.get(lname);
     if (ex.decl === decl) return ex;
+    if (rt.phpVersion >= 80400) throw new FatalSig(redeclareMsg(ex, ex.name), decl.l, decl.file);
     throw new FatalSig(`Cannot declare ${decl.kind} ${decl.name}, because the name is already in use`, decl.l, decl.file);
   }
   const cls = new PHPClass(decl.anon ? `${decl.parent || decl.interfaces[0] || 'class'}@anonymous\0${decl.file}:${decl.l}$${(anonSerial++).toString(16)}` : decl.name);

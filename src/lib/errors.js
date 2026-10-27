@@ -8,7 +8,7 @@ import { bytes, utf8Encode } from '../utf8.js';
 import {
   E_ALL, E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING, rt, writeFd
 } from '../runtime/state.js';
-import { captureTrace, raise, setTimeLimit, throwError, traceAsString } from '../runtime/errors.js';
+import { captureTrace, deprecated, raise, setTimeLimit, throwError, traceAsString } from '../runtime/errors.js';
 import { boundCallback, callableFn, callValue } from '../runtime/callables.js';
 import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
@@ -76,6 +76,7 @@ def('trigger_error', (message, error_level = E_USER_NOTICE) => {
   const lvl = I(error_level);
   if (![E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, E_USER_DEPRECATED].includes(lvl)) throwError('ValueError', 'trigger_error(): Argument #2 ($error_level) must be one of E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, or E_USER_DEPRECATED');
   if (lvl === E_USER_ERROR) {
+    if (rt.phpVersion >= 80400) deprecated('Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead');
     if (rt.errorHandlers.length) { const h = rt.errorHandlers[rt.errorHandlers.length - 1]; if (h.handler !== null && (h.mask & lvl)) { const r = callValue(h.handler, [lvl, S(message), rt.file, rt.line]); if (r !== false) return true; } }
     throw new FatalSig(S(message), rt.line, rt.file);
   }

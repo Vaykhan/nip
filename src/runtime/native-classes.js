@@ -46,6 +46,7 @@ export function bootNativeClasses() {
     },
   });
   closureClass.nativeDebug = closureDebug;
+
   generatorClass = nativeClass('Generator', {
     final: true, interfaces: ['Iterator'],
     methods: {
@@ -68,6 +69,12 @@ export function bootNativeClasses() {
       },
     },
   });
+  // (PHP 8.4: Generator::__debugInfo() names the generator function)
+  generatorClass.nativeDebug = (o) => {
+    if (rt.phpVersion < 80400 || !o.gen) return [];
+    const fn = o.gen.fn, scope = o.gen.f && o.gen.f.cls;
+    return [['function', (scope ? scope.name + '::' : '') + fn.name]];
+  };
   generatorClass.hasDestructor = true; // runs pending finally blocks (see GenState.destroy())
   generatorClass.nativeDestruct = (o) => { if (o.gen) o.gen.destroy(); };
   nativeClass('__PHP_Incomplete_Class').allowDynamic = true;
@@ -88,6 +95,7 @@ function closureDebug(o) {
   const fn = o.fn;
   // closures made from a callable (Closure::fromCallable(), strlen(...)) show the function
   if (!fn.isClosure) out.push(['function', fn.isMethod && fn.cls ? fn.cls.name + '::' + fn.name : fn.name]);
+  else if (rt.phpVersion >= 80400) out.push(['name', fn.name], ['file', fn.file], ['line', fn.line]); // (PHP 8.4)
   const statics = new PHPArray();
   if (o.bound) for (const [k, v] of o.bound) statics.set(k, v instanceof Ref ? v : cp(v));
   if (fn.decl && fn.decl.body) {
