@@ -74,7 +74,7 @@ export function checkProgram(ast, file) {
   const methods = new WeakSet(); // function nodes that are methods (attribute target "method")
   // the function being checked: null at the top level (which may run inside a class via
   // include), else { cls: enclosing ClassDecl or null, closure }
-  let fnCtx = null, curClass = null;
+  let fnCtx = null, curClass = null, curFn = null;
   const knownFns = new Map(); // functions declared earlier in the file (see 'FuncDecl')
 
   function visit(n, ctx) {
@@ -97,6 +97,14 @@ export function checkProgram(ast, file) {
     if ((n.k === 'MCall' || n.k === 'SCall' || n.k === 'NullsafeMCall') && n.name && typeof n.name === 'object' && n.name.k === 'Lit' && typeof n.name.v !== 'string') fail('Method name must be a string', n);
     switch (n.k) {
       case 'Lit': return;
+      case 'ParentHook': {
+        const fn = curFn;
+        if (!fnCtx || !fnCtx.cls) fail('Cannot use "parent" when no class scope is active', n);
+        if (!fn || !fn.hookProp) fail(`Must not use parent::$${n.prop}::${n.hook}() outside a property hook`, n);
+        if (fn.hookProp !== n.prop) fail(`Must not use parent::$${n.prop}::${n.hook}() in a different property ($${fn.hookProp})`, n);
+        if (fn.hook !== n.hook) fail(`Must not use parent::$${n.prop}::${n.hook}() in a different property hook (${fn.hook})`, n);
+        break;
+      }
       case 'And': case 'Or':
         // a constant left side decides it: PHP doesn't compile the right side at all
         if (n.a && n.a.k === 'Lit' && (n.k === 'And') !== toBool(n.a.v)) { visit(n.a, READ); return; }
@@ -118,7 +126,10 @@ export function checkProgram(ast, file) {
           const lm = m.fn.name.toLowerCase();
           if ((lm === '__construct' || lm === '__clone') && rt.phpVersion >= 80500 && hasAttrName(m.fn.attrs, 'nodiscard')) fail(`Method ${n.name}::${m.fn.name} cannot be #[\\NoDiscard]`, m);
         }
-        for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); checkSetVis(n, p, p.vis, p.l); }
+        for (const p of n.props) {
+          checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); checkSetVis(n, p, p.vis, p.l);
+          if (p.hooks) for (const h of Object.values(p.hooks)) { methods.add(h); checkAttrs(h.attrs, T_METHOD, h); }
+        }
         for (const m of n.methods) if (m.fn.name.toLowerCase() === '__construct') for (const p of m.fn.params) if (p.promote) checkSetVis(n, p, p.promote, m.l);
         for (const c of n.consts) {
           checkAttrs(c.attrs, T_CLASS_CONSTANT, c);
@@ -382,7 +393,31 @@ export function checkProgram(ast, file) {
       if (p.type && !promoted) checkTypeDecl(p.type, 'prop', l, `${name}::$${p.name}`);
     };
     for (const p of n.props) {
-      if (kind === 'interface') fail('Interfaces may not include properties', p);
+      // hooked properties (PHP 8.4)
+      if (kind === 'interface' && rt.phpVersion >= 80400) {
+        if (!p.hooks) fail('Interfaces may only include hooked properties', p);
+        if (p.vis !== 'public') fail('Property in interface cannot be protected or private', p);
+        if (p.abstract) fail('Property in interface cannot be explicitly abstract. All interface members are implicitly abstract', p);
+      } else if (kind === 'interface') fail('Interfaces may not include properties', p);
+      if (p.abstract && !p.hooks) fail('Only hooked properties may be declared abstract', p);
+      if (p.final && p.abstract) fail('Cannot use the final modifier on an abstract property', p);
+      if (p.final && p.vis === 'private') fail('Property cannot be both final and private', p);
+      if (p.final && kind === 'interface') fail('Property in interface cannot be final', p);
+      if (p.abstract && p.hooks && !Object.values(p.hooks).some((h) => h.abstract)) fail(`Abstract property ${name}::$${p.name} must specify at least one abstract hook`, p);
+      if (p.hooks) {
+        if (p.readonly) fail('Hooked properties cannot be readonly', p);
+        if (p.static) fail('Cannot declare hooks for static property', p);
+        const hs = Object.values(p.hooks);
+        for (const h of hs) {
+          if (h.abstract && h.final) fail('Property hook cannot be both abstract and final', h);
+          if (h.final && p.vis === 'private') fail('Property hook cannot be both final and private', h);
+          if (h.abstract && p.vis === 'private') fail('Property hook cannot be both abstract and private', h);
+          if (h.hook === 'set' && h.explicitParams && h.params[0] && h.params[0].def) fail(`Parameter $${h.params[0].name} of set hook ${name}::$${p.name} must not have a default value`, h);
+          if (h.abstract && kind !== 'interface' && !n.flags.abstract && !p.abstract && kind !== 'trait') fail(`Class ${name} declares abstract property hook ${name}::$${p.name}::${h.hook} and must therefore be declared abstract`, h);
+          if (h.hook === 'get' && h.explicitParams) fail(`get hook of property ${name}::$${p.name} must not have a parameter list`, h);
+          if (h.hook === 'set' && h.explicitParams && h.params.length !== 1) fail(`set hook of property ${name}::$${p.name} must accept exactly one parameter`, h);
+        }
+      }
       if (kind === 'enum') fail(`Enum ${name} cannot include properties`, p);
       checkProp(p, p, false);
     }
@@ -605,7 +640,8 @@ export function checkProgram(ast, file) {
   }
   function within(kind, fn) { path.push({ kind }); try { fn(); } finally { path.pop(); } }
   function visitFunction(fn) {
-    const outer = scope, outerPath = path, outerCtx = fnCtx;
+    const outer = scope, outerPath = path, outerCtx = fnCtx, outerFn = curFn;
+    curFn = fn;
     const closure = !!(fn.closure || fn.arrow);
     fnCtx = { cls: methods.has(fn) ? curClass : closure && fnCtx ? fnCtx.cls : closure ? curClass : null, closure };
     for (const p of fn.params) if (p.type) checkType(p.type, fn, fnCtx);
@@ -659,7 +695,7 @@ export function checkProgram(ast, file) {
     }
     visit(fn.params, READ); visit(fn.body, READ); visit(fn.arrowExpr, READ);
     checkGotos(scope, !fn.params.length && !fn.isGen ? fn.body : null);
-    scope = outer; path = outerPath; fnCtx = outerCtx;
+    scope = outer; path = outerPath; fnCtx = outerCtx; curFn = outerFn;
   }
   // body: the statements, when a leading goto would be the function's first opcode
   function checkGotos(sc, body) {

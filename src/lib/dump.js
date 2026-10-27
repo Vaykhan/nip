@@ -67,7 +67,7 @@ function debugProps(o) {
   const out = [];
   const seenKeys = new Set();
   for (const [key, info] of o.cls.slots) {
-    if (!o.props.has(key) && info.type && !info.internal) { out.push([propLabel(o, key, true), null, typeStr(info.type, info.cls)]); seenKeys.add(key); }
+    if (!o.props.has(key) && info.type && !info.internal && !info.virtual) { out.push([propLabel(o, key, true), null, typeStr(info.type, info.cls)]); seenKeys.add(key); }
   }
   const res = [];
   for (const [k, s] of objectProps(o)) res.push([propLabel(o, k, true), s]);

@@ -12,6 +12,7 @@ import { deprecated, PRELUDE_FILE, raise, throwError, warn } from './errors.js';
 import { findMethod, isCallable } from './callables.js';
 import { frameExit, gcAfterCall } from './gc.js';
 import { makeGenerator } from './generators.js';
+import { writeProp } from './classes.js';
 
 function argsHoldObjects(args) {
   for (let i = 0; i < args.length; i++) { const a = args[i]; if (a !== null && typeof a === 'object' && (a instanceof PHPObject || (a instanceof Ref && a.v instanceof PHPObject))) return true; }
@@ -231,6 +232,7 @@ function promoteParam(f, p, v) {
   const obj = f.this;
   if (!obj) return;
   const info = obj.cls.props.get(p.name);
+  if (info && info.hooks) { writeProp(obj, p.name, v, f); return; } // (through the set hook)
   obj.props.set(info ? info.key : p.name, cp(v));
 }
 

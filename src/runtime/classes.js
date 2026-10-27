@@ -176,19 +176,21 @@ export function declareClass(decl, f) {
     for (const m of decl.methods) addMethod(cls, m.fn, m, cls);
     // promoted ctor params
     const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
-    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, setVis: prm.setVis || null, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
+    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, setVis: prm.setVis || null, hooks: prm.hooks, final: prm.final, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
     if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
     checkInheritance(cls, decl, resolveForCheck);
     // abstract check
     // zend_verify_abstract_class: an abstract class still has to implement private abstract methods
     if (!cls.isInterface && !cls.isTrait) {
       const abs = [...cls.methods.values()].filter((m) => m.abstract && (!cls.abstract || m.vis === 'private'));
+      // (and abstract property hooks)
+      if (!cls.abstract) for (const info of cls.props.values()) if (info.hooks) for (const h of [info.hooks.get, info.hooks.set]) if (h && h.abstractHook) abs.push({ cls: h.cls, name: h.name });
       if (abs.length) {
         const n = abs.length, s = n > 1 ? 's' : '';
         const list = abs.slice(0, 3).map((m) => m.cls.name + '::' + m.name).join(', ') + (n > 3 ? ', ...' : '');
         const what = cls.isEnum ? 'Enum' : 'Class';
         throw new FatalSig(!cls.abstract && !cls.isEnum
-          ? `${what} ${cls.name} contains ${n} abstract method${s} and must therefore be declared abstract or implement the remaining methods (${list})`
+          ? `${what} ${cls.name} contains ${n} abstract method${s} and must therefore be declared abstract or implement the remaining method${rt.phpVersion >= 80400 ? s : 's'} (${list})`
           : `${what} ${cls.name} must implement ${n} abstract private method${s} (${list})`, decl.l, decl.file);
       }
     }
@@ -256,6 +258,85 @@ export function addInterface(cls, ic) {
   cls.ifaceList.push(ic);
   for (const [k, v] of ic.consts) if (!cls.consts.has(k)) cls.consts.set(k, v);
   for (const [k, m] of ic.methods) if (!cls.methods.has(k)) cls.methods.set(k, m);
+  for (const [k, info] of ic.props) if (!cls.props.has(k)) cls.props.set(k, info); // (hooked properties, PHP 8.4)
+}
+// property hooks (PHP 8.4): info.hooks = { get, set } (compiled like methods, parent hooks the
+// property doesn't redeclare are inherited); a hooked property is virtual (no stored value)
+// when no hook of it uses $this->prop
+function hookUsesProp(n, name) {
+  if (!n || typeof n !== 'object') return false;
+  if (Array.isArray(n)) return n.some((x) => hookUsesProp(x, name));
+  if (n.k === 'Prop' && n.o && n.o.k === 'Var' && n.o.name === 'this' && n.name === name) return true;
+  if (n.k === 'Closure' || n.k === 'ClassDecl' || n.k === 'FuncDecl') return false; // (other functions)
+  for (const k in n) if (k !== 'l' && n[k] && typeof n[k] === 'object' && hookUsesProp(n[k], name)) return true;
+  return false;
+}
+function setupHooks(cls, info, p, owner) {
+  const parent = cls.props.get(p.name);
+  const hooks = { get: null, set: null };
+  let virtual = !!owner.isInterface;
+  if (p.hooks) {
+    virtual = true;
+    for (const kind of ['get', 'set']) {
+      const h = p.hooks[kind];
+      if (!h) continue;
+      // (a get hook returns the property's type)
+      const fn = compileFunction(kind === 'get' && p.type && !h.ret ? { ...h, ret: p.type } : h, { method: true, cls: owner });
+      fn.hookProp = p.name; fn.hookKind = kind; fn.abstractHook = !!h.abstract;
+      hooks[kind] = fn;
+      if (h.body && (kind === 'set' && h.shortExpr ? true : hookUsesProp(h.body, p.name))) virtual = false;
+    }
+    if (owner.isInterface) virtual = true;
+  }
+  if (parent && parent.cls !== owner) {
+    if (parent.hooks) {
+      for (const kind of ['get', 'set']) {
+        const ph = parent.hooks[kind];
+        if (ph && hooks[kind] && ph.decl.final) throw new FatalSig(`Cannot override final property hook ${ph.cls.name}::${ph.name}()`, p.l, owner.decl ? owner.decl.file : undefined);
+        if (!hooks[kind]) hooks[kind] = ph;
+      }
+    }
+    if (!parent.virtual) virtual = false;
+  }
+  info.hooks = hooks.get || hooks.set ? hooks : null;
+  info.virtual = virtual && !!info.hooks;
+  if (info.virtual && p.hasDef) throw new FatalSig(`Cannot specify default value for virtual hooked property ${owner.name}::$${p.name}`, p.l, owner.decl ? owner.decl.file : undefined);
+}
+// inside a hook of the property, running on the object itself: $this->prop is the stored value
+const inHook = (info, obj, f) => !!f && f.this === obj && !!f.fn && f.fn.hookProp === info.name;
+function hookedRead(obj, info, name, f) {
+  if (inHook(info, obj, f)) { if (info.virtual) throwError('Error', `Must not read from virtual property ${obj.cls.name}::$${name}`); return NO_HOOK; }
+  if (info.hooks.get) return callFunction(info.hooks.get, [], obj, info.hooks.get.cls, obj.cls, null);
+  if (info.virtual) throwError('Error', `Property ${obj.cls.name}::$${name} is write-only`);
+  return NO_HOOK;
+}
+const NO_HOOK = Symbol('no hook');
+// parent::$prop::get() / parent::$prop::set($v): the parent's hook, or its stored value when the
+// parent's property is a plain one
+export function parentHook(f, prop, hook, args) {
+  const cls = f.cls, obj = f.this;
+  if (!cls) throwError('Error', 'Cannot use "parent" when no class scope is active');
+  if (!cls.parent) throwError('Error', 'Cannot use "parent" when current class scope has no parent');
+  const pinfo = cls.parent.props.get(prop);
+  if (!pinfo) throwError('Error', `Undefined property ${cls.parent.name}::$${prop}`);
+  const want = hook === 'get' ? 0 : 1;
+  if (args.length > want) throwError('ArgumentCountError', `${pinfo.cls.name}::$${prop}::${hook}() expects exactly ${want} argument${want === 1 ? '' : 's'}, ${args.length} given`);
+  const h = pinfo.hooks && pinfo.hooks[hook];
+  if (h) return callFunction(h, args, obj, h.cls, obj.cls, null);
+  if (hook === 'get') {
+    const sl = obj.props.get(pinfo.key);
+    if (sl === undefined) {
+      if (pinfo.type) throwError('Error', `Typed property ${pinfo.cls.name}::$${prop} must not be accessed before initialization`);
+      warn(`Undefined property: ${obj.cls.name}::$${prop}`);
+      return null;
+    }
+    return sl instanceof Ref ? sl.v : sl;
+  }
+  let v = args.length ? (args[0] instanceof Ref ? args[0].v : args[0]) : null;
+  if (pinfo.type) v = coercePropType(pinfo, v, pinfo.cls.name, prop);
+  const sl = obj.props.get(pinfo.key);
+  if (sl instanceof Ref) sl.v = cp(v); else obj.props.set(pinfo.key, cp(v));
+  return v;
 }
 function addProp(cls, p, owner) {
   const info = {
@@ -267,12 +348,17 @@ function addProp(cls, p, owner) {
   // asymmetric visibility (PHP 8.4): public readonly is protected(set); a set visibility equal
   // to the visibility is none; private(set) is final
   if (rt.phpVersion >= 80400) {
+    if (p.final) info.final = true;
+    // the class that first declared the property (protected(set) is scoped by it)
+    const parent = cls.props.get(p.name);
+    info.proto = parent && parent.cls !== owner ? parent.proto || parent.cls : owner;
     let sv = p.setVis || null;
     if (!sv && p.readonly && p.vis === 'public') sv = 'protected';
     if (sv === p.vis) sv = null;
     info.setVis = sv;
     if (sv === 'private') info.final = true;
   }
+  if (p.hooks || p.abstract) setupHooks(cls, info, p, owner);
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
     const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
@@ -545,6 +631,7 @@ export function initProps(obj) {
   if (pi === null) {
     pi = [];
     for (const info of cls.slots.values()) {
+      if (info.virtual) continue; // (hooked properties without a stored value)
       if (info.hasDef) pi.push([info.key, propDefault(info)]);
       else if (!info.type) pi.push([info.key, null]);
     }
@@ -636,6 +723,7 @@ export function readProp(obj, name, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
+    if (info.hooks) { const r = hookedRead(obj, info, name, f); if (r !== NO_HOOK) return r; }
   } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
@@ -656,6 +744,7 @@ export function readPropQuiet(obj, name, f, issetOnly) {
   if (info !== undefined) {
     if (info.vis !== 'public' && !propAccessible(info, scope)) return magicIsset(obj, name, issetOnly);
     key = info.key;
+    if (info.hooks) { const r = hookedRead(obj, info, name, f); if (r !== NO_HOOK) return r === null ? undefined : r; }
   }
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
@@ -683,6 +772,11 @@ export function writeProp(obj, name, v, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
+    if (info.hooks && !inHook(info, obj, f)) {
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'modify', f);
+      if (info.hooks.set) { callFunction(info.hooks.set, [v], obj, info.hooks.set.cls, obj.cls, null); return; }
+      if (info.virtual) throwError('Error', `Property ${obj.cls.name}::$${name} is read-only`);
+    } else if (info.hooks && info.virtual) throwError('Error', `Must not write to virtual property ${obj.cls.name}::$${name}`);
     if (info.readonly && !consumeReinit(obj, key)) {
       // (named after the declaring class)
       if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
@@ -725,10 +819,14 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+function hookedIndirect(obj, info, name) {
+  throwError('Error', `Indirect modification of ${obj.cls.name}::$${name} is not allowed`);
+}
 // asymmetric visibility (PHP 8.4): may the scope write the property?
 export function setAccessible(info, scope) {
   if (!info.setVis || info.cls === scope) return true;
-  return info.setVis === 'protected' && !!scope && (scope.ancestors.has(info.cls.lname) || info.cls.ancestors.has(scope.lname));
+  const proto = info.proto || info.cls;
+  return info.setVis === 'protected' && !!scope && (scope.ancestors.has(proto.lname) || proto.ancestors.has(scope.lname));
 }
 export function asymError(info, op, f) {
   const scope = f ? (f.sc || f.cls) : null;
@@ -756,6 +854,7 @@ function resolvePropKey(obj, name, f, forWrite) {
     if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
     throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
   }
+  if (forWrite && info.hooks && !inHook(info, obj, f)) hookedIndirect(obj, info, name);
   if (forWrite && info.setVis && !info.readonly && !setAccessible(info, scope)) {
     const sl = obj.props.get(info.key);
     if (!((sl instanceof Ref ? sl.v : sl) instanceof PHPObject)) asymError(info, 'indirectly modify', f); // (objects can be modified)
@@ -822,6 +921,11 @@ export function propArr(obj, name, f) {
   const isRef = slot instanceof Ref;
   let v = isRef ? slot.v : slot;
   if (v instanceof PHPObject) return v;
+  if (info && info.hooks && !inHook(info, obj, f)) {
+    const r = hookedRead(obj, info, name, f);
+    if (r instanceof PHPObject) return r;
+    hookedIndirect(obj, info, name);
+  }
   if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   if (info && info.setVis && !setAccessible(info, f ? f.cls : null)) asymError(info, 'indirectly modify', f);
   if (v instanceof PHPArray) {
@@ -848,6 +952,7 @@ export function unsetProp(obj, name, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     if (info.readonly) throwError('Error', `Cannot unset readonly property ${obj.cls.name}::$${name}`);
+    if (info.hooks && !inHook(info, obj, f)) throwError('Error', `Cannot unset hooked property ${obj.cls.name}::$${name}`);
     key = info.key;
     if (info.setVis && !setAccessible(info, scope)) {
       const m = obj.cls.methods.get('__unset');

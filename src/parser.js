@@ -598,6 +598,7 @@ export class Parser {
         if (sv) { if (prm.setVis) this.fatal('Multiple access type modifiers are not allowed'); prm.setVis = sv; if (!prm.promote) prm.promote = 'public'; continue; }
         if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (prm.promoteKw) this.fatal('Multiple access type modifiers are not allowed'); prm.promote = this.next().v.toLowerCase(); prm.promoteKw = true; continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
+        if (this.isId('final') && rt.phpVersion >= 80400) { this.p++; prm.final = true; if (!prm.promote) prm.promote = 'public'; continue; }
         if (this.isId('static') || this.isId('abstract') || this.isId('final')) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a parameter`);
         break;
       }
@@ -607,6 +608,8 @@ export class Parser {
       const v = this.tok; if (v.t !== 'var') this.unexpected(); this.p++;
       prm.name = v.v;
       if (this.accept('=')) prm.def = this.parseExpr();
+      // a promoted property with hooks (PHP 8.4)
+      if (this.isOp('{') && rt.phpVersion >= 80400 && this.st.clsStack.length) { prm.hooks = this.parseHooks(this.st.clsStack[this.st.clsStack.length - 1], prm); if (!prm.promote) prm.promote = 'public'; }
       params.push(prm);
       if (!this.accept(',')) break;
     }
@@ -759,9 +762,9 @@ export class Parser {
       cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', abstractKw: mods.abstract, final: mods.final, l, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
-    // property
-    if (mods.abstract) this.fatal('Cannot use the abstract modifier on a property');
-    if (mods.final) this.fatal('Cannot use the final modifier on a property');
+    // property (abstract and final ones are PHP 8.4's)
+    if (mods.abstract && rt.phpVersion < 80400) this.fatal('Cannot use the abstract modifier on a property');
+    if (mods.final && rt.phpVersion < 80400) this.fatal('Cannot use the final modifier on a property');
     let type = null;
     if (this.tok.t !== 'var') type = this.parseType();
     const group = (cd.seq || 0) + 1; // (props declared together, for zend_ast_export)
@@ -770,10 +773,54 @@ export class Parser {
       const doc = this.takeDoc(v);
       let def; let hasDef = false;
       if (this.accept('=')) { def = this.parseExpr(); hasDef = true; }
-      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', visKw: mods.vis || (mods.var ? 'public' : null), setVis: mods.setVis || null, group, type, readonly: mods.readonly, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
+      const prop = { name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', visKw: mods.vis || (mods.var ? 'public' : null), setVis: mods.setVis || null, group, type, readonly: mods.readonly, abstract: mods.abstract, final: mods.final, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 };
+      if (this.isOp('{') && rt.phpVersion >= 80400) { prop.hooks = this.parseHooks(cd, prop); cd.props.push(prop); return; }
+      cd.props.push(prop);
     } while (this.accept(','));
-    if (this.isOp('{')) this.error('Property hooks are not supported');
     this.semi();
+  }
+
+  // property hooks (PHP 8.4): { get => expr; set(T $value) { ... } final get; &get; get; }; a
+  // hook is a method named $prop::get / $prop::set
+  parseHooks(cd, prop) {
+    this.expect('{');
+    const hooks = {};
+    if (this.isOp('}')) this.fatal('Property hook list must not be empty');
+    while (!this.accept('}')) {
+      const attrs = this.parseAttributes();
+      const hl = this.tok.l;
+      let final = false, abstract = false;
+      for (;;) {
+        if (this.isId('final')) { this.p++; final = true; continue; }
+        if (this.isId('abstract')) { this.p++; abstract = true; continue; }
+        if (this.tok.t === 'id' && /^(public|protected|private|static|readonly)$/i.test(this.tok.v)) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a property hook`);
+        break;
+      }
+      const byRef = this.accept('&');
+      const nameTok = this.tok;
+      if (nameTok.t !== 'id') this.unexpected();
+      this.p++;
+      const kind = nameTok.v.toLowerCase();
+      if (kind !== 'get' && kind !== 'set') this.fatal(`Unknown hook "${nameTok.v}" for property ${cd.name}::$${prop.name}, expected "get" or "set"`, nameTok);
+      if (hooks[kind]) this.fatal(`Cannot redeclare property hook "${kind}"`, nameTok);
+      const fn = { name: `$${prop.name}::${kind}`, byRef, params: [], ret: null, body: null, isGen: false, l: hl, file: this.file, strict: this.st.strict, static: false, cls: cd.name, hook: kind, hookProp: prop.name, attrs, final, abstract };
+      if (this.isOp('(')) { fn.params = this.parseParams(); fn.explicitParams = true; }
+      else if (kind === 'set') fn.params = [{ name: 'value', def: null, byRef: false, variadic: false, type: prop.type, promote: null, readonly: false, attrs: null }];
+      this.st.fnStack.push(fn);
+      try {
+        if (this.accept('=>')) {
+          // get => expr returns it; set => expr assigns it to the property
+          const e = this.parseExpr(); this.semi();
+          const self = { k: 'Prop', o: { k: 'Var', name: 'this', l: hl }, name: prop.name, nullsafe: false, l: hl };
+          fn.body = kind === 'get' ? [{ k: 'Return', e, l: e.l }] : [{ k: 'ExprStmt', e: { k: 'Assign', t: self, e, l: hl }, l: hl }];
+          fn.shortExpr = e;
+        } else if (this.isOp('{')) fn.body = this.parseBlock().body;
+        else { this.semi(); fn.abstract = true; }
+      } finally { this.st.fnStack.pop(); }
+      fn.endLine = this.toks[this.p - 1].l;
+      hooks[kind] = fn;
+    }
+    return hooks;
   }
 
   // ---------------------------------------------------------------- expressions
@@ -1253,7 +1300,14 @@ export class Parser {
           }
           if (nt.t !== 'id') this.unexpected();
           this.p++;
-          if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, rawCls, name: nt.v, args, l }; continue; }
+          if (this.isOp('(')) {
+            const args = this.parseArgs();
+            // parent::$prop::get() / ::set($v): the parent's hook (PHP 8.4)
+            if (cls && typeof cls === 'object' && cls.k === 'SProp' && cls.cls === 'parent' && typeof cls.name === 'string' && /^(get|set)$/i.test(nt.v) && rt.phpVersion >= 80400) {
+              e = { k: 'ParentHook', prop: cls.name, hook: nt.v.toLowerCase(), args, l }; continue;
+            }
+            e = { k: 'SCall', cls, rawCls, name: nt.v, args, l }; continue;
+          }
           if (nt.v.toLowerCase() === 'class') { e = { k: 'ClassName', cls, rawCls, l }; continue; }
           e = { k: 'CConst', cls, rawCls, name: nt.v, l };
           continue;

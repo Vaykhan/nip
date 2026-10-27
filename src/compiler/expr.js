@@ -24,7 +24,7 @@ import {
   callableToClosure, findMethod, magicArgs, makeClosure, methodClosure, resolveCallable
 } from '../runtime/callables.js';
 import {
-  canAccessMember, classConst, cloneObject, declareClass, instantiate, readProp, toArrayCast, toObjectCast
+  canAccessMember, classConst, cloneObject, declareClass, instantiate, parentHook, readProp, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
 import { dropRef, frameExit, gcCheck, gcCollect } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
@@ -170,6 +170,10 @@ const EXPR = {
     };
   },
   MagicClass() { return (f) => (f.cls ? f.cls.name : ''); },
+  ParentHook(n) {
+    const A = compileArgs(n.args);
+    return (f) => parentHook(f, n.prop, n.hook, A(f, null));
+  },
   MagicMethod(n) { const name = n.name; return (f) => (f.cls ? f.cls.name + '::' + name : name); },
   Eval(n) {
     const E = cExpr(n.e);
