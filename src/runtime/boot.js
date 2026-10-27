@@ -12,6 +12,7 @@ import { resetPcreState } from '../lib/pcre.js';
 import { bootNativeClasses } from './native-classes.js';
 import { PRELUDE_CORE, PRELUDE_LAZY, readPrelude } from '../prelude.js';
 import { defConsts } from './constants.js';
+import { hiddenClass, hideNewer } from './version.js';
 
 let booted = false, snapshot = null;
 export const lazyClassSrc = new Map(), lazyFnSrc = new Map(), lazyLoaded = new Set();
@@ -27,7 +28,7 @@ function loadLazy(src) {
   } finally { rt.file = prevFile; rt.line = prevLine; rt.frame = prevFrame; }
   return true;
 }
-export function lazyClass(ln) { const src = lazyClassSrc.get(ln); if (src && loadLazy(src)) return rt.classes.get(ln) || null; return null; }
+export function lazyClass(ln) { if (hiddenClass(ln)) return null; const src = lazyClassSrc.get(ln); if (src && loadLazy(src)) { hideNewer(); return rt.classes.get(ln) || null; } return null; }
 export function lazyFn(ln) { if (rt.disabledFns && rt.disabledFns.has(ln)) return undefined; const src = lazyFnSrc.get(ln); if (src && loadLazy(src)) return rt.fns.get(ln); return undefined; }
 export function boot() {
   if (booted) return;
@@ -56,7 +57,7 @@ export function boot() {
 export function resetRuntime() {
   rt.epoch++;
   rt.tickFns = []; rt.tickCount = 0; rt.fiberSwitchBlocked = 0; rt.inflight = []; rt.currentFiber = null; rt.suspendedFibers = new Set();
-  rt.fns = new Map(snapshot.fns); rt.classes = new Map(snapshot.classes); rt.consts = new Map(snapshot.consts);
+  rt.fns = new Map(snapshot.fns); rt.classes = new Map(snapshot.classes); rt.consts = new Map(snapshot.consts); rt.deprecatedConsts = new Map();
   rt.userFnNames = new Set(); rt.globals = Object.create(null); rt.stack = []; rt.depth = 0; rt.silence = 0;
   rt.errorHandlers = []; rt.exceptionHandlers = []; rt.shutdownFns = []; rt.autoloaders = []; rt.included = new Set();
   rt.obStack = []; rt.outBuf = ''; rt.destructibles = []; rt.inShutdown = false; rt.lastRetRef = null; rt.lastError = null; rt.ini = new Map(); rt.mainStatics = null;

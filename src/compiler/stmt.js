@@ -3,7 +3,7 @@
 import { cp, FatalSig, NOREF, normKey, objHandles, PHPArray, PHPObject, Ref } from '../values.js';
 import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq } from '../compare.js';
-import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
+import { CALL_KINDS, isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
@@ -118,6 +118,7 @@ const STMT = {
   },
   ExprStmt(n) {
     if (n.e.k === 'Var' && n.e.name !== 'this') return () => undefined; // `$x;` compiles to nothing in PHP (no warning)
+    if (!n.voidCast && CALL_KINDS.has(n.e.k)) n.e.discarded = true; // (see #[\NoDiscard])
     const E = cExpr(n.e); const l = n.l;
     // statement starts are where freed object handles get reclaimed (see runtime/gc.js)
     if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; if (idq.n) idSafePoint(); E(f); };
@@ -444,11 +445,13 @@ const STMT = {
   ConstDecl(n) {
     const items = n.items.map((i) => ({ name: i.name, E: cExpr(i.e) }));
     const l = n.l;
+    const dep = n.attrs ? n.attrs.find((a) => a.name.replace(/^\\/, '').toLowerCase() === 'deprecated') : null;
     return (f) => {
       rt.line = l;
       for (const it of items) {
         if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined`); continue; }
         const v = it.E(f);
+        if (dep) rt.deprecatedConsts.set(it.name, dep); // (#[\Deprecated] const, PHP 8.5)
         rt.consts.set(it.name, v);
         if (v !== null && typeof v === 'object') rt.constRoots.push(v);
       }

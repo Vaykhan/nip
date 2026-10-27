@@ -5,26 +5,49 @@ import { toBool, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
-import { FRAME_FUNCS } from '../runtime/functions.js';
+import { FRAME_FUNCS, noDiscardWarn } from '../runtime/functions.js';
 import { callValue, invokeCallable, nativeCallback, refCallArgs } from '../runtime/callables.js';
 import {
-  canAccessMember, classConst, classExists, lookupClass, lookupStaticProp, objVisibleProps,
-  propAccessible, propDefault
+  canAccessMember, classConst, classExists, cloneObject, lookupClass, lookupStaticProp, objVisibleProps,
+  propAccessible, propDefault, readonlyKeys, writeProp
 } from '../runtime/classes.js';
 import { A, def, S } from './core.js';
+import { since } from '../runtime/version.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
 def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); if (rt.disabledFns && rt.disabledFns.has(n.toLowerCase())) return false; return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
-def('call_user_func', (callback, ...args) => { const c = nativeCallback(callback); return invokeCallable(c, refCallArgs(c, args)); });
+// (a call_user_func() whose result is discarded discards the callback's: #[\NoDiscard])
+const discarded = (c, args) => { const d = rt.discardNext; rt.discardNext = false; if (d && c.fn.noDiscard !== undefined) noDiscardWarn(c.fn, args, c.cls); };
+def('call_user_func', (callback, ...args) => { const c = nativeCallback(callback); discarded(c, args); return invokeCallable(c, refCallArgs(c, args)); });
 def('call_user_func_array', (callback, args) => {
   const a = A(args);
   const pos = []; let named = null;
   for (const [k, v] of a.entries()) { if (typeof k === 'string') { if (!named) named = new Map(); named.set(k, v); } else pos.push(v); }
   const c = nativeCallback(callback);
+  discarded(c, pos);
   if (named) pos.named = named;
   refCallArgs(c, pos);
   return invokeCallable(c, pos);
 });
+// clone() with properties to change (PHP 8.5): assigned in the caller's scope after __clone(),
+// readonly ones included
+def('clone', (f, object, withProperties = null) => {
+  if (!(object instanceof PHPObject)) throwError('TypeError', `clone(): Argument #1 ($object) must be of type object, ${typeOf(object)} given`);
+  if (withProperties !== null && !(withProperties instanceof PHPArray)) throwError('TypeError', `clone(): Argument #2 ($withProperties) must be of type array, ${typeOf(withProperties)} given`);
+  const c = cloneObject(object, f);
+  if (withProperties && withProperties.size) {
+    c.reinit = readonlyKeys(c);
+    try {
+      for (const [k, v] of withProperties.entries()) {
+        const name = String(k);
+        if (name.charCodeAt(0) === 0 && name.length) throwError('Error', 'Cannot access property starting with "\\0"');
+        writeProp(c, name, cp(v), f);
+      }
+    } finally { c.reinit = undefined; }
+  }
+  return c;
+}, { frame: true });
+since(80500, 'fn', 'clone');
 def('forward_static_call', (callback, ...args) => callValue(callback, args));
 def('forward_static_call_array', (callback, args) => callValue(callback, A(args).values()));
 def('get_class', (object = undefined) => {

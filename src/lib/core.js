@@ -1,7 +1,7 @@
 // Builtin function registry (def/alias) and PHP 8 argument coercion helpers
 // (S = string, I = int, N = int|float, B = bool, A = array, ...).
 
-import { cp, Flt, fmtRepr, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, Flt, fmtRepr, isInt, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
 import { floatToInt, toDbl, toInt, toNumber, toStr, valueName } from '../convert.js';
 import { isNum } from '../compare.js';
 import { writableArrIn } from '../compiler/common.js';
@@ -53,16 +53,19 @@ function nullArgDeprecation(type) {
   const pn = fn && fn.pnames ? fn.pnames[i] : null;
   deprecated(`${rt.nativeName}(): Passing null to parameter #${i + 1}${pn ? ' ($' + pn + ')' : ''} of type ${type} is deprecated`);
 }
+// (strict_types: no coercion, except int to float)
 export const S = (v) => {
   if (typeof v === 'string') return v;
+  if (v instanceof Ref) { v = v.v; if (typeof v === 'string') return v; }
+  if (rt.nativeStrict) argTypeErr('string', v);
   if (v === null) { nullArgDeprecation('string'); return ''; }
-  if (v instanceof Ref) v = v.v;
   if (v instanceof PHPArray) argTypeErr('string', v);
   if (v instanceof PHPObject && !findMethod(v.cls, '__tostring')) argTypeErr('string', v);
   return toStr(v);
 };
 export const I = (v) => {
   if (typeof v === 'number') return v;
+  if (rt.nativeStrict) { if (v instanceof Ref) v = v.v; if (isInt(v)) return v; argTypeErr('int', v); }
   if (v === null) { nullArgDeprecation('int'); return 0; }
   if (v instanceof Flt) {
     if (!isFinite(v.v) || v.v >= 9223372036854775808 || v.v < -9223372036854775808) argTypeErr('int', v);
@@ -85,6 +88,7 @@ export const I = (v) => {
 export const N = (v) => { // JS number from int|float param
   if (typeof v === 'number') return v;
   if (v instanceof Flt) return v.v;
+  if (rt.nativeStrict) { if (v instanceof Ref) v = v.v; if (isNum(v)) return toDbl(v); argTypeErr('int|float', v); }
   if (v === null) { nullArgDeprecation('int|float'); return 0; }
   if (v instanceof Ref) v = v.v;
   if (v instanceof PHPArray || v instanceof PHPObject) argTypeErr('int|float', v);
@@ -97,7 +101,7 @@ export const A = (v) => {
   if (!(v instanceof PHPArray)) argTypeErr('array', v);
   return v;
 };
-export const IntN = (v) => { if (isNum(v)) return v; if (v === null) { nullArgDeprecation('int|float'); return 0; } if (v instanceof PHPArray || v instanceof PHPObject) argTypeErr('int|float', v); return toNumber(v); }; // keep int|float
+export const IntN = (v) => { if (isNum(v)) return v; if (rt.nativeStrict) argTypeErr('int|float', v instanceof Ref ? v.v : v); if (v === null) { nullArgDeprecation('int|float'); return 0; } if (v instanceof PHPArray || v instanceof PHPObject) argTypeErr('int|float', v); return toNumber(v); }; // keep int|float
 export function deref(v) { return v instanceof Ref ? v.v : v; }
 // copy an array slot into a new array: shared references stay references (like ZVAL_COPY)
 export function slotCp(x) { if (x instanceof Ref) return x._weak ? cp(x.v) : x; return cp(x); }

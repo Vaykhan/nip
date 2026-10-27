@@ -13,11 +13,12 @@ import {
 import { fromBytes } from '../utf8.js';
 import { arrowFreeVars, CALL_KINDS, isFresh, isLvalNode, NULLSAFE_SHORT, SUPERGLOBALS, warnUndefVar, writableArrIn } from './common.js';
 import { cClassRef, cLval } from './lvalue.js';
+import { assertMessage } from './ast-export.js';
 import { iterateObject } from './stmt.js';
-import { rt } from '../runtime/state.js';
-import { deprecated, notice, PRELUDE_FILE, setPrevious, throwError, warn } from '../runtime/errors.js';
+import { E_USER_DEPRECATED, rt } from '../runtime/state.js';
+import { deprecated, notice, PRELUDE_FILE, raise, setPrevious, throwError, warn } from '../runtime/errors.js';
 import {
-  callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
+  callFunction, callNative, compileFunction, deprecatedFn, deprecationSuffix, fnDisplayName, FRAME_FUNCS, noDiscardWarn
 } from '../runtime/functions.js';
 import {
   callableToClosure, findMethod, magicArgs, makeClosure, methodClosure, resolveCallable
@@ -59,6 +60,24 @@ export function cExpr(n) {
   const fn = EXPR[n.k];
   if (!fn) throw new FatalSig(`Unsupported expression type ${n.k}`, n.l);
   return n.chainTop ? nullsafeChain(fn(n)) : fn(n);
+}
+function deprecatedConst(name) {
+  const a = rt.deprecatedConsts.get(name);
+  if (a === undefined || a.showing) return;
+  a.showing = true; // (not again while evaluating its own message)
+  try { raise(E_USER_DEPRECATED, `Constant ${name} is deprecated${deprecationSuffix(a, null)}`); } finally { a.showing = false; }
+}
+// a call whose result is discarded: #[\NoDiscard] functions warn before they run
+function discardCheck(n, call) {
+  if (!n.discarded || rt.phpVersion < 80500) return call;
+  return (fn, args, thisObj, cls, sc, closure) => {
+    if (fn.noDiscard !== undefined) {
+      if (fn.deprecated !== undefined) { deprecatedFn(fn, cls, args); rt.deprecatedShown = fn; } // (the deprecation comes first)
+      noDiscardWarn(fn, args, cls);
+    }
+    else if (fn.native !== undefined && (fn.name === 'call_user_func' || fn.name === 'call_user_func_array')) rt.discardNext = true;
+    return call(fn, args, thisObj, cls, sc, closure);
+  };
 }
 export function nullsafeChain(E) {
   return (f) => { try { return E(f); } catch (e) { if (e === NULLSAFE_SHORT) return null; throw e; } };
@@ -143,8 +162,8 @@ const EXPR = {
     if (base === 'php_eol') return () => '\n';
     return () => {
       let v = rt.consts.get(name);
-      if (v !== undefined) return v;
-      if (fb) { v = rt.consts.get(fb); if (v !== undefined) return v; }
+      if (v !== undefined) { if (rt.deprecatedConsts.size) deprecatedConst(name); return v; }
+      if (fb) { v = rt.consts.get(fb); if (v !== undefined) { if (rt.deprecatedConsts.size) deprecatedConst(fb); return v; } }
       v = rt.consts.get(lname) ?? rt.consts.get(fb ? fb.toLowerCase() : '');
       if (v !== undefined && rt.constsCI.has(lname)) return v;
       throwError('Error', `Undefined constant "${name}"`);
@@ -371,6 +390,18 @@ const EXPR = {
       case 'unset': return (f) => { A(f); return null; };
     }
   },
+  // $x |> callable: a call with $x as the only argument; f(...) on the right is called directly
+  Pipe(n) {
+    const L = cExpr(n.a);
+    const vals = [];
+    const arg = { e: { k: 'TempObj', get: () => vals[vals.length - 1], l: n.l } };
+    const b = n.b;
+    const call = cExpr(CALL_KINDS.has(b.k) && b.args === 'fcc' ? { ...b, args: [arg], fromPipe: true } : { k: 'Call', f: b, args: [arg], l: n.l, fromPipe: true });
+    return (f) => {
+      vals.push(L(f));
+      try { return call(f); } finally { vals.pop(); }
+    };
+  },
   Isset(n) {
     const items = n.list.map((e) => (isLvalNode(e) ? (() => { const lv = cLval(e); return lv.isset || lv.getq; })() : (() => { throw new FatalSig('Cannot use isset() on the result of an expression (you can use "null !== expression" instead)', n.l); })()));
     return (f) => { for (let i = 0; i < items.length; i++) { const v = items[i](f); if (v === undefined || v === null) return false; } return true; };
@@ -479,7 +510,7 @@ const EXPR = {
     const F = cExpr(n.f);
     if (n.args === 'fcc') return (f) => callableToClosure(F(f), f);
     const A = compileArgs(n.args);
-    const call = deferCalls ? deferredCall : callFunction;
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const callee = F(f);
       const c = resolveCallable(callee, f, true);
@@ -519,7 +550,7 @@ const EXPR = {
       };
     }
     const A = compileArgs(n.args);
-    const call = deferCalls ? deferredCall : callFunction;
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const o = O(f);
       if (!(o instanceof PHPObject)) {
@@ -577,7 +608,7 @@ const EXPR = {
       };
     }
     const A = compileArgs(n.args);
-    const call = deferCalls ? deferredCall : callFunction;
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const cls = C(f);
       let name = sname;
@@ -728,7 +759,7 @@ function compileArgs(argNodes) {
             const v = it.E(f);
             const rr = rt.lastRetRef; rt.lastRetRef = null;
             if (rr !== null && rr !== NOREF && rr.v === v) { out[i] = rr; continue; }
-            if (rr === NOREF) { out[i] = new Ref(v); continue; }
+            if (rr === NOREF || fn.name === 'array_multisort') { out[i] = new Ref(v); continue; } // (array_multisort's parameters are "prefer-ref")
             if (!it.tempRef) { const pn = fn.params ? (fn.params[i] && fn.params[i].name) : (fn.pnames && fn.pnames[i]); throwError('Error', `${fnDisplayName(fn)}(): Argument #${i + 1}${pn ? ' ($' + pn + ')' : ''} could not be passed by reference`); }
             notice('Only variables should be passed by reference');
             out[i] = new Ref(v);
@@ -795,6 +826,8 @@ function compileNamedCall(n, plain) {
   const lname = name.toLowerCase(), lfb = fb ? fb.toLowerCase() : null;
   // assert(): unless zend.assertions=1 the call (and its arguments) is skipped
   if ((lfb || lname) === 'assert' && n.args !== 'fcc' && !plain) {
+    // (without a description, the message is the assertion's source, zend_compile_assert)
+    if (n.args.length === 1 && !n.args[0].spread && !n.args[0].name && !n.fromPipe) n = { ...n, args: [n.args[0], { e: { k: 'Lit', v: assertMessage(n.args) } }] };
     const inner = compileNamedCall(n, true);
     return (f) => (rt.ini.get('zend.assertions') === '1' ? inner(f) : true);
   }
@@ -812,7 +845,7 @@ function compileNamedCall(n, plain) {
     };
   }
   const A = compileArgs(n.args);
-  const call = deferCalls ? deferredCall : callFunction;
+  const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
   // the resolved function is cached per call site; rt.epoch changes on every run, since compiled
   // code (includes, eval) is reused across runs but function tables are not
   let cached = null, cachedEpoch = -1;
@@ -826,7 +859,10 @@ function compileNamedCall(n, plain) {
       cached = fn; cachedEpoch = rt.epoch;
     }
     const args = A(f, fn);
-    if (fn.native) return callNative(fn, args);
+    if (fn.native) {
+      if (n.discarded && rt.phpVersion >= 80500 && (fn.name === 'call_user_func' || fn.name === 'call_user_func_array')) rt.discardNext = true;
+      return callNative(fn, args);
+    }
     return call(fn, args, null, null, null, null);
   };
 }

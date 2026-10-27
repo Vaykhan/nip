@@ -108,11 +108,11 @@ export function captureTrace(withArgs) {
   const st = rt.stack;
   for (let i = st.length - 1; i >= 0; i--) {
     const s = st[i];
-    if (s.hidden) continue; // marks engine-internal callers (see runScript's shutdown)
+    if (s.hidden || s.inlined) continue; // marks engine-internal callers (see runScript's shutdown), builtins compiled inline
     const fromPrelude = s.callFile === PRELUDE_FILE;
     if (fromPrelude && (s.native === true || (s.fn && s.fn.file === PRELUDE_FILE))) continue;
     const fr = new PHPArray();
-    const calledFromNative = (i > 0 && st[i - 1].native === true) || fromPrelude;
+    const calledFromNative = (i > 0 && st[i - 1].native === true && !st[i - 1].inlined) || fromPrelude;
     if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }
     fr.set('function', s.fn.name);
     // (an anonymous class's name is printed up to its NUL byte)

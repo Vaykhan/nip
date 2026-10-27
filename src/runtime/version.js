@@ -23,6 +23,15 @@ export function applyVersion() {
   rt.phpVersionStr = v.join('.');
   const c = (k, x) => rt.consts.set(k, x);
   c('PHP_VERSION', rt.phpVersionStr); c('PHP_MAJOR_VERSION', v[0]); c('PHP_MINOR_VERSION', v[1]); c('PHP_RELEASE_VERSION', v[2]); c('PHP_VERSION_ID', rt.phpVersion);
+  hideNewer();
+}
+// removes what the emulated version doesn't have (again after a prelude file is loaded lazily)
+export function hideNewer() {
   for (const [n, id] of SINCE_FNS) if (id > rt.phpVersion) rt.fns.delete(n);
   for (const [n, id] of SINCE_CLASSES) if (id > rt.phpVersion) rt.classes.delete(n);
 }
+export const hiddenClass = (ln) => (SINCE_CLASSES.get(ln) ?? 0) > rt.phpVersion;
+
+// engine attributes of later versions (src/prelude)
+since(80400, 'class', 'Deprecated');
+since(80500, 'class', 'NoDiscard');

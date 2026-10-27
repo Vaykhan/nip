@@ -5,9 +5,9 @@ import { toBool, toStr, typeOf, valueName } from '../convert.js';
 import { isNum, looseEq, strictEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
-import { rt } from './state.js';
-import { deprecated, initThrowable, notice, PRELUDE_FILE, throwError, warn } from './errors.js';
-import { callFunction, coercePropType, coerceType, compileFunction, FAIL, typeStr } from './functions.js';
+import { E_USER_DEPRECATED, rt } from './state.js';
+import { deprecated, initThrowable, notice, PRELUDE_FILE, raise, throwError, warn } from './errors.js';
+import { attrNamed, callFunction, coercePropType, coerceType, compileFunction, deprecationSuffix, FAIL, typeStr } from './functions.js';
 import { callValue } from './callables.js';
 import { dropRef, gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
@@ -315,6 +315,9 @@ function bindTraits(cls, decl) {
     for (const n of tu.names) {
       const t = lookupClass(n, false, 'Trait');
       if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
+      // #[\Deprecated] traits (PHP 8.5)
+      const dep = rt.phpVersion >= 80500 && t.decl ? attrNamed(t.decl.attrs, 'deprecated') : null;
+      if (dep) raise(E_USER_DEPRECATED, `Trait ${t.name} used by ${cls.name} is deprecated${deprecationSuffix(dep, t)}`);
       if (cls.isEnum) {
         const atUse = (msg) => new FatalSig(msg, decl.l, decl.file);
         if (t.slots.size || t.sprops.size) throw atUse(`Enum ${cls.name} cannot include properties`);
@@ -500,6 +503,12 @@ export function classConst(cls, name, f, direct) {
     if (c.val instanceof PHPArray) c.val.cow = true;
     if (c.val !== null && typeof c.val === 'object') rt.constRoots.push(c.val); // enum cases, new in constants
   }
+  // #[\Deprecated] constants and enum cases (PHP 8.4)
+  if (c.dep === undefined) c.dep = rt.phpVersion >= 80400 && c.decl ? attrNamed(c.decl.attrs, 'deprecated') || null : null;
+  if (c.dep !== null && !c.depShowing) { // (not again while evaluating its own message)
+    c.depShowing = true;
+    try { raise(E_USER_DEPRECATED, `${c.case ? 'Enum case' : 'Constant'} ${c.cls.name}::${name} is deprecated${deprecationSuffix(c.dep, c.cls)}`); } finally { c.depShowing = false; }
+  }
   return c.val;
 }
 
@@ -662,7 +671,7 @@ export function writeProp(obj, name, v, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
-    if (info.readonly) {
+    if (info.readonly && !consumeReinit(obj, key)) {
       // (named after the declaring class)
       if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
       if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
@@ -700,8 +709,15 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+// while an object is being cloned, each of its readonly properties may be modified once
+function consumeReinit(obj, key) {
+  if (obj.reinit === undefined || !obj.reinit.has(key)) return false;
+  obj.reinit.delete(key);
+  return true;
+}
 // a readonly property modified other than by assignment
 function readonlyIndirect(obj, key, info, name) {
+  if (consumeReinit(obj, key)) return;
   throwError('Error', `Cannot ${obj.props.has(key) ? '' : 'indirectly '}modify readonly property ${info.cls.name}::$${name}`);
 }
 // an inaccessible property handled by __get: a key no slot has, so callers take the magic path
@@ -714,7 +730,7 @@ function resolvePropKey(obj, name, f, forWrite) {
     if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
     throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
   }
-  if (forWrite && info.readonly && obj.props.has(info.key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
+  if (forWrite && info.readonly && obj.props.has(info.key) && !(obj.reinit !== undefined && obj.reinit.has(info.key))) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
@@ -810,8 +826,17 @@ export function unsetProp(obj, name, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
 }
 
+// the initialized readonly properties of an object (which __clone() may modify once each)
+export function readonlyKeys(o) {
+  let keys;
+  for (const info of o.cls.props.values()) if (info.readonly && o.props.has(info.key)) (keys || (keys = new Set())).add(info.key);
+  return keys;
+}
 export function cloneObject(o, f) {
-  if (!(o instanceof PHPObject)) throwError('Error', '__clone method called on non-object');
+  if (!(o instanceof PHPObject)) {
+    if (rt.phpVersion >= 80500) throwError('TypeError', `clone(): Argument #1 ($object) must be of type object, ${typeOf(o)} given`); // (clone is a function)
+    throwError('Error', '__clone method called on non-object');
+  }
   if (o.cls.isEnum) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (o.cls === generatorClass) throwError('Error', 'Trying to clone an uncloneable object of class Generator');
   const c = new PHPObject(o.cls);
@@ -823,8 +848,8 @@ export function cloneObject(o, f) {
   if (m && m.vis === 'private' && m.cls.decl && m.cls.decl.file === PRELUDE_FILE) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (m) {
     if (m.vis !== 'public' && !canAccessMember(m, f ? f.cls : null)) throwError('Error', `Call to ${m.vis} ${o.cls.name}::__clone() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
-    c.cloning = true;
-    try { callFunction(m.fn, [], c, m.cls, c.cls, null); } finally { c.cloning = false; }
+    c.reinit = readonlyKeys(c);
+    try { callFunction(m.fn, [], c, m.cls, c.cls, null); } finally { c.reinit = undefined; }
   }
   if (o.cls.hasDestructor) trackDestructible(c);
   return c;

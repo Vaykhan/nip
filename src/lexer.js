@@ -6,7 +6,7 @@ import { rt } from './runtime/state.js';
 const OPS3 = ['<<=', '>>=', '**=', '...', '<=>', '===', '!==', '??=', '?->'];
 const OPS2 = ['++', '--', '->', '=>', '::', '==', '!=', '<>', '<=', '>=', '&&', '||', '??', '+=', '-=', '*=', '/=', '.=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
 const OPS1 = '+-*/%=<>!.()[]{},;?:&|^~@$`\\';
-const CAST_RE = /^\(\s*(int|integer|bool|boolean|float|double|real|string|binary|array|object|unset)\s*\)/i;
+const CAST_RE = /^\(\s*(int|integer|bool|boolean|float|double|real|string|binary|array|object|unset|void)\s*\)/i;
 const isIdStart = (c) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c >= 128;
 const isIdChar = (c) => isIdStart(c) || (c >= 48 && c <= 57);
 
@@ -243,9 +243,11 @@ export function lex(src, file) {
     // casts
     if (ch === '(') {
       const m = CAST_RE.exec(src.slice(i, i + 30));
-      if (m) {
+      if (m && !(m[1].toLowerCase() === 'void' && rt.phpVersion < 80500)) { // ((void) is PHP 8.5's)
         let t = m[1].toLowerCase();
         if (t === 'real') err('The (real) cast has been removed, use (float) instead');
+        const canon = { integer: 'int', double: 'float', binary: 'string', boolean: 'bool' }[t];
+        if (canon && rt.phpVersion >= 80500) deprecation(`Non-canonical cast (${t}) is deprecated, use the (${canon}) cast instead`, line);
         t = { integer: 'int', boolean: 'bool', double: 'float', real: 'float', binary: 'string' }[t] || t;
         push('cast', t); i += m[0].length; continue;
       }
@@ -254,7 +256,7 @@ export function lex(src, file) {
     const s3 = src.substr(i, 3);
     if (OPS3.includes(s3)) { push('op', s3); i += 3; continue; }
     const s2 = src.substr(i, 2);
-    if (OPS2.includes(s2)) { push('op', s2); i += 2; continue; }
+    if (OPS2.includes(s2) || (s2 === '|>' && rt.phpVersion >= 80500)) { push('op', s2); i += 2; continue; } // (the pipe operator is PHP 8.5's)
     if (OPS1.includes(ch)) { push('op', ch); i++; continue; }
     err(`syntax error, unexpected character 0x${c.toString(16).toUpperCase().padStart(2, '0')}`);
   }

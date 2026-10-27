@@ -18,8 +18,8 @@ const OUT = path.resolve(process.argv[2] || path.join(ROOT, 'dist', 'nip.cjs'));
 // Evaluation order of the bundle.
 const MODULES = [
   'values.js', 'convert.js', 'compare.js', 'arith.js', 'utf8.js', 'lexer.js', 'parser.js',
-  'compiler/common.js', 'compiler/checks.js', 'compiler/lvalue.js', 'compiler/expr.js', 'compiler/stmt.js', 'compiler/generator.js',
-  'runtime/state.js', 'runtime/errors.js', 'runtime/functions.js', 'runtime/callables.js', 'runtime/arginfo.js', 'runtime/inheritance.js', 'runtime/classes.js',
+  'compiler/common.js', 'compiler/ast-export.js', 'compiler/checks.js', 'compiler/lvalue.js', 'compiler/expr.js', 'compiler/stmt.js', 'compiler/generator.js',
+  'runtime/state.js', 'runtime/version.js', 'runtime/errors.js', 'runtime/functions.js', 'runtime/callables.js', 'runtime/arginfo.js', 'runtime/inheritance.js', 'runtime/classes.js',
   'runtime/gc.js', 'runtime/generators.js', 'runtime/fibers.js', 'runtime/program.js',
   'lib/core.js', 'lib/dump.js', 'lib/printf.js', 'lib/string.js', 'lib/hash.js', 'lib/mbstring.js', 'lib/math.js',
   'lib/array.js', 'lib/var.js', 'lib/functions.js', 'lib/errors.js', 'lib/output.js', 'lib/json.js',

@@ -8,7 +8,7 @@ import { cExpr } from './expr.js';
 import { Frame } from './common.js';
 import { rt } from '../runtime/state.js';
 import { typeStr } from '../runtime/functions.js';
-import { valueName } from '../convert.js';
+import { toBool, valueName } from '../convert.js';
 import { deprecated, warn } from '../runtime/errors.js';
 import { RESERVED_CLASS_NAMES } from '../parser.js';
 
@@ -97,6 +97,10 @@ export function checkProgram(ast, file) {
     if ((n.k === 'MCall' || n.k === 'SCall' || n.k === 'NullsafeMCall') && n.name && typeof n.name === 'object' && n.name.k === 'Lit' && typeof n.name.v !== 'string') fail('Method name must be a string', n);
     switch (n.k) {
       case 'Lit': return;
+      case 'And': case 'Or':
+        // a constant left side decides it: PHP doesn't compile the right side at all
+        if (n.a && n.a.k === 'Lit' && (n.k === 'And') !== toBool(n.a.v)) { visit(n.a, READ); return; }
+        break;
       case 'Match': {
         if (n.arms.filter((a) => !a.conds).length > 1) fail('Match expressions may only contain one default arm', n);
         break;
@@ -109,7 +113,11 @@ export function checkProgram(ast, file) {
         if (!n.anon) { const short = n.name.slice(n.name.lastIndexOf('\\') + 1); if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n); }
         checkClass(n);
         checkAttrs(n.attrs, T_CLASS, n);
-        for (const m of n.methods) { checkAttrs(m.fn.attrs, T_METHOD, m); methods.add(m.fn); }
+        for (const m of n.methods) {
+          checkAttrs(m.fn.attrs, T_METHOD, m); methods.add(m.fn);
+          const lm = m.fn.name.toLowerCase();
+          if ((lm === '__construct' || lm === '__clone') && rt.phpVersion >= 80500 && hasAttrName(m.fn.attrs, 'nodiscard')) fail(`Method ${n.name}::${m.fn.name} cannot be #[\\NoDiscard]`, m);
+        }
         for (const p of n.props) { checkAttrs(p.attrs, T_PROPERTY, p); if (p.type) checkType(p.type, p, { cls: n, closure: false }); }
         for (const c of n.consts) {
           checkAttrs(c.attrs, T_CLASS_CONSTANT, c);
@@ -198,6 +206,7 @@ export function checkProgram(ast, file) {
         for (const it of items) {
           let t = it.v;
           while (t && (t.k === 'Index' || t.k === 'Prop')) t = t.o;
+          if (it.v && it.v.k === 'Pipe') fail("Can't use function return value in write context", it.v); // (a pipe is a call)
           if (it.v && it.v.k !== 'Arr' && it.v.k !== 'List' && isTemp(t)) fail('Assignments can only happen to writable values', n);
         }
         for (const it of items) { visit(it.key, READ); visit(it.v, it.byRef ? WRITE : ASSIGN); }
@@ -304,7 +313,7 @@ export function checkProgram(ast, file) {
   // zend_ensure_writable_variable: what an assignment, ++/-- or unset() targets
   function ensureWritable(t) {
     if (!t || typeof t !== 'object') return;
-    if (t.k === 'Call') fail("Can't use function return value in write context", t);
+    if (t.k === 'Call' || t.k === 'Pipe') fail("Can't use function return value in write context", t);
     if (t.k === 'MCall' || t.k === 'NullsafeMCall' || t.k === 'SCall') fail("Can't use method return value in write context", t);
   }
   // builtins zend_try_compile_special_func compiles to an instruction (with these argument counts)
@@ -524,7 +533,12 @@ export function checkProgram(ast, file) {
       }
       const ln = (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase();
       const known = ENGINE_ATTRS[ln];
-      if (!known) continue;
+      if (!known || (known.since && rt.phpVersion < known.since)) continue;
+      // PHP 8.5: #[\Deprecated] traits
+      if (ln === 'deprecated' && target === T_CLASS && rt.phpVersion >= 80500) {
+        if (owner.kind === 'trait') continue;
+        fail(`Cannot apply #[\\Deprecated] to ${owner.kind} ${owner.name}`, a);
+      }
       if (!(known.flags & target)) {
         const allowed = TARGET_NAMES.filter(([b]) => known.flags & b).map(([, t]) => t).join(', ');
         fail(`Attribute "${known.name}" cannot target ${TARGET_NAMES.find(([b]) => b === target)[1]} (allowed targets: ${allowed})`, a);
@@ -584,7 +598,7 @@ export function checkProgram(ast, file) {
   function within(kind, fn) { path.push({ kind }); try { fn(); } finally { path.pop(); } }
   function visitFunction(fn) {
     const outer = scope, outerPath = path, outerCtx = fnCtx;
-    const closure = fn.name.endsWith('{closure}');
+    const closure = !!(fn.closure || fn.arrow);
     fnCtx = { cls: methods.has(fn) ? curClass : closure && fnCtx ? fnCtx.cls : closure ? curClass : null, closure };
     for (const p of fn.params) if (p.type) checkType(p.type, fn, fnCtx);
     if (fn.ret) checkType(fn.ret, fn, fnCtx);
@@ -598,6 +612,12 @@ export function checkProgram(ast, file) {
       if (p.type) checkTypeDecl(p.type, 'param', fn);
     }
     if (fn.ret) checkTypeDecl(fn.ret, 'return', fn);
+    // #[\NoDiscard] needs a return value (PHP 8.5)
+    if (rt.phpVersion >= 80500 && hasAttrName(fn.attrs, 'nodiscard') && fn.ret && !fn.ret.q && fn.ret.raw.length === 1 && typeof fn.ret.raw[0] === 'string') {
+      const r = fn.ret.raw[0].toLowerCase(), what = methods.has(fn) ? 'method' : 'function';
+      if (r === 'void') fail(`A void ${what} does not return a value, but #[\\NoDiscard] requires a return value`, fn);
+      if (r === 'never') fail(`A never returning ${what} does not return a value, but #[\\NoDiscard] requires a return value`, fn);
+    }
     if (!methods.has(fn) && fn.params.some((p) => p.promote)) fail('Cannot declare promoted property outside a constructor', fn);
     if (fn.isGen && fn.ret) {
       const { bits } = typeBits(fn.ret);
@@ -714,4 +734,6 @@ const ENGINE_ATTRS = {
   allowdynamicproperties: { name: 'AllowDynamicProperties', flags: T_CLASS },
   returntypewillchange: { name: 'ReturnTypeWillChange', flags: T_METHOD },
   sensitiveparameter: { name: 'SensitiveParameter', flags: T_PARAMETER },
+  deprecated: { name: 'Deprecated', flags: T_METHOD | T_FUNCTION | T_CLASS_CONSTANT, since: 80400 },
+  nodiscard: { name: 'NoDiscard', flags: T_METHOD | T_FUNCTION, since: 80500 },
 };
