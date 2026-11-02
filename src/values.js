@@ -3,7 +3,7 @@
 //   float (Flt box), string (JS byte string), PHPArray, PHPObject, PHPResource,
 //   plus references (Ref) and the control-flow signals used by the runtime.
 
-import { floatToInt } from './convert.js';
+import { floatToInt, oobWarn } from './convert.js';
 import { rt } from './runtime/state.js';
 import { deprecated, throwError, warn } from './runtime/errors.js';
 
@@ -61,7 +61,6 @@ export function fmtReprZ(x) { // with ".0" for integral finite values (var_expor
 }
 
 // ---------------------------------------------------------------- numeric strings
-const WS = ' \t\n\r\v\f';
 export const NUM_FULL = /^[ \t\n\r\v\f]*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?[ \t\n\r\v\f]*$/;
 export const NUM_LEAD = /^[ \t\n\r\v\f]*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/;
 export const INT_LIKE = /^[ \t\n\r\v\f]*[+-]?\d+[ \t\n\r\v\f]*$/;
@@ -85,7 +84,6 @@ export function numericStr(s) {
   if (!NUM_FULL.test(s)) return null;
   return numFromText(s);
 }
-function isNumericStr(s) { return numericStr(s) !== null; }
 
 // ---------------------------------------------------------------- arrays
 export class PHPArray {
@@ -96,6 +94,16 @@ export class PHPArray {
     this.k = []; this.v = []; this.map = null;
     this.nf = null;      // next free integer key (null = no int keys yet)
     this.holes = 0; this.cow = false; this.pos = 0; this.iters = 0; this.fe = 0;
+    this.itList = null; // positions of by-reference foreach loops over this array (PHP's hash iterators)
+  }
+  // when entries move to new indexes without holes, iterator positions follow them
+  _remapIters(shift = 0) {
+    if (this.itList === null || this.itList.length === 0) return;
+    for (const it of this.itList) {
+      let live = 0;
+      for (let i = 0; i < it.pos && i < this.k.length; i++) if (this.k[i] !== undefined) live++;
+      it.pos = live + shift;
+    }
   }
   get size() { return this.map === null ? this.k.length : this.map.size; }
   static from(list) { const a = new PHPArray(); const n = list.length; for (let i = 0; i < n; i++) { a.k.push(i); a.v.push(list[i]); } a.nf = n ? n : null; return a; }
@@ -165,6 +173,7 @@ export class PHPArray {
   }
   compact() {
     if (!this.holes) return;
+    this._remapIters();
     const k = [], v = [], map = new Map(); let newPos = -1;
     for (let i = 0; i < this.k.length; i++) {
       if (i === this.pos) newPos = k.length;
@@ -173,6 +182,11 @@ export class PHPArray {
     }
     if (newPos < 0) newPos = k.length;
     this.k = k; this.v = v; this.map = map; this.holes = 0; this.pos = newPos;
+  }
+  // take over another array's contents (functions that rebuild an array in place)
+  replaceWith(o, shiftIters = 0) {
+    this._remapIters(shiftIters);
+    this.k = o.k; this.v = o.v; this.map = o.map; this.nf = o.nf; this.holes = o.holes; this.pos = o.pos;
   }
   clone() {
     const b = new PHPArray();
@@ -195,12 +209,20 @@ export class PHPArray {
   curKey() { this._skip(); return this.pos < this.k.length ? this.k[this.pos] : null; }
   curVal() { this._skip(); if (this.pos >= this.k.length) return false; const v = this.v[this.pos]; return v instanceof Ref ? v.v : v; }
   reindex() { // renumber integer keys 0..n-1 keeping string keys
+    this._remapIters();
     const ent = this.rawEntries(); this.k = []; this.v = []; this.map = null; this.nf = null; this.holes = 0; this.pos = 0;
     for (const [k, v] of ent) { if (typeof k === 'string') this.setRaw(k, v); else this.push(v); }
   }
 }
 
-export function normKey(k) {
+// ctx: KEY_ISSET (isset/empty/??) or KEY_UNSET for the wording of the illegal offset error
+export const KEY_ISSET = 1, KEY_UNSET = 2;
+function illegalOffset(k, ctx) {
+  const t = k instanceof PHPObject ? k.cls.name : 'array';
+  if (ctx === KEY_ISSET) throwError('TypeError', `Cannot access offset of type ${t} in isset or empty`);
+  throwError('TypeError', `Cannot ${ctx === KEY_UNSET ? 'unset' : 'access'} offset of type ${t} on array`);
+}
+export function normKey(k, ctx) {
   switch (typeof k) {
     case 'number': return k;
     case 'string': {
@@ -219,18 +241,12 @@ export function normKey(k) {
     case 'object':
       if (k === null) return '';
       if (k instanceof Flt) {
-        const x = k.v;
-        if (!isFinite(x)) return 0;
-        const t = Math.trunc(x);
-        if (t !== x) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
-        return floatToInt(t);
+        const x = k.v, r = floatToInt(x);
+        if (Number(r) !== x && !oobWarn(x)) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
+        return r;
       }
       if (k instanceof PHPResource) { warn(`Resource ID#${k.id} used as offset, casting to integer (${k.id})`); return k.id; }
-      if (k instanceof PHPArray) throwError('TypeError', 'Illegal offset type');
-      if (k instanceof PHPObject) {
-        if (k.cls.isEnum) throwError('TypeError', `Cannot access offset of type ${k.cls.name} on array`);
-        throwError('TypeError', `Cannot access offset of type ${k.cls.name} on array`);
-      }
+      if (k instanceof PHPArray || k instanceof PHPObject) illegalOffset(k, ctx);
   }
   return k;
 }
@@ -239,9 +255,18 @@ export function normKey(k) {
 export function cp(v) { if (v instanceof PHPArray) v.cow = true; return v; }
 
 // ---------------------------------------------------------------- objects
-let objIdCounter = 0;
+// Object handles: freed handles are reused, most recently freed first (see runtime/gc.js)
+// recent: inside try blocks, the objects created there (see Try in compiler/stmt.js); fresh:
+// those created by the expression statement running (see ExprStmt)
+export const objHandles = { next: 0, free: [], allocs: 0, recent: null, fresh: null };
 export class PHPObject {
-  constructor(cls) { this.cls = cls; this.props = new Map(); this.id = ++objIdCounter; }
+  constructor(cls) {
+    this.cls = cls; this.props = new Map();
+    objHandles.allocs++;
+    if (objHandles.recent !== null && objHandles.recent.length < 64) objHandles.recent.push(this);
+    if (objHandles.fresh !== null && objHandles.fresh.length < 16) objHandles.fresh.push(this);
+    this.id = objHandles.free.length ? objHandles.free.pop() : ++objHandles.next;
+  }
 }
 export class PHPResource {
   constructor(type, h) { this.type = type; this.h = h; this.id = ++PHPResource.n; this.closed = false; }

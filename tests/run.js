@@ -80,5 +80,10 @@ fs.rmSync(tmp, { recursive: true, force: true });
 if (opts.update) { console.log(`updated ${results.length} expected outputs`); process.exit(0); }
 const failed = results.filter((r) => !r.ok).sort((a, b) => a.name.localeCompare(b.name));
 for (const f of failed) console.log(`FAIL ${f.name}${opts.verbose || f.why.startsWith('missing') ? '\n' + f.why : ''}`);
+// on GitHub Actions, also report failures as annotations (visible on the run page and via the API)
+if (process.env.GITHUB_ACTIONS) {
+  const esc = (s) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  for (const f of failed) console.log(`::error file=tests/cases/${f.name}.php,title=${f.name}::${esc(f.why)}`);
+}
 console.log(`${results.length - failed.length}/${results.length} passed${opts.bundle ? ' (dist/nip.cjs)' : ''}${opts.php ? ' (vs php)' : ''}`);
 process.exit(failed.length ? 1 : 0);

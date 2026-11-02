@@ -8,11 +8,11 @@ import { bytes, utf8Encode } from '../utf8.js';
 import {
   E_ALL, E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING, rt, writeFd
 } from '../runtime/state.js';
-import { captureTrace, raise, throwError, traceAsString } from '../runtime/errors.js';
-import { callValue } from '../runtime/callables.js';
+import { captureTrace, deprecated, raise, setTimeLimit, throwError, traceAsString } from '../runtime/errors.js';
+import { boundCallback, callableFn, callValue } from '../runtime/callables.js';
+import { looseEq } from '../compare.js';
 import { alias, def, I, S } from './core.js';
 import { sgn } from './string.js';
-import { PHP_VERSION } from '../runtime/native-classes.js';
 
 def('error_reporting', (error_level = null) => { const old = rt.silence ? rt.errorReporting & 4437 : rt.errorReporting; if (error_level !== null) rt.errorReporting = I(error_level); return old; });
 export const INI_DEFAULTS = {
@@ -36,6 +36,7 @@ def('ini_set', (option, value) => {
   if (k === 'display_errors') rt.displayErrors = (v === '1' || v.toLowerCase() === 'on' || v.toLowerCase() === 'true' || v.toLowerCase() === 'stdout') ? 'stdout' : (v.toLowerCase() === 'stderr' ? 'stderr' : '0');
   else if (k === 'error_reporting') rt.errorReporting = toInt(v);
   else if (k === 'precision') rt.precision = toInt(v);
+  else if (k === 'max_execution_time') setTimeLimit(toInt(v));
   else if (k === 'serialize_precision') rt.serializePrecision = toInt(v);
   else if (k === 'date.timezone') rt.tz = v;
   rt.ini.set(k, v);
@@ -50,7 +51,7 @@ function ini_get(k) {
     case 'precision': return String(rt.precision);
     case 'serialize_precision': return String(rt.serializePrecision);
     case 'memory_limit': return '128M';
-    case 'max_execution_time': return '0';
+    case 'max_execution_time': return String(rt.timeLimit);
     case 'date.timezone': return rt.tz;
     case 'default_charset': return 'UTF-8';
     case 'include_path': return '.:/usr/share/php';
@@ -75,6 +76,7 @@ def('trigger_error', (message, error_level = E_USER_NOTICE) => {
   const lvl = I(error_level);
   if (![E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, E_USER_DEPRECATED].includes(lvl)) throwError('ValueError', 'trigger_error(): Argument #2 ($error_level) must be one of E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, or E_USER_DEPRECATED');
   if (lvl === E_USER_ERROR) {
+    if (rt.phpVersion >= 80400) deprecated('Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead');
     if (rt.errorHandlers.length) { const h = rt.errorHandlers[rt.errorHandlers.length - 1]; if (h.handler !== null && (h.mask & lvl)) { const r = callValue(h.handler, [lvl, S(message), rt.file, rt.line]); if (r !== false) return true; } }
     throw new FatalSig(S(message), rt.line, rt.file);
   }
@@ -92,18 +94,28 @@ def('error_get_last', () => {
   return PHPArray.fromPairs([['type', rt.lastError.type], ['message', rt.lastError.message], ['file', rt.lastError.file], ['line', rt.lastError.line]]);
 });
 def('error_clear_last', () => { rt.lastError = null; });
-def('register_shutdown_function', (callback, ...args) => { rt.shutdownFns.push([callback, args]); });
+def('register_shutdown_function', (callback, ...args) => { rt.shutdownFns.push([boundCallback(callback), args]); });
+def('register_tick_function', (callback, ...args) => {
+  callableFn(callback); // validates, with PHP's message
+  rt.tickFns.push({ cb: callback, args, calling: false });
+  return true;
+});
+def('unregister_tick_function', (callback) => {
+  callableFn(callback);
+  rt.tickFns = rt.tickFns.filter((t) => !looseEq(t.cb, callback));
+  return null;
+});
 def('assert', (assertion, description = null) => {
-  if (rt.ini.get('zend.assertions') !== '1') return true;
+  if (!/^(1|on|true|yes)$/i.test(String(rt.ini.get('assert.active') ?? '1'))) return true;
   if (toBool(assertion)) return true;
   if (description instanceof PHPObject) throw new ThrowSig(description);
-  throwError('AssertionError', description === null ? 'assert(false)' : toStr(description));
+  throwError('AssertionError', description === null ? '' : toStr(description)); // (calls compiled as assert() get their source as the description)
 });
 def('debug_backtrace', (options = 1, limit = 0) => { const t = captureTrace(!(I(options) & 2)); t.delete(0); t.reindex(); const l = I(limit); return l > 0 ? PHPArray.from(t.values().slice(0, l)) : t; });
 def('debug_print_backtrace', (options = 0, limit = 0) => { const t = captureTrace(!(I(options) & 2)); t.delete(0); t.reindex(); const s = traceAsString(t); rt.echo(s.slice(0, s.lastIndexOf('#')) ); });
 def('gc_collect_cycles', () => 0);
 def('gc_enable', () => null); def('gc_disable', () => null); def('gc_enabled', () => true); def('gc_mem_caches', () => 0);
-def('set_time_limit', (seconds) => true);
+def('set_time_limit', (seconds) => { setTimeLimit(I(seconds)); return true; });
 def('ignore_user_abort', (enable = null) => 0);
 def('connection_status', () => 0); def('connection_aborted', () => 0);
 def('headers_sent', () => false); def('header', (header, replace = true, response_code = 0) => null); def('header_remove', (name = null) => null);
@@ -112,11 +124,11 @@ def('http_response_code', (response_code = 0) => false);
 def('setcookie', (name, ...rest) => true); def('setrawcookie', (name, ...rest) => true);
 def('session_start', () => true); def('session_id', () => ''); def('session_destroy', () => true);
 def('php_sapi_name', () => 'cli');
-def('phpversion', (extension = null) => (extension === null ? PHP_VERSION : (['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl'].includes(S(extension).toLowerCase()) ? PHP_VERSION : false)));
+def('phpversion', (extension = null) => (extension === null ? rt.phpVersionStr : (['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl'].includes(S(extension).toLowerCase()) ? rt.phpVersionStr : false)));
 def('php_uname', (mode = 'a') => { const m = S(mode); if (m === 's') return osMod.type(); if (m === 'n') return osMod.hostname(); if (m === 'r') return osMod.release(); if (m === 'm') return osMod.machine ? osMod.machine() : process.arch; if (m === 'v') return osMod.version ? osMod.version() : ''; return `${osMod.type()} ${osMod.hostname()} ${osMod.release()} ${osMod.version ? osMod.version() : ''} ${process.arch}`; });
 def('php_ini_loaded_file', () => false);
 def('php_ini_scanned_files', () => false);
-def('zend_version', () => '4.3.0');
+def('zend_version', () => '4.' + rt.phpVersionStr.split('.').slice(1).join('.'));
 def('extension_loaded', (extension) => ['core', 'standard', 'json', 'ctype', 'mbstring', 'pcre', 'date', 'spl', 'hash', 'random', 'reflection', 'tokenizer', 'iconv', 'filter'].includes(S(extension).toLowerCase()));
 def('get_included_files', () => PHPArray.from([...rt.mainFile ? [rt.mainFile] : [], ...rt.included]));
 alias('get_required_files', 'get_included_files');

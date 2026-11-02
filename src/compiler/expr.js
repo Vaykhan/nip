@@ -5,31 +5,49 @@ import {
   cp, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, normKey, PHPArray, PHPObject, Ref,
   ThrowSig
 } from '../values.js';
-import { toBool, toDbl, toInt, toStr, typeOf } from '../convert.js';
+import { castInt, nanWarn, toBool, toDbl, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { cmp, isNum, looseEq, strictEq } from '../compare.js';
 import {
   add, bitAnd, bitNot, bitOr, bitXor, concat, dec, div, inc, mod, mul, pow, shl, shr, sub
 } from '../arith.js';
 import { fromBytes } from '../utf8.js';
-import { arrowFreeVars, isFresh, isLvalNode, SUPERGLOBALS, warnUndefVar } from './common.js';
+import { arrowFreeVars, CALL_KINDS, isFresh, isLvalNode, NULLSAFE_SHORT, SUPERGLOBALS, warnUndefVar, writableArrIn } from './common.js';
 import { cClassRef, cLval } from './lvalue.js';
+import { assertMessage } from './ast-export.js';
 import { iterateObject } from './stmt.js';
-import { rt } from '../runtime/state.js';
-import { notice, throwError } from '../runtime/errors.js';
+import { E_DEPRECATED, E_USER_DEPRECATED, rt } from '../runtime/state.js';
+import { deprecated, notice, PRELUDE_FILE, raise, setPrevious, throwError, warn } from '../runtime/errors.js';
 import {
-  callFunction, callNative, compileFunction, fnDisplayName, FRAME_FUNCS
+  callFunction, callNative, compileFunction, deprecatedFn, deprecationSuffix, fnDisplayName, FRAME_FUNCS, noDiscardWarn
 } from '../runtime/functions.js';
 import {
-  callableToClosure, findMethod, invokeCallable, makeClosure, methodClosure, resolveCallable
+  callableToClosure, findMethod, magicArgs, makeClosure, methodClosure, resolveCallable
 } from '../runtime/callables.js';
 import {
-  canAccessMember, classConst, cloneObject, declareClass, instantiate, toArrayCast, toObjectCast
+  canAccessMember, classConst, cloneObject, declareClass, instantiate, parentHook, readProp, toArrayCast, toObjectCast
 } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { dropRef, frameExit, gcCheck, gcCollect } from '../runtime/gc.js';
 import { doEval, doInclude } from '../runtime/program.js';
 import { deref } from '../lib/core.js';
 import { closureClass } from '../runtime/native-classes.js';
 import { lazyFn } from '../runtime/boot.js';
+
+// Fibers: while a fiber-mode body is compiled (compiler/generator.js), calls to user functions
+// (and to Fiber::suspend()) return a PendingCall, which the generator code runs with yield* so
+// the callee can suspend. Builtins are still called directly.
+export class PendingCall {
+  constructor(fn, args, thisObj, cls, sc, closure) { this.fn = fn; this.args = args; this.thisObj = thisObj; this.cls = cls; this.sc = sc; this.closure = closure; }
+}
+let deferCalls = false;
+export function compileDeferred(compile) {
+  const prev = deferCalls;
+  deferCalls = true;
+  try { return compile(); } finally { deferCalls = prev; }
+}
+function deferredCall(fn, args, thisObj, cls, sc, closure) {
+  if (fn.native !== undefined && !fn.suspends) return callFunction(fn, args, thisObj, cls, sc, closure);
+  return new PendingCall(fn, args, thisObj, cls, sc, closure);
+}
 
 export function cValue(n) { // expression whose value will be stored: apply copy-on-write marking
   const E = cExpr(n);
@@ -37,18 +55,37 @@ export function cValue(n) { // expression whose value will be stored: apply copy
   return (f) => { const v = E(f); if (v instanceof PHPArray) v.cow = true; return v; };
 }
 
-function constValue(n) { // try to fold a literal expression; returns undefined if not constant
-  if (n.k === 'Lit') return n.v;
-  return undefined;
-}
 
 export function cExpr(n) {
   const fn = EXPR[n.k];
   if (!fn) throw new FatalSig(`Unsupported expression type ${n.k}`, n.l);
-  return fn(n);
+  return n.chainTop ? nullsafeChain(fn(n)) : fn(n);
+}
+function deprecatedConst(name) {
+  const a = rt.deprecatedConsts.get(name);
+  if (a === undefined || a.showing) return;
+  if (a.msg !== undefined) { raise(E_DEPRECATED, a.msg); return; } // (an internal constant)
+  a.showing = true; // (not again while evaluating its own message)
+  try { raise(E_USER_DEPRECATED, `Constant ${name} is deprecated${deprecationSuffix(a, null)}`); } finally { a.showing = false; }
+}
+// a call whose result is discarded: #[\NoDiscard] functions warn before they run
+function discardCheck(n, call) {
+  if (!n.discarded || rt.phpVersion < 80500) return call;
+  return (fn, args, thisObj, cls, sc, closure) => {
+    if (fn.noDiscard !== undefined) {
+      if (fn.deprecated !== undefined) { deprecatedFn(fn, cls, args); rt.deprecatedShown = fn; } // (the deprecation comes first)
+      noDiscardWarn(fn, args, cls);
+    }
+    else if (fn.native !== undefined && (fn.name === 'call_user_func' || fn.name === 'call_user_func_array')) rt.discardNext = true;
+    return call(fn, args, thisObj, cls, sc, closure);
+  };
+}
+export function nullsafeChain(E) {
+  return (f) => { try { return E(f); } catch (e) { if (e === NULLSAFE_SHORT) return null; throw e; } };
 }
 
 const EXPR = {
+  TempObj(n) { return n.get; }, // an already compiled object expression (see MCall)
   Lit(n) { const v = n.v; return () => v; },
   Paren(n) { return cExpr(n.e); },
   Temp(n) { const id = n.id; return (f) => f.temps[id]; },
@@ -78,7 +115,18 @@ const EXPR = {
   },
   VarVar(n) { return cLval(n).get; },
   Index(n) { return cLval(n).get; },
-  Prop(n) { return cLval(n).get; },
+  Prop(n) {
+    if (!n.constExpr) return cLval(n).get;
+    const O = cExpr(n.o), N = typeof n.name === 'string' ? null : cExpr(n.name);
+    return (f) => {
+      const o = O(f);
+      if (n.nullsafe && (o === null || o === undefined)) { if (n.short) throw NULLSAFE_SHORT; return null; }
+      const name = N ? toStr(N(f)) : n.name;
+      if (!(o instanceof PHPObject)) { warn(`Attempt to read property "${name}" on ${o === null || o === undefined ? 'null' : valueName(o)}`); return null; }
+      if (!o.cls.isEnum) throwError('Error', 'Fetching properties on non-enums in constant expressions is not allowed');
+      return readProp(o, name, f);
+    };
+  },
   SProp(n) { return cLval(n).get; },
   List() { throw new FatalSig('Cannot use list() outside assignment context'); },
   Arr(n) {
@@ -115,14 +163,18 @@ const EXPR = {
     if (base === 'php_eol') return () => '\n';
     return () => {
       let v = rt.consts.get(name);
-      if (v !== undefined) return v;
-      if (fb) { v = rt.consts.get(fb); if (v !== undefined) return v; }
+      if (v !== undefined) { if (rt.deprecatedConsts.size) deprecatedConst(name); return v; }
+      if (fb) { v = rt.consts.get(fb); if (v !== undefined) { if (rt.deprecatedConsts.size) deprecatedConst(fb); return v; } }
       v = rt.consts.get(lname) ?? rt.consts.get(fb ? fb.toLowerCase() : '');
       if (v !== undefined && rt.constsCI.has(lname)) return v;
       throwError('Error', `Undefined constant "${name}"`);
     };
   },
   MagicClass() { return (f) => (f.cls ? f.cls.name : ''); },
+  ParentHook(n) {
+    const A = compileArgs(n.args);
+    return (f) => parentHook(f, n.prop, n.hook, A(f, null));
+  },
   MagicMethod(n) { const name = n.name; return (f) => (f.cls ? f.cls.name + '::' + name : name); },
   Eval(n) {
     const E = cExpr(n.e);
@@ -132,7 +184,15 @@ const EXPR = {
   CConst(n) {
     const C = cClassRef(n.cls);
     const name = n.name;
-    return (f) => classConst(C(f), name, f);
+    if (typeof name !== 'string') { // C::{expr}
+      const N = cExpr(name);
+      return (f) => {
+        const c = C(f), nm = N(f);
+        if (typeof nm !== 'string') throwError('TypeError', `Cannot use value of type ${typeOf(nm)} as class constant name`);
+        return classConst(c, nm, f, true);
+      };
+    }
+    return (f) => classConst(C(f), name, f, true);
   },
   ClassName(n) {
     if (typeof n.cls === 'string') {
@@ -141,14 +201,30 @@ const EXPR = {
     }
     if (typeof n.cls !== 'string') {
       const E = cExpr(n.cls);
-      return (f) => { const v = E(f); if (v instanceof PHPObject) return v.cls.name; throwError('TypeError', `Cannot use "::class" on ${typeOf(v)}`); };
+      return (f) => { const v = E(f); if (v instanceof PHPObject) return v.cls.name; throwError('TypeError', `Cannot use "::class" on ${valueName(v)}`); };
     }
     const C = cClassRef(n.cls);
-    return (f) => C(f).name;
+    const rel = n.cls.toLowerCase();
+    // outside any class (top-level code, unbound closures)
+    return (f) => { if (!f.cls) throwError('Error', `Cannot use "${rel}" in the global scope`); return C(f).name; };
   },
   Assign(n) {
     if (n.t.k === 'List') {
       const T = cLval(n.t);
+      if (T.hasRef && CALL_KINDS.has(n.e.k)) {
+        // a call's result can only be destructured by reference when the function returns one
+        const E = cExpr(n.e);
+        return (f) => {
+          rt.lastRetRef = null;
+          const v = E(f);
+          const r = rt.lastRetRef; rt.lastRetRef = null;
+          if (r !== null && r !== NOREF && r.v === v) { T.listAssign(f, v, { arr: () => writableArrIn(r) }); return v; }
+          notice('Attempting to set reference to non referenceable value');
+          const tmp = new Ref(v instanceof PHPArray ? v.clone() : v);
+          T.listAssign(f, v, { arr: () => writableArrIn(tmp) });
+          return v;
+        };
+      }
       if (T.hasRef) {
         const S = cLval(n.e);
         return (f) => { const v = S.get(f); T.listAssign(f, v, S); return v; };
@@ -158,7 +234,8 @@ const EXPR = {
     }
     const T = cLval(n.t);
     const E = cValue(n.e);
-    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && !isPureExpr(n.e) && !isSimpleTarget(n.t)) {
+    // PHP evaluates dims and property names that are expressions before the assigned value
+    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && ((!isPureExpr(n.e) && !isSimpleTarget(n.t)) || hasImpureDims(n.t))) {
       return (f) => { const p = T.place(f); const v = E(f); const r = p.set(f, v); return r === undefined ? v : r; };
     }
     if (n.t.k === 'VarVar') {
@@ -168,7 +245,7 @@ const EXPR = {
       const name = n.t.name;
       return (f) => {
         const v = E(f); const r = f.vars[name];
-        if (r !== undefined) { const old = r.v; r.v = v; if (old instanceof PHPObject && old !== v && old.cls.hasDestructor) gcCheck(old); }
+        if (r !== undefined) { const old = r.v; r.v = v; if (old !== v && old !== null && typeof old === 'object') { dropRef(old); if (old instanceof PHPObject && old.cls.hasDestructor) gcCheck(old); } }
         else f.vars[name] = new Ref(v);
         return v;
       };
@@ -217,7 +294,8 @@ const EXPR = {
       };
     }
     const fnop = BINOPS[op];
-    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && !isPureExpr(n.e) && !isSimpleTarget(n.t)) {
+    // PHP evaluates dims and property names that are expressions before the assigned value
+    if ((n.t.k === 'Index' || n.t.k === 'Prop' || n.t.k === 'SProp') && T.place && ((!isPureExpr(n.e) && !isSimpleTarget(n.t)) || hasImpureDims(n.t))) {
       return (f) => { const p = T.place(f); const v = E(f); return p.modify(f, (cur) => fnop(cur, v)); };
     }
     if (op === '.' && n.t.k === 'Var' && typeof n.t.name === 'string' && n.t.name !== 'this' && !SUPERGLOBALS.has(n.t.name) && n.t.name !== 'GLOBALS') {
@@ -260,7 +338,10 @@ const EXPR = {
     }
     // constant folding for pure literal operands
     if (n.a.k === 'Lit' && n.b.k === 'Lit' && ['.', '+', '-', '*', '|', '&', '<<', '>>'].includes(op) && (isNum(n.a.v) || typeof n.a.v === 'string') && (isNum(n.b.v) || typeof n.b.v === 'string')) {
-      if (op === '.' || (isNum(n.a.v) && isNum(n.b.v))) { const v = BINOPS[op](n.a.v, n.b.v); return () => v; }
+      // (not when evaluating would raise a diagnostic: bitwise ops on fractional floats, negative shifts)
+      const bitwise = op === '|' || op === '&' || op === '<<' || op === '>>';
+      const safe = !bitwise || (isInt(n.a.v) && isInt(n.b.v) && !((op === '<<' || op === '>>') && n.b.v < 0));
+      if (op === '.' || (isNum(n.a.v) && isNum(n.b.v) && safe)) { const v = BINOPS[op](n.a.v, n.b.v); return () => v; }
     }
     switch (op) {
       case '+': return (f) => { const a = A(f), b = B(f); if (typeof a === 'number' && typeof b === 'number') { const r = a + b; if (r <= MAXS && r >= -MAXS) return r; } return add(a, b); };
@@ -305,14 +386,26 @@ const EXPR = {
   Cast(n) {
     const A = cExpr(n.e);
     switch (n.t) {
-      case 'int': return (f) => toInt(A(f));
+      case 'int': return (f) => castInt(A(f));
       case 'float': return (f) => mkf(toDbl(A(f)));
       case 'string': return (f) => toStr(A(f));
       case 'bool': return (f) => toBool(A(f));
-      case 'array': return (f) => toArrayCast(A(f));
-      case 'object': return (f) => toObjectCast(A(f));
+      case 'array': return (f) => { const v = A(f); nanWarn(v, 'array'); return toArrayCast(v); };
+      case 'object': return (f) => { const v = A(f); nanWarn(v, 'object'); return toObjectCast(v); };
       case 'unset': return (f) => { A(f); return null; };
     }
+  },
+  // $x |> callable: a call with $x as the only argument; f(...) on the right is called directly
+  Pipe(n) {
+    const L = cExpr(n.a);
+    const vals = [];
+    const arg = { e: { k: 'TempObj', get: () => vals[vals.length - 1], l: n.l } };
+    const b = n.b;
+    const call = cExpr(CALL_KINDS.has(b.k) && b.args === 'fcc' ? { ...b, args: [arg], fromPipe: true } : { k: 'Call', f: b, args: [arg], l: n.l, fromPipe: true });
+    return (f) => {
+      vals.push(L(f));
+      try { return call(f); } finally { vals.pop(); }
+    };
   },
   Isset(n) {
     const items = n.list.map((e) => (isLvalNode(e) ? (() => { const lv = cLval(e); return lv.isset || lv.getq; })() : (() => { throw new FatalSig('Cannot use isset() on the result of an expression (you can use "null !== expression" instead)', n.l); })()));
@@ -358,7 +451,8 @@ const EXPR = {
     const E = cExpr(n.e);
     return (f) => {
       const v = E(f);
-      if (!(v instanceof PHPObject) || !v.cls.ancestors.has('throwable')) throwError('Error', 'Can only throw objects');
+      if (!(v instanceof PHPObject)) throwError('Error', 'Can only throw objects');
+      if (!v.cls.ancestors.has('throwable')) throwError('Error', 'Cannot throw objects that do not implement Throwable');
       throw new ThrowSig(v);
     };
   },
@@ -421,14 +515,32 @@ const EXPR = {
     const F = cExpr(n.f);
     if (n.args === 'fcc') return (f) => callableToClosure(F(f), f);
     const A = compileArgs(n.args);
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const callee = F(f);
       const c = resolveCallable(callee, f, true);
       const args = A(f, c.fn);
-      return invokeCallable(c, args);
+      return call(c.fn, args, c.thisObj, c.cls, c.sc, c.closure);
     };
   },
   MCall(n) {
+    if (n.o.k === 'New' && n.args !== 'fcc' && !deferCalls) {
+      // (new Foo)->m(): the object is a temporary, released when the call returns
+      const objs = [];
+      const O0 = cExpr(n.o);
+      const run = EXPR.MCall(Object.assign({}, n, { o: { k: 'TempObj', get: (f) => { const o = O0(f); objs[objs.length - 1] = o; return o; }, l: n.l } }));
+      return (f) => {
+        objs.push(null);
+        let r;
+        try { r = run(f); } catch (e) { objs.pop(); throw e; }
+        const o = objs.pop();
+        if (o instanceof PHPObject) {
+          if (o.cls.hasDestructor && !o.destructed && !rt.inShutdown) gcCollect([o], [r]); // its destructor runs now
+          frameExit([o], r);
+        }
+        return r;
+      };
+    }
     const O = cExpr(n.o);
     const N = typeof n.name === 'string' ? null : cExpr(n.name);
     const sname = typeof n.name === 'string' ? n.name : null;
@@ -438,33 +550,35 @@ const EXPR = {
       return (f) => {
         const o = O(f);
         const name = sname || toStr(N(f));
-        if (!(o instanceof PHPObject)) throwError('Error', `Call to a member function ${name}() on ${typeOf(o)}`);
+        if (!(o instanceof PHPObject)) throwError('Error', `Call to a member function ${name}() on ${valueName(o)}`);
         return methodClosure(o, name, f);
       };
     }
     const A = compileArgs(n.args);
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const o = O(f);
       if (!(o instanceof PHPObject)) {
-        if (nullsafe && (o === null || o === undefined)) return null;
+        if (nullsafe && (o === null || o === undefined)) { if (n.short) throw NULLSAFE_SHORT; return null; }
         let name = sname;
         if (!name) { const nv = N(f); name = typeof nv === 'string' ? nv : '{closure}'; }
-        throwError('Error', `Call to a member function ${name}() on ${typeOf(o)}`);
+        throwError('Error', `Call to a member function ${name}() on ${valueName(o)}`);
       }
       let name = sname, ln = lname;
       if (!name) {
         const nv = N(f);
-        if (nv instanceof PHPObject) { const c = resolveCallable(nv, f, true); return invokeCallable(c, A(f, c.fn)); }
-        name = toStr(nv); ln = name.toLowerCase();
+        if (typeof nv !== 'string') throwError('Error', 'Method name must be a string');
+        name = nv; ln = name.toLowerCase();
       }
       let m;
       const scope = f.cls;
       if (scope !== null && scope.privMethods !== null) { const pm = scope.privMethods.get(ln); if (pm !== undefined && o.cls.ancestors.has(scope.lname)) m = pm; }
       if (m === undefined) m = o.cls.methods.get(ln);
       if (m !== undefined && (m.vis === 'public' || canAccessMember(m, f.cls))) {
-        const args = A(f, m.fn);
-        if (m.static) return callFunction(m.fn, args, null, m.cls, o.cls, null);
-        return callFunction(m.fn, args, o, m.cls, o.cls, null);
+        // Closure::__invoke() passes arguments as the closure takes them (by reference too)
+        const args = A(f, o.cls === closureClass && ln === '__invoke' ? o.fn : m.fn);
+        if (m.static) return call(m.fn, args, null, m.cls, o.cls, null);
+        return call(m.fn, args, o, m.cls, o.cls, null);
       }
       // closure stored in property is not a method; __call fallback
       if (o.cls === closureClass && (ln === 'call' || ln === '__invoke' || ln === 'bindto' || ln === 'bind')) {
@@ -474,9 +588,10 @@ const EXPR = {
       const magic = o.cls.methods.get('__call');
       if (magic) {
         const args = A(f, null);
-        return callFunction(magic.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], o, magic.cls, o.cls, null);
+        return call(magic.fn, [name, magicArgs(args)], o, magic.cls, o.cls, null);
       }
-      if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${o.cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+      // (named after the declaring class, with the name as called)
+      if (m !== undefined) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
       throwError('Error', `Call to undefined method ${o.cls.name}::${name}()`);
     };
   },
@@ -498,34 +613,44 @@ const EXPR = {
       };
     }
     const A = compileArgs(n.args);
+    const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
     return (f) => {
       const cls = C(f);
-      const name = sname || toStr(N(f));
+      let name = sname;
+      if (name === null) { name = N(f); if (typeof name !== 'string') throwError('Error', 'Method name must be a string'); }
       const m = cls.methods.get(name.toLowerCase());
       if (!m || (m.vis !== 'public' && !canAccessMember(m, f.cls))) {
         // __callStatic / __call
         if (f.this && f.this.cls.ancestors.has(cls.lname)) {
           const mc = cls.methods.get('__call');
-          if (mc) { const args = A(f, null); return callFunction(mc.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], f.this, mc.cls, f.this.cls, null); }
+          if (mc) { const args = A(f, null); return call(mc.fn, [name, magicArgs(args)], f.this, mc.cls, f.this.cls, null); }
         }
         const ms = cls.methods.get('__callstatic');
-        if (ms) { const args = A(f, null); return callFunction(ms.fn, [name, PHPArray.from(args.map((x) => (x instanceof Ref ? x.v : x)))], null, ms.cls, cls, null); }
-        if (m) throwError('Error', `Call to ${m.vis} method ${cls.name}::${m.name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+        if (ms) { const args = A(f, null); return call(ms.fn, [name, magicArgs(args)], null, ms.cls, cls, null); }
+        if (m) throwError('Error', `Call to ${m.vis} method ${m.cls.name}::${name}() from ${f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
         throwError('Error', `Call to undefined method ${cls.name}::${name}()`);
       }
       if (m.abstract) throwError('Error', `Cannot call abstract method ${m.cls.name}::${m.name}()`);
+      if (m.static && m.cls.isTrait && m.fn.file !== PRELUDE_FILE) deprecated(`Calling static trait method ${m.cls.name}::${m.name} is deprecated, it should only be called on a class using the trait`);
       const args = A(f, m.fn);
       if (m.static) {
         const sc = isRel && (isParent || isSelf) ? (f.sc || cls) : cls;
-        return callFunction(m.fn, args, null, m.cls, sc, null);
+        return call(m.fn, args, null, m.cls, sc, null);
       }
-      if (f.this && f.this.cls.ancestors.has(cls.lname)) return callFunction(m.fn, args, f.this, m.cls, f.this.cls, null);
+      if (f.this && f.this.cls.ancestors.has(cls.lname)) return call(m.fn, args, f.this, m.cls, f.this.cls, null);
       throwError('Error', `Non-static method ${cls.name}::${m.name}() cannot be called statically`);
     };
   },
 };
 
 // target whose sub-expressions are literals / plain variables that the RHS cannot change
+function hasImpureDims(t) {
+  switch (t.k) {
+    case 'Index': return (t.i !== null && !isPureExpr(t.i)) || hasImpureDims(t.o);
+    case 'Prop': return (typeof t.name === 'object' && !isPureExpr(t.name)) || hasImpureDims(t.o);
+  }
+  return false;
+}
 function isSimpleTarget(t) {
   switch (t.k) {
     case 'Var': return typeof t.name === 'string';
@@ -589,7 +714,19 @@ function spreadInto(a, v) {
     return;
   }
   if (v instanceof PHPObject && v.cls.ancestors.has('traversable')) {
-    iterateObject(v, (k, x) => { if (typeof k === 'string') a.set(k, cp(x)); else a.push(cp(x)); });
+    try {
+      iterateObject(v, (k, x) => {
+        if (typeof k === 'string') a.set(k, cp(x));
+        else if (isInt(k)) a.push(cp(x));
+        else throwError('Error', 'Keys must be of type int|string during array unpacking');
+      });
+    } catch (e) {
+      // the unfinished generator is destroyed; an exception from its finally block wins
+      if (v.gen && e instanceof ThrowSig) {
+        try { v.gen.destroy(); } catch (e2) { if (e2 instanceof ThrowSig) setPrevious(e2.obj, e.obj); throw e2; }
+      }
+      throw e;
+    }
     return;
   }
   throwError('Error', 'Only arrays and Traversables can be unpacked');
@@ -605,10 +742,13 @@ export function isRefParam(fn, i) {
 }
 function compileArgs(argNodes) {
   if (argNodes.length === 0) return () => [];
-  const items = argNodes.map((a) => ({
-    E: cExpr(a.e), L: isLvalNode(a.e) ? cLval(a.e) : null, spread: !!a.spread, name: a.name || null,
-    tempRef: !isLvalNode(a.e) && ['Call', 'MCall', 'SCall', 'New', 'Include', 'Eval'].includes(a.e.k),
-  }));
+  const items = argNodes.map((a) => {
+    const E = cExpr(a.e);
+    let L = isLvalNode(a.e) ? cLval(a.e) : null;
+    // f($b =& $a) passes the reference that was just made
+    if (!L && a.e.k === 'AssignRef' && isLvalNode(a.e.t)) { const T = cLval(a.e.t); L = { ref: (f) => { E(f); return T.ref(f); } }; }
+    return { E, L, spread: !!a.spread, name: a.name || null, tempRef: !L && ['Call', 'MCall', 'SCall', 'New', 'Include', 'Eval'].includes(a.e.k) };
+  });
   const simple = items.every((it) => !it.spread && !it.name);
   if (simple) {
     const n = items.length;
@@ -624,7 +764,7 @@ function compileArgs(argNodes) {
             const v = it.E(f);
             const rr = rt.lastRetRef; rt.lastRetRef = null;
             if (rr !== null && rr !== NOREF && rr.v === v) { out[i] = rr; continue; }
-            if (rr === NOREF) { out[i] = new Ref(v); continue; }
+            if (rr === NOREF || fn.name === 'array_multisort') { out[i] = new Ref(v); continue; } // (array_multisort's parameters are "prefer-ref")
             if (!it.tempRef) { const pn = fn.params ? (fn.params[i] && fn.params[i].name) : (fn.pnames && fn.pnames[i]); throwError('Error', `${fnDisplayName(fn)}(): Argument #${i + 1}${pn ? ' ($' + pn + ')' : ''} could not be passed by reference`); }
             notice('Only variables should be passed by reference');
             out[i] = new Ref(v);
@@ -670,7 +810,9 @@ function compileArgs(argNodes) {
         if (named.has(it.name)) throwError('Error', `Named parameter $${it.name} overwrites previous argument`);
         let pi = -1;
         if (fn && fn.params) pi = fn.params.findIndex((p) => p.name === it.name);
+        // (a plain value for a by-ref parameter is an error, see placeNamed())
         if (pi >= 0 && isRefParam(fn, pi) && it.L) named.set(it.name, it.L.ref(f));
+        else if (pi >= 0 && isRefParam(fn, pi) && it.tempRef) named.set(it.name, new Ref(it.E(f)));
         else named.set(it.name, it.E(f));
         continue;
       }
@@ -684,9 +826,16 @@ function compileArgs(argNodes) {
   };
 }
 
-function compileNamedCall(n) {
+function compileNamedCall(n, plain) {
   const name = n.f, fb = n.fb;
   const lname = name.toLowerCase(), lfb = fb ? fb.toLowerCase() : null;
+  // assert(): unless zend.assertions=1 the call (and its arguments) is skipped
+  if ((lfb || lname) === 'assert' && n.args !== 'fcc' && !plain) {
+    // (without a description, the message is the assertion's source, zend_compile_assert)
+    if (n.args.length === 1 && !n.args[0].spread && !n.args[0].name && !n.fromPipe) n = { ...n, args: [n.args[0], { e: { k: 'Lit', v: assertMessage(n.args) } }] };
+    const inner = compileNamedCall(n, true);
+    return (f) => (rt.ini.get('zend.assertions') === '1' ? inner(f) : true);
+  }
   // compile-time special forms that need the caller's frame
   const special = FRAME_FUNCS[lfb || lname];
   if (special) {
@@ -701,18 +850,24 @@ function compileNamedCall(n) {
     };
   }
   const A = compileArgs(n.args);
-  let cached = null;
+  const call = discardCheck(n, deferCalls ? deferredCall : callFunction);
+  // the resolved function is cached per call site; rt.epoch changes on every run, since compiled
+  // code (includes, eval) is reused across runs but function tables are not
+  let cached = null, cachedEpoch = -1;
   return (f) => {
     let fn = cached;
-    if (fn === null) {
+    if (cachedEpoch !== rt.epoch) {
       fn = rt.fns.get(lname);
       if (fn === undefined && lfb) fn = rt.fns.get(lfb);
       if (fn === undefined) fn = lazyFn(lfb || lname);
-      if (fn === undefined) { const sp = FRAME_FUNCS[lfb || lname]; if (sp) return sp(f, A(f, null)); throwError('Error', `Call to undefined function ${fb || name}()`); }
-      cached = fn;
+      if (fn === undefined) { const sp = FRAME_FUNCS[lfb || lname]; if (sp) return sp(f, A(f, null)); throwError('Error', `Call to undefined function ${name}()`); }
+      cached = fn; cachedEpoch = rt.epoch;
     }
     const args = A(f, fn);
-    if (fn.native) return callNative(fn, args);
-    return callFunction(fn, args, null, null, null, null);
+    if (fn.native) {
+      if (n.discarded && rt.phpVersion >= 80500 && (fn.name === 'call_user_func' || fn.name === 'call_user_func_array')) rt.discardNext = true;
+      return callNative(fn, args);
+    }
+    return call(fn, args, null, null, null, null);
   };
 }

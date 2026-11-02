@@ -8,8 +8,9 @@ import { iterateObject } from '../compiler/stmt.js';
 import { rt } from '../runtime/state.js';
 import { throwError, warn } from '../runtime/errors.js';
 import { callableFn, callValue, findMethod } from '../runtime/callables.js';
-import { callMethodName, magicGet, magicIsset, objVisibleProps, writeProp } from '../runtime/classes.js';
+import { callMethodName, magicGet, magicIsset, objVisibleProps, toArrayCast, writeProp } from '../runtime/classes.js';
 import { A, alias, def, deref, I, R1, refArr, slotCp } from './core.js';
+import { since } from '../runtime/version.js';
 import { lower, natCmp, sgn, upper } from './string.js';
 import { mtRange } from './math.js';
 
@@ -160,7 +161,7 @@ def('array_splice', (array, offset, length = null, replacement = null) => {
   let end = len < 0 ? Math.max(off, n + len) : Math.min(n, off + len);
   const removed = new PHPArray();
   for (let i = off; i < end; i++) { const [k, v] = ent[i]; if (typeof k === 'string') removed.set(k, deref(v)); else removed.push(deref(v)); }
-  const rep = replacement === null ? [] : replacement instanceof PHPArray ? replacement.values() : [replacement];
+  const rep = replacement === null ? [] : replacement instanceof PHPArray ? replacement.values() : toArrayCast(replacement).values(); // (converted like an (array) cast)
   const out = new PHPArray();
   const add = ([k, v]) => { if (typeof k === 'string') out.setRaw(k, v); else out.push(v); };
   for (let i = 0; i < off; i++) add(ent[i]);
@@ -278,12 +279,14 @@ def('array_shift', (array) => {
   return v;
 }, R1);
 def('array_unshift', (array, ...values) => {
-  const a = A(deref(array));
+  A(deref(array));
+  const a = refArr(array);
   const out = new PHPArray();
-  for (const v of values) out.push(cp(v));
+  for (const v of values) out.push(v === a ? a.clone() : cp(v)); // unshifting the array onto itself adds its old contents
   for (const [k, v] of a.rawEntries()) { if (typeof k === 'string') out.setRaw(k, v); else out.push(v); }
-  array.v = out;
-  return out.size;
+  a.replaceWith(out, values.length);
+  a.pos = 0;
+  return a.size;
 }, R1);
 def('array_reverse', (array, preserve_keys = false) => {
   const ent = A(array).entries().reverse(); const out = new PHPArray(); const pk = toBool(preserve_keys);
@@ -429,6 +432,10 @@ def('array_find', (array, callback) => { const fn = callableFn(callback); for (c
 def('array_find_key', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (toBool(fn(v, k))) return k; return null; });
 def('array_any', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (toBool(fn(v, k))) return true; return false; });
 def('array_all', (array, callback) => { const fn = callableFn(callback); for (const [k, v] of A(array).entries()) if (!toBool(fn(v, k))) return false; return true; });
+since(80400, 'fn', 'array_find', 'array_find_key', 'array_any', 'array_all');
+def('array_first', (array) => { const a = A(array); const k = a.firstKey(); return k === null ? null : cp(a.get(k)); });
+def('array_last', (array) => { const a = A(array); const k = a.lastKey(); return k === null ? null : cp(a.get(k)); });
+since(80500, 'fn', 'array_first', 'array_last');
 def('array_flip_dummy', () => 0); rt.fns.delete('array_flip_dummy');
 def('array_change_key_case', (array, _case = 0) => { const out = new PHPArray(); for (const [k, v] of A(array).entries()) out.set(typeof k === 'string' ? (I(_case) ? upper(k) : lower(k)) : k, cp(v)); return out; });
 // internal pointer

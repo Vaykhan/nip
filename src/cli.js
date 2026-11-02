@@ -57,7 +57,7 @@ export function main(argv) {
   try { return cliMain(argv); }
   catch (e) {
     rt.flush();
-    if (e instanceof RangeError) { writeErr('Fatal error: Maximum call stack size reached. Infinite recursion?'); return 255; }
+    if (e instanceof RangeError) { writeErr('Fatal error', 'Maximum call stack size reached. Infinite recursion?'); return 255; }
     process.stderr.write('PHP Fatal error:  Internal interpreter error: ' + ((e && e.stack) || e) + '\n');
     return 255;
   }

@@ -1,17 +1,19 @@
 // Classes and objects: declaration, inheritance, traits, enums, property and method access.
 
 import { cp, FatalSig, isInt, NOREF, normKey, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { toBool, toStr, typeOf } from '../convert.js';
-import { isNum, looseEq } from '../compare.js';
+import { toBool, toStr, typeOf, valueName } from '../convert.js';
+import { isNum, looseEq, strictEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
-import { rt } from './state.js';
-import { initThrowable, notice, throwError, warn } from './errors.js';
-import { callFunction, coercePropType, coerceType, compileFunction, FAIL } from './functions.js';
+import { E_USER_DEPRECATED, rt } from './state.js';
+import { deprecated, initThrowable, notice, PRELUDE_FILE, raise, throwError, warn } from './errors.js';
+import { attrNamed, callFunction, coercePropType, coerceType, compileFunction, deprecationSuffix, FAIL, typeStr } from './functions.js';
 import { callValue } from './callables.js';
-import { gcCheck, gcCollect } from './gc.js';
+import { dropRef, gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
 import { lazyClass, lazyClassSrc } from './boot.js';
+import { checkDelayed, checkInheritance } from './inheritance.js';
+import { lazyInit } from './lazy.js';
 
 export class PHPClass {
   constructor(name) {
@@ -23,10 +25,57 @@ export class PHPClass {
     this.methods = new Map(); this.privMethods = null;
     this.enumBacked = null; this.decl = null; this.nativeIter = null; this.toBoolHook = null; this.hasDestructor = false;
     this.propInit = null;
+    this.hasInternal = false; // has prelude-internal properties, see isInternalSlot()
   }
 }
 
-export function lookupClass(name, quiet) {
+// Members of classes written in src/prelude/*.php whose names start with "__" (other than PHP's
+// magic methods) are implementation details: they are left out of property listings, dumps,
+// casts, comparisons and Reflection, as if they were C-level state of an internal class.
+const MAGIC_METHODS = new Set(['__construct', '__destruct', '__call', '__callstatic', '__get', '__set', '__isset', '__unset',
+  '__sleep', '__wakeup', '__serialize', '__unserialize', '__tostring', '__invoke', '__set_state', '__clone', '__debuginfo']);
+export function isInternalName(owner, name) {
+  return name.charCodeAt(0) === 95 && name.charCodeAt(1) === 95 && !!owner.decl && owner.decl.file === PRELUDE_FILE && !MAGIC_METHODS.has(name.toLowerCase());
+}
+export function isInternalSlot(cls, key) { if (!cls.hasInternal) return false; const s = cls.slots.get(key); return s !== undefined && s.internal === true; }
+// [key, value-or-Ref] pairs of an object's properties without the internal ones (initializing a
+// lazy object; objectPropsRaw() doesn't)
+export function objectProps(o) { return objectPropsRaw(o.lazy === undefined ? o : lazyInit(o)); }
+export function objectPropsRaw(o) {
+  const cls = o.cls;
+  if (!cls.hasInternal && !slotsReordered(o)) return [...o.props];
+  // (declared properties in declaration order, also when one was unset and assigned again)
+  const out = [];
+  for (const [key, info] of cls.slots) { if (info.internal) continue; const sl = o.props.get(key); if (sl !== undefined) out.push([key, sl]); }
+  for (const e of o.props) if (!cls.slots.has(e[0])) out.push(e);
+  return out;
+}
+// whether the declared properties don't come first in declaration order in the props map
+function slotsReordered(o) {
+  if (o.cls.slots.size === 0) return false;
+  const it = o.cls.slots.keys();
+  let want = it.next();
+  for (const k of o.props.keys()) {
+    while (!want.done && !o.props.has(want.value)) want = it.next();
+    if (want.done) return o.cls.slots.has(k);
+    if (k !== want.value) return true;
+    want = it.next();
+  }
+  return false;
+}
+// The properties PHP shows for an internal class in var_dump/print_r/var_export, (array) casts and
+// json_encode, which a prelude class can compute with __nipProps(). null when it doesn't.
+export function nipProps(o) {
+  const m = o.cls.methods.get('__nipprops');
+  if (m === undefined) return null;
+  const r = callFunction(m.fn, [], o, m.cls, o.cls, null);
+  return r instanceof PHPArray ? r : new PHPArray();
+}
+
+// whether an attribute list has the attribute (a lowercase, fully qualified name without leading \)
+export function hasAttr(attrs, lname) { return !!attrs && attrs.some((a) => (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase() === lname); }
+// kind: 'Interface' or 'Trait' for the error message (a missing trait is a fatal error)
+export function lookupClass(name, quiet, kind) {
   if (name instanceof PHPClass) return name;
   let n = name[0] === '\\' ? name.slice(1) : name;
   const ln = n.toLowerCase();
@@ -46,8 +95,12 @@ export function lookupClass(name, quiet) {
     } finally { rt.autoloading.delete(ln); }
   }
   if (quiet) return null;
-  throwError('Error', `Class "${n}" not found`);
+  if (kind === 'Trait') throw new FatalSig(`Trait "${n}" not found`, rt.line, rt.file);
+  throwError('Error', `${kind || 'Class'} "${n}" not found`);
 }
+// class lookup for inheritance checks: no autoloading until the class is registered
+const resolveForCheck = (n) => classExists(n, false);
+const autoloadForCheck = (n) => classExists(n, true);
 export function classExists(name, autoload) {
   const ln = (name[0] === '\\' ? name.slice(1) : name).toLowerCase();
   if (rt.classes.has(ln)) return rt.classes.get(ln);
@@ -67,17 +120,24 @@ export function canAccessMember(m, scope) {
 
 let anonSerial = 0;
 export const displayName = (cls) => { const i = cls.name.indexOf('\0'); return i < 0 ? cls.name : cls.name.slice(0, i); };
+// (zend_class_redeclaration_error, PHP 8.4)
+export function redeclareMsg(ex, name) {
+  const kind = ex.isInterface ? 'interface' : ex.isTrait ? 'trait' : ex.isEnum ? 'enum' : 'class';
+  if (!ex.decl || ex.decl.file === PRELUDE_FILE) return `Cannot redeclare ${kind} ${name}`;
+  return `Cannot redeclare ${kind} ${name} (previously declared in ${ex.decl.file}:${ex.decl.startLine || ex.decl.l})`;
+}
 export function declareClass(decl, f) {
   const lname = decl.name.toLowerCase();
   if (!decl.anon && rt.classes.has(lname)) {
     const ex = rt.classes.get(lname);
     if (ex.decl === decl) return ex;
+    if (rt.phpVersion >= 80400) throw new FatalSig(redeclareMsg(ex, ex.name), decl.l, decl.file);
     throw new FatalSig(`Cannot declare ${decl.kind} ${decl.name}, because the name is already in use`, decl.l, decl.file);
   }
   const cls = new PHPClass(decl.anon ? `${decl.parent || decl.interfaces[0] || 'class'}@anonymous\0${decl.file}:${decl.l}$${(anonSerial++).toString(16)}` : decl.name);
   if (decl.anon) { cls.anon = true; cls.ancestors = new Set([cls.lname]); }
   cls.decl = decl; cls.kind = decl.kind;
-  cls.abstract = decl.flags.abstract; cls.final = decl.flags.final; cls.readonly = decl.flags.readonly;
+  cls.abstract = decl.flags.abstract; cls.final = decl.flags.final || decl.kind === 'enum'; cls.readonly = decl.flags.readonly;
   cls.isInterface = decl.kind === 'interface'; cls.isTrait = decl.kind === 'trait'; cls.isEnum = decl.kind === 'enum';
   const savedLine = rt.line, savedFile = rt.file;
   rt.line = decl.l; rt.file = decl.file;
@@ -90,31 +150,39 @@ export function declareClass(decl, f) {
       if (p.final) throw new FatalSig(`Class ${cls.name} cannot extend final class ${p.name}`, decl.l, decl.file);
       inheritFrom(cls, p);
     }
-    // interfaces
-    for (const iname of decl.interfaces) {
-      const ic = lookupClass(iname);
+    // interfaces (an enum implements UnitEnum, and BackedEnum if backed, after the ones it lists)
+    const ifaces = decl.interfaces.map((iname) => lookupClass(iname, false, 'Interface'));
+    if (cls.isEnum) { ifaces.push(rt.classes.get('unitenum')); if (decl.enumType) ifaces.push(rt.classes.get('backedenum')); }
+    const what = cls.isEnum ? 'Enum' : cls.isInterface ? 'Interface' : 'Class';
+    ifaces.forEach((ic, i) => {
       if (!ic.isInterface) throw new FatalSig(`${cls.name} cannot implement ${ic.name} - it is not an interface`, decl.l, decl.file);
+      if (ifaces.indexOf(ic) < i) throw new FatalSig(`${what} ${cls.name} cannot implement previously implemented interface ${ic.name}`, decl.l, decl.file);
+      // a constant inherited from two places, and not redeclared, is ambiguous
+      for (const [k, v] of ic.consts) {
+        const ex = cls.consts.get(k);
+        if (ex && ex.cls !== v.cls && !decl.consts.some((c) => c.name === k)) {
+          if (v.final && ex.cls !== v.cls) throw new FatalSig(`${ex.cls.name}::${k} cannot override final constant ${v.cls.name}::${k}`, decl.l, decl.file);
+          throw new FatalSig(`${what} ${cls.name} inherits both ${ex.cls.name}::${k} and ${v.cls.name}::${k}, which is ambiguous`, decl.l, decl.file);
+        }
+      }
       addInterface(cls, ic);
-    }
-    if (cls.isEnum) {
-      addInterface(cls, rt.classes.get('unitenum'));
-      if (decl.enumType) addInterface(cls, rt.classes.get('backedenum'));
-    }
-    // traits
-    for (const tu of decl.traits) useTraits(cls, tu, f);
+    });
+    if (!cls.isInterface) checkSpecialInterfaces(cls, decl, what);
     // constants
     for (const c of decl.consts) {
       const ex = cls.consts.get(c.name);
-      if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, c.l, decl.file);
-      cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final });
+      if (ex && ex.final && ex.cls !== cls) throw new FatalSig(`${cls.name}::${c.name} cannot override final constant ${ex.cls.name}::${c.name}`, decl.l, decl.file);
+      cls.consts.set(c.name, { E: cExpr(c.e), val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c });
     }
+    // traits (their defaults may use the class's constants)
+    if (decl.traits.length) bindTraits(cls, decl);
     // enum cases
     if (cls.isEnum) {
       cls.enumBacked = decl.enumType ? decl.enumType.alts[0] : null;
       cls.cases = [];
       for (const c of decl.cases) {
         const E = c.e ? cExpr(c.e) : null;
-        const entry = { case: true, val: undefined, done: false, cls, vis: 'public', name: c.name, E: null };
+        const entry = { case: true, val: undefined, done: false, cls, vis: 'public', name: c.name, E: null, decl: c };
         entry.make = () => {
           const o = new PHPObject(cls);
           o.props.set('name', c.name);
@@ -134,11 +202,23 @@ export function declareClass(decl, f) {
     for (const m of decl.methods) addMethod(cls, m.fn, m, cls);
     // promoted ctor params
     const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
-    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, type: prm.type, readonly: prm.readonly || cls.readonly }, cls);
+    if (ctor) for (const prm of ctor.fn.params) if (prm.promote) addProp(cls, { name: prm.name, def: null, hasDef: false, static: false, vis: prm.promote, setVis: prm.setVis || null, hooks: prm.hooks, final: prm.final, type: prm.type, promoted: true, attrs: prm.attrs, l: ctor.l, readonly: prm.readonly || cls.readonly }, cls);
+    if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
+    checkInheritance(cls, decl, resolveForCheck);
     // abstract check
-    if (!cls.abstract && !cls.isInterface && !cls.isTrait) {
-      const abs = [...cls.methods.values()].filter((m) => m.abstract);
-      if (abs.length) throw new FatalSig(`Class ${cls.name} contains ${abs.length} abstract method${abs.length > 1 ? 's' : ''} and must therefore be declared abstract or implement the remaining methods (${abs.map((m) => m.cls.name + '::' + m.name).join(', ')})`, decl.l, decl.file);
+    // zend_verify_abstract_class: an abstract class still has to implement private abstract methods
+    if (!cls.isInterface && !cls.isTrait) {
+      const abs = [...cls.methods.values()].filter((m) => m.abstract && (!cls.abstract || m.vis === 'private'));
+      // (and abstract property hooks)
+      if (!cls.abstract) for (const info of cls.props.values()) if (info.hooks) for (const h of [info.hooks.get, info.hooks.set]) if (h && h.abstractHook) abs.push({ cls: h.cls, name: h.name });
+      if (abs.length) {
+        const n = abs.length, s = n > 1 ? 's' : '';
+        const list = abs.slice(0, 3).map((m) => m.cls.name + '::' + m.name).join(', ') + (n > 3 ? ', ...' : '');
+        const what = cls.isEnum ? 'Enum' : 'Class';
+        throw new FatalSig(!cls.abstract && !cls.isEnum
+          ? `${what} ${cls.name} contains ${n} abstract method${s} and must therefore be declared abstract or implement the remaining method${rt.phpVersion >= 80400 ? s : 's'} (${list})`
+          : `${what} ${cls.name} must implement ${n} abstract private method${s} (${list})`, decl.l, decl.file);
+      }
     }
     if (cls.parent || decl.traits.length) {
       const own = new Map(), rest = [];
@@ -146,13 +226,46 @@ export function declareClass(decl, f) {
       for (const [k, m] of rest) own.set(k, m);
       cls.methods = own;
     }
-    if (cls.methods.has('__tostring')) cls.ancestors.add('stringable');
+    cls.allowDynamic = (!!cls.parent && cls.parent.allowDynamic) || hasAttr(decl.attrs, 'allowdynamicproperties'); // inherited
+    // (internal classes implemented in the prelude that don't allow dynamic properties)
+    cls.noDynamic = cls.readonly || (decl.file === PRELUDE_FILE && (lname === 'sensitiveparametervalue' || lname === 'weakmap'));
+    for (const m of cls.methods.values()) {
+      // an abstract method of a used trait counts as the overridden method
+      const fromTrait = () => decl.traits.some((tu) => tu.names.some((tn) => { const t = lookupClass(tn, true); const tm = t && t.methods.get(m.name.toLowerCase()); return !!tm && tm.abstract; }));
+      if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto && !fromTrait()) {
+        throw new FatalSig(`${displayName(cls)}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
+      }
+    }
+    if (!cls.isInterface && cls.ancestors.has('serializable') && decl.file !== PRELUDE_FILE) {
+      if (!cls.abstract && (!cls.methods.has('__serialize') || !cls.methods.has('__unserialize'))) {
+        deprecated(`${displayName(cls)} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)`);
+      }
+      if (cls.isEnum) throw new FatalSig(`Enum ${cls.name} cannot implement the Serializable interface`, decl.l, decl.file);
+    }
     cls.hasDestructor = cls.methods.has('__destruct');
+    cls.nipHooks = cls.methods.has('__nipget');
     if (!decl.anon) { rt.classes.set(lname, cls); decl.declared = true; }
+    checkDelayed(cls, autoloadForCheck);
   } finally { rt.line = savedLine; rt.file = savedFile; }
   return cls;
 }
 
+// interfaces only some classes may implement (their interface_gets_implemented handlers)
+function checkSpecialInterfaces(cls, decl, what) {
+  const at = (msg, l = decl.l, file = decl.file) => new FatalSig(msg, l, file);
+  const anc = cls.ancestors;
+  if (anc.has('throwable')) {
+    let root = cls;
+    while (root.parent) root = root.parent;
+    if (root.lname !== 'exception' && root.lname !== 'error') throw at(cls.isEnum ? `${what} ${cls.name} cannot implement interface Throwable` : `${what} ${cls.name} cannot implement interface Throwable, extend Exception or Error instead`);
+  }
+  if (!cls.isEnum && anc.has('unitenum')) throw at(`Non-enum class ${cls.name} cannot implement interface ${anc.has('backedenum') && !decl.interfaces.some((n) => /^\\?unitenum$/i.test(n)) ? 'BackedEnum' : 'UnitEnum'}`);
+  if (cls.isEnum && !decl.enumType && anc.has('backedenum')) throw at(`Non-backed enum ${cls.name} cannot implement interface BackedEnum`);
+  if (anc.has('iterator') && anc.has('iteratoraggregate')) throw at(`${what} ${cls.name} cannot implement both Iterator and IteratorAggregate at the same time`);
+  if (anc.has('traversable') && !anc.has('iterator') && !anc.has('iteratoraggregate') && !cls.abstract && decl.file !== PRELUDE_FILE) {
+    throw at(`${what} ${cls.name} must implement interface Traversable as part of either Iterator or IteratorAggregate`, 0, 'Unknown');
+  }
+}
 export function inheritFrom(cls, p) {
   cls.parent = p;
   for (const a of p.ancestors) cls.ancestors.add(a);
@@ -161,6 +274,7 @@ export function inheritFrom(cls, p) {
   for (const [k, v] of p.sprops) cls.sprops.set(k, v);
   for (const [k, v] of p.props) if (v.vis !== 'private') cls.props.set(k, v);
   for (const [k, v] of p.slots) cls.slots.set(k, v);
+  cls.hasInternal = p.hasInternal;
   for (const [k, v] of p.methods) cls.methods.set(k, v);
   cls.nativeIter = p.nativeIter; cls.toBoolHook = p.toBoolHook;
   if (p.nativeCtor) cls.nativeCtor = p.nativeCtor;
@@ -170,17 +284,117 @@ export function addInterface(cls, ic) {
   cls.ifaceList.push(ic);
   for (const [k, v] of ic.consts) if (!cls.consts.has(k)) cls.consts.set(k, v);
   for (const [k, m] of ic.methods) if (!cls.methods.has(k)) cls.methods.set(k, m);
+  for (const [k, info] of ic.props) if (!cls.props.has(k)) cls.props.set(k, info); // (hooked properties, PHP 8.4)
+}
+// property hooks (PHP 8.4): info.hooks = { get, set } (compiled like methods, parent hooks the
+// property doesn't redeclare are inherited); a hooked property is virtual (no stored value)
+// when no hook of it uses $this->prop
+function hookUsesProp(n, name) {
+  if (!n || typeof n !== 'object') return false;
+  if (Array.isArray(n)) return n.some((x) => hookUsesProp(x, name));
+  if (n.k === 'Prop' && n.o && n.o.k === 'Var' && n.o.name === 'this' && n.name === name) return true;
+  if (n.k === 'Closure' || n.k === 'ClassDecl' || n.k === 'FuncDecl') return false; // (other functions)
+  for (const k in n) if (k !== 'l' && n[k] && typeof n[k] === 'object' && hookUsesProp(n[k], name)) return true;
+  return false;
+}
+function setupHooks(cls, info, p, owner) {
+  const parent = cls.props.get(p.name);
+  const hooks = { get: null, set: null };
+  let virtual = !!owner.isInterface;
+  if (p.hooks) {
+    virtual = true;
+    for (const kind of ['get', 'set']) {
+      const h = p.hooks[kind];
+      if (!h) continue;
+      // (a get hook returns the property's type)
+      const fn = compileFunction(kind === 'get' && p.type && !h.ret ? { ...h, ret: p.type } : h, { method: true, cls: owner });
+      fn.hookProp = p.name; fn.hookKind = kind; fn.abstractHook = !!h.abstract; fn.hookType = p.type || null;
+      hooks[kind] = fn;
+      if (h.body && (kind === 'set' && h.shortExpr ? true : hookUsesProp(h.body, p.name))) virtual = false;
+    }
+    if (owner.isInterface) virtual = true;
+  }
+  if (parent && parent.cls !== owner) {
+    if (parent.hooks) {
+      for (const kind of ['get', 'set']) {
+        const ph = parent.hooks[kind];
+        if (ph && hooks[kind] && ph.decl.final) throw new FatalSig(`Cannot override final property hook ${ph.cls.name}::${ph.name}()`, p.l, owner.decl ? owner.decl.file : undefined);
+        if (!hooks[kind]) hooks[kind] = ph;
+      }
+    }
+    if (!parent.virtual) virtual = false;
+    // (a backed property implements the parent's abstract hooks)
+    if (!virtual || !p.hooks) for (const kind of ['get', 'set']) if (hooks[kind] && hooks[kind].abstractHook && hooks[kind].cls !== owner && !(kind === 'set' && p.readonly)) hooks[kind] = null;
+    if (!p.hooks) virtual = false;
+  }
+  info.hooks = hooks.get || hooks.set ? hooks : null;
+  info.virtual = virtual && !!info.hooks;
+  if (info.virtual && p.hasDef) throw new FatalSig(`Cannot specify default value for virtual hooked property ${owner.name}::$${p.name}`, p.l, owner.decl ? owner.decl.file : undefined);
+  if (info.virtual && p.setVis && !owner.isInterface && (!hooks.set || !hooks.get)) throw new FatalSig(`${hooks.set ? 'Write' : 'Read'}-only virtual property ${owner.name}::$${p.name} must not specify asymmetric visibility`, p.l, owner.decl ? owner.decl.file : undefined);
+}
+// inside a hook of the property, running on the object itself: $this->prop is the stored value
+// (a hook of an initialized lazy proxy accesses the real instance's backing value)
+const inHook = (info, obj, f) => !!f && (f.this === obj || (!!f.this && f.this.lazy !== undefined && f.this.lazy.instance === obj)) && !!f.fn && f.fn.hookProp === info.name;
+function hookedRead(obj, info, name, f) {
+  if (inHook(info, obj, f)) { if (info.virtual) throwError('Error', `Must not read from virtual property ${obj.cls.name}::$${name}`); return NO_HOOK; }
+  if (info.hooks.get) return callFunction(info.hooks.get, [], obj, info.hooks.get.cls, obj.cls, null);
+  if (info.virtual) throwError('Error', `Property ${obj.cls.name}::$${name} is write-only`);
+  return NO_HOOK;
+}
+const NO_HOOK = Symbol('no hook');
+// parent::$prop::get() / parent::$prop::set($v): the parent's hook, or its stored value when the
+// parent's property is a plain one
+export function parentHook(f, prop, hook, args) {
+  const cls = f.cls, obj = f.this;
+  if (!cls) throwError('Error', 'Cannot use "parent" when no class scope is active');
+  if (!cls.parent) throwError('Error', 'Cannot use "parent" when current class scope has no parent');
+  const pinfo = cls.parent.props.get(prop);
+  if (!pinfo) throwError('Error', `Undefined property ${cls.parent.name}::$${prop}`);
+  if (pinfo.vis === 'private' && pinfo.cls !== cls) throwError('Error', `Cannot access private property ${pinfo.cls.name}::$${prop}`);
+  const h = pinfo.hooks && pinfo.hooks[hook];
+  if (h) return callFunction(h, args, obj, h.cls, obj.cls, null);
+  // (the implicit hook of a plain property is an internal function: no extra arguments)
+  const want = hook === 'get' ? 0 : 1;
+  if (args.length > want) throwError('ArgumentCountError', `${pinfo.cls.name}::$${prop}::${hook}() expects exactly ${want} argument${want === 1 ? '' : 's'}, ${args.length} given`);
+  if (hook === 'get') {
+    const sl = obj.props.get(pinfo.key);
+    if (sl === undefined) {
+      if (pinfo.type) throwError('Error', `Typed property ${obj.cls.name}::$${prop} must not be accessed before initialization`);
+      warn(`Undefined property: ${obj.cls.name}::$${prop}`);
+      return null;
+    }
+    return sl instanceof Ref ? sl.v : sl;
+  }
+  let v = args.length ? (args[0] instanceof Ref ? args[0].v : args[0]) : null;
+  if (pinfo.type) v = coercePropType(pinfo, v, pinfo.cls.name, prop);
+  const sl = obj.props.get(pinfo.key);
+  if (sl instanceof Ref) sl.v = cp(v); else obj.props.set(pinfo.key, cp(v));
+  return v;
 }
 function addProp(cls, p, owner) {
   const info = {
     name: p.name, key: p.vis === 'private' && !p.static ? `\0${owner.name}\0${p.name}` : p.name, cls: owner, vis: p.vis,
     type: p.type || null, readonly: !!p.readonly, hasDef: !!p.hasDef, defE: p.hasDef ? (p.defE || cExpr(p.def)) : null, val: undefined, evaluated: false, decl: p,
+    internal: isInternalName(owner, p.name),
   };
+  if (info.internal) cls.hasInternal = true;
+  // asymmetric visibility (PHP 8.4): public readonly is protected(set); a set visibility equal
+  // to the visibility is none; private(set) is final
+  if (rt.phpVersion >= 80400) {
+    if (p.final) info.final = true;
+    // the class that first declared the property (protected(set) is scoped by it)
+    const parent = cls.props.get(p.name);
+    info.proto = parent && parent.cls !== owner ? parent.proto || parent.cls : owner;
+    let sv = p.setVis || null;
+    if (!sv && p.readonly && p.vis === 'public') sv = 'protected';
+    if (sv === p.vis) sv = null;
+    info.setVis = sv;
+    if (sv === 'private') info.final = true;
+  }
+  if (p.hooks || p.abstract || (rt.phpVersion >= 80400 && !p.static && cls.props.has(p.name) && cls.props.get(p.name).hooks)) setupHooks(cls, info, p, owner); // (a plain redeclaration keeps the parent's hooks)
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
-    const ex = cls.sprops.get(p.name);
-    if (ex && ex.cls !== owner && !p.hasDef && !ex.pending && false) return;
-    const si = { name: p.name, cls: owner, vis: p.vis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE };
+    const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
     if (!info.hasDef && info.type && !info.type.nullable) si.uninit = true;
     cls.sprops.set(p.name, si);
     return;
@@ -205,48 +419,170 @@ function addMethod(cls, decl, m, owner, alias) {
   const ex = cls.methods.get(lname);
   if (ex && ex.final && ex.cls !== owner && !ex.abstract) throw new FatalSig(`Cannot override final method ${ex.cls.name}::${ex.name}()`, m.l || decl.l, decl.file);
   if (ex && !m.abstract && ex.abstract === false && m.abstract) return;
-  if (m.abstract && ex && !ex.abstract) return; // keep concrete implementation (e.g. from trait/parent)
+  if (m.abstract && ex && !ex.abstract) {
+    if (!m.origin && ex.cls !== owner && ex.vis !== 'private' && decl.file !== PRELUDE_FILE) throw new FatalSig(`Cannot make non abstract method ${displayName(ex.cls)}::${ex.name}() abstract in class ${displayName(cls)}`, decl.l, decl.file);
+    return; // keep concrete implementation (e.g. from trait/parent)
+  }
   const fn = compileFunction(decl, { method: true, cls: owner });
   fn.name = name;
   if (lname === '__tostring' && !fn.ret) fn.ret = { alts: ['string'], nullable: false };
   const method = { name, fn, cls: owner, vis: m.vis, static: m.static, abstract: m.abstract || !decl.body, final: m.final, proto: ex && ex.vis !== 'private' && (lname !== '__construct' || ex.abstract) ? (ex.proto || ex.cls) : null };
+  if (m.origin) method.origin = m.origin; // the trait the method was copied from
   if (decl.body === null && !cls.isInterface && !m.abstract) method.abstract = true;
   cls.methods.set(lname, method);
   if (m.vis === 'private') { if (!cls.privMethods) cls.privMethods = new Map(); cls.privMethods.set(lname, method); }
 }
-function useTraits(cls, tu, f) {
-  const traits = tu.names.map((n) => {
-    const t = lookupClass(n);
-    if (!t.isTrait) throw new FatalSig(`${cls.name} cannot use ${t.name} - it is not a trait`, cls.decl.l, cls.decl.file);
-    return t;
-  });
-  const excluded = new Map(); // lname -> Set of trait lnames excluded
-  for (const r of tu.rules) if (r.kind === 'insteadof') for (const ex of r.excl) {
-    const k = r.method.toLowerCase();
-    if (!excluded.has(k)) excluded.set(k, new Set());
-    excluded.get(k).add(ex.toLowerCase());
-  }
-  for (const t of traits) {
-    for (const [ln, m] of t.methods) {
-      if (excluded.has(ln) && excluded.get(ln).has(t.lname)) continue;
-      const ownDefined = cls.decl.methods.some((om) => om.fn.name.toLowerCase() === ln);
-      if (!ownDefined) {
-        let vis = m.vis;
-        for (const r of tu.rules) if (r.kind === 'as' && !r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname) && r.vis) vis = r.vis;
-        const ex = cls.methods.get(ln);
-        if (!(m.abstract && ex && !ex.abstract)) addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final: m.final }, cls);
+// trait composition (zend_do_bind_traits): the rules of all `use` blocks are checked, then
+// methods, constants and properties are copied in trait order. Members the class declares itself
+// win over trait members, and two traits may only bring the same method, constant or property if
+// one of them is abstract or the definitions are identical.
+function bindTraits(cls, decl) {
+  const at = (msg) => new FatalSig(msg, decl.l, decl.file);
+  const traits = [], rules = [];
+  for (const tu of decl.traits) {
+    for (const n of tu.names) {
+      const t = lookupClass(n, false, 'Trait');
+      if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
+      // #[\Deprecated] traits (PHP 8.5)
+      const dep = rt.phpVersion >= 80500 && t.decl ? attrNamed(t.decl.attrs, 'deprecated') : null;
+      if (dep) raise(E_USER_DEPRECATED, `Trait ${t.name} used by ${cls.name} is deprecated${deprecationSuffix(dep, t)}`);
+      if (cls.isEnum) {
+        const atUse = (msg) => new FatalSig(msg, decl.l, decl.file);
+        if (t.slots.size || t.sprops.size) throw atUse(`Enum ${cls.name} cannot include properties`);
+        for (const [ln, m] of t.methods) if (ENUM_FORBIDDEN_MAGIC.has(ln)) throw atUse(`Enum ${cls.name} cannot include magic method ${m.name}`);
       }
-      for (const r of tu.rules) {
-        if (r.kind === 'as' && r.alias && r.method.toLowerCase() === ln && (!r.trait || r.trait.toLowerCase() === t.lname)) {
-          addMethod(cls, m.fn.decl, { vis: r.vis || m.vis, static: m.static, abstract: m.abstract, final: m.final }, cls, r.alias);
-        }
-      }
+      traits.push(t);
     }
-    for (const [, info] of t.slots) addProp(cls, Object.assign({}, info.decl, { defE: info.defE }), cls);
-    for (const [, si] of t.sprops) addProp(cls, { name: si.name, def: null, hasDef: !!si.defE, defE: si.defE, static: true, vis: si.vis, type: si.type, readonly: si.readonly }, cls);
-    for (const [k, c] of t.consts) if (!cls.consts.has(k)) cls.consts.set(k, { E: c.E, val: undefined, done: false, cls, vis: c.vis });
+    rules.push(...tu.rules);
+  }
+  const usedTrait = (name) => {
+    const t = lookupClass(name, true);
+    if (!t) throw at(`Could not find trait ${name}`);
+    if (!t.isTrait) throw at(`Class ${t.name} is not a trait, Only traits may be used in 'as' and 'insteadof' statements`);
+    if (!traits.includes(t)) throw at(`Required Trait ${t.name} wasn't added to ${cls.name}`);
+    return t;
+  };
+  const excluded = new Map(); // trait -> Set of excluded method lnames
+  const aliases = []; // [rule, trait]
+  for (const r of rules) {
+    const ln = r.method.toLowerCase();
+    if (r.kind === 'insteadof') {
+      const t = usedTrait(r.trait);
+      if (!t.methods.has(ln)) throw at(`A precedence rule was defined for ${t.name}::${r.method} but this method does not exist`);
+      for (const en of r.excl) {
+        const et = usedTrait(en);
+        let set = excluded.get(et);
+        if (!set) excluded.set(et, set = new Set());
+        if (set.has(ln)) throw at(`Failed to evaluate a trait precedence (${r.method}). Method of trait ${et.name} was defined to be excluded multiple times`);
+        set.add(ln);
+        if (et === t) throw at(`Inconsistent insteadof definition. The method ${r.method} is to be used from ${t.name}, but ${t.name} is also on the exclude list`);
+      }
+      continue;
+    }
+    let t = null;
+    if (r.trait) {
+      t = usedTrait(r.trait);
+      if (!t.methods.has(ln)) throw at(`An alias was defined for ${t.name}::${r.method} but this method does not exist`);
+    } else {
+      for (const ut of traits) {
+        if (!ut.methods.has(ln)) continue;
+        if (t && t !== ut) throw at(`An alias was defined for method ${r.method}(), which exists in both ${t.name} and ${ut.name}. Use ${t.name}::${r.method} or ${ut.name}::${r.method} to resolve the ambiguity`);
+        t = ut;
+      }
+      if (!t) throw at(r.alias ? `An alias (${r.alias}) was defined for method ${r.method}(), but this method does not exist` : `The modifiers of the trait method ${r.method}() are changed, but this method does not exist. Error`);
+    }
+    aliases.push([r, t]);
+  }
+  // methods
+  const own = new Set(decl.methods.map((m) => m.fn.name.toLowerCase()));
+  const fromTrait = new Map(); // lname -> { t, m, name } added from a trait
+  const addTraitMethod = (t, m, name, vis, final) => {
+    const ln = name.toLowerCase();
+    const prev = fromTrait.get(ln);
+    if (prev && prev.m.fn.decl === m.fn.decl && prev.vis === vis) return;
+    if (m.abstract && (own.has(ln) || prev || cls.methods.has(ln))) {
+      if (own.has(ln) || prev) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(m);
+      return; // the existing method must satisfy the abstract signature
+    }
+    if (own.has(ln)) return;
+    if (prev && !prev.m.abstract) throw at(`Trait method ${t.name}::${m.name} has not been applied as ${cls.name}::${name}, because of collision with ${prev.t.name}::${prev.name}`);
+    if (prev) (cls.traitAbstracts || (cls.traitAbstracts = [])).push(prev.m); // the method must satisfy the abstract one it replaces
+    fromTrait.set(ln, { t, m, name, vis });
+    addMethod(cls, m.fn.decl, { vis, static: m.static, abstract: m.abstract, final, origin: m.origin || t }, cls, name === m.name ? undefined : name);
+  };
+  for (const t of traits) {
+    const ex = excluded.get(t);
+    for (const [ln, m] of t.methods) {
+      for (const [r, at2] of aliases) {
+        if (r.alias && at2 === t && r.method.toLowerCase() === ln) addTraitMethod(t, m, r.alias, r.vis || m.vis, m.final || !!r.final);
+      }
+      if (ex && ex.has(ln)) continue;
+      let vis = m.vis, final = m.final;
+      for (const [r, at2] of aliases) if (!r.alias && at2 === t && r.method.toLowerCase() === ln) { if (r.vis) vis = r.vis; if (r.final) final = true; }
+      addTraitMethod(t, m, m.name, vis, final);
+    }
     for (const a of t.traitIfaces || []) cls.ancestors.add(a);
   }
+  // constants
+  const constOwner = new Map(); // name -> trait that brought it
+  const ownConsts = new Map(decl.consts.map((c) => [c.name, c]));
+  traits.forEach((t, i) => {
+    for (const [k, c] of t.consts) {
+      const ownC = ownConsts.get(k);
+      const ex = ownC ? { E: cExpr(ownC.e), vis: ownC.vis, final: !!ownC.final, type: ownC.type, cls } : cls.consts.get(k);
+      if (!ex) { cls.consts.set(k, { E: c.E, val: undefined, done: false, cls, vis: c.vis, final: c.final, decl: c.decl }); constOwner.set(k, t); continue; }
+      const exCls = ownC || constOwner.has(k) ? cls : ex.cls;
+      const first = exCls === cls ? (traits.slice(0, i).find((pt) => pt.consts.has(k)) || cls) : exCls;
+      const same = ex.vis === c.vis && !!ex.final === !!c.final && sameType(constType(ex), constType(c)) && sameValue(() => (ex.E ? ex.E(constFrame(cls)) : ex.val), () => c.E(constFrame(cls)));
+      if (!same) throw at(`${first.name} and ${t.name} define the same constant (${k}) in the composition of ${cls.name}. However, the definition differs and is considered incompatible. Class was composed`);
+    }
+  });
+  // properties
+  const ownProps = new Map(decl.props.map((p) => [p.name, p]));
+  const ctor = decl.methods.find((m) => m.fn.name.toLowerCase() === '__construct');
+  if (ctor) for (const prm of ctor.fn.params) if (prm.promote) ownProps.set(prm.name, { name: prm.name, vis: prm.promote, type: prm.type, readonly: prm.readonly, static: false, hasDef: false });
+  const propOwner = new Map(); // name -> trait that brought it
+  traits.forEach((t, i) => {
+    const tprops = [...[...t.slots.values()].map((info) => info.decl), ...[...t.sprops.values()].map((si) => si.decl)].filter(Boolean);
+    for (const pd of tprops) {
+      const name = pd.name, tStatic = !!pd.static;
+      const ownP = ownProps.get(name);
+      let ex = ownP, exCls = cls;
+      if (!ex && propOwner.has(name)) ex = propOwner.get(name).decl;
+      if (!ex) {
+        const inh = tStatic ? cls.sprops.get(name) : cls.props.get(name);
+        if (inh && !(inh.vis === 'private' && inh.cls !== cls)) { ex = inh.decl || inh; exCls = inh.cls; }
+      }
+      if (ex) {
+        const first = exCls === cls ? (traits.slice(0, i).find((pt) => hasTraitProp(pt, name)) || cls) : exCls;
+        const same = (ex.vis || 'public') === (pd.vis || 'public') && !!ex.static === tStatic && !!ex.readonly === !!pd.readonly &&
+          sameType(ex.type, pd.type) && sameValue(() => declaredDefault(ex, exCls), () => declaredDefault(pd, cls));
+        if (!same) throw at(`${first.name} and ${t.name} define the same property ($${name}) in the composition of ${cls.name}. However, the definition differs and is considered incompatible. Class was composed`);
+        if (ownP || !tStatic) continue;
+      }
+      if (cls.readonly && !pd.readonly) throw at(`Readonly class ${cls.name} cannot use trait with a non-readonly property ${t.name}::$${name}`);
+      const info = tStatic ? t.sprops.get(name) : [...t.slots.values()].find((x) => x.decl === pd);
+      addProp(cls, Object.assign({}, pd, { defE: info && info.defE }), cls);
+      propOwner.set(name, { t, decl: pd });
+    }
+  });
+}
+const constType = (c) => c.type || (c.decl && c.decl.type) || null;
+const ENUM_FORBIDDEN_MAGIC = new Set(['__construct', '__destruct', '__clone', '__get', '__set', '__unset', '__isset', '__tostring', '__debuginfo', '__serialize', '__unserialize', '__sleep', '__wakeup', '__set_state']);
+function hasTraitProp(t, name) { return t.sprops.has(name) || [...t.slots.values()].some((x) => x.decl && x.decl.name === name); }
+// a property's default value as declared (undefined: none, for typed properties)
+function declaredDefault(p, owner) {
+  if (p.hasDef) return (p.defE || cExpr(p.def))(constFrame(owner));
+  return p.type ? undefined : null;
+}
+function sameType(a, b) {
+  if (!a || !b) return !a && !b;
+  return typeStr(a, null, true) === typeStr(b, null, true);
+}
+function sameValue(fa, fb) {
+  const a = fa(), b = fb();
+  if (a === undefined || b === undefined) return a === b;
+  return strictEq(a, b);
 }
 
 function addEnumMethods(cls) {
@@ -276,17 +612,30 @@ function addEnumMethods(cls) {
   }
 }
 
-export function classConst(cls, name, f) {
+// direct: a fetch written in code (Foo::BAR, constant()), which can't name a trait
+export function classConst(cls, name, f, direct) {
   const c = cls.consts.get(name);
   if (c === undefined) throwError('Error', `Undefined constant ${cls.name}::${name}`);
   if (c.vis === 'private' && f && f.cls !== c.cls) throwError('Error', `Cannot access private constant ${cls.name}::${name}`);
+  if (direct && cls.isTrait) throwError('Error', `Cannot access trait constant ${cls.name}::${name} directly`);
   if (!c.done) {
     if (c.evaluating) throwError('Error', `Cannot declare self-referencing constant ${c.cls.name}::${name}`);
     c.evaluating = true;
-    try { c.val = c.case ? c.make() : c.E(constFrame(c.cls)); }
-    finally { c.evaluating = false; }
+    try {
+      c.val = c.case ? c.make() : c.E(constFrame(c.cls));
+      // typed class constants (PHP 8.3) are checked strictly
+      const t = c.decl && c.decl.type;
+      if (t && coerceType(t, c.val, true, { cls: c.cls, sc: c.cls }) === FAIL) throwError('TypeError', `Cannot assign ${valueName(c.val)} to class constant ${c.cls.name}::${name} of type ${typeStr(t, c.cls)}`);
+    } finally { c.evaluating = false; }
     c.done = true;
     if (c.val instanceof PHPArray) c.val.cow = true;
+    if (c.val !== null && typeof c.val === 'object') rt.constRoots.push(c.val); // enum cases, new in constants
+  }
+  // #[\Deprecated] constants and enum cases (PHP 8.4)
+  if (c.dep === undefined) c.dep = rt.phpVersion >= 80400 && c.decl ? attrNamed(c.decl.attrs, 'deprecated') || null : null;
+  if (c.dep !== null && !c.depShowing) { // (not again while evaluating its own message)
+    c.depShowing = true;
+    try { raise(E_USER_DEPRECATED, `${c.case ? 'Enum case' : 'Constant'} ${c.cls.name}::${name} is deprecated${deprecationSuffix(c.dep, c.cls)}`); } finally { c.depShowing = false; }
   }
   return c.val;
 }
@@ -301,7 +650,7 @@ export function findStaticProp(cls, name, f) {
   const si = lookupStaticProp(cls, name);
   if (!si) throwError('Error', `Access to undeclared static property ${cls.name}::$${name}`);
   if (si.vis !== 'public' && !canAccessMember(si, f ? f.cls : null)) throwError('Error', `Cannot access ${si.vis} property ${cls.name}::$${name}`);
-  if (si.uninit) { if (si.ref.v === null) { /* allow writes */ } }
+  if (cls.isTrait && cls.decl && cls.decl.file !== PRELUDE_FILE) deprecated(`Accessing static trait property ${cls.name}::$${name} is deprecated, it should only be accessed on a class using the trait`);
   return si;
 }
 
@@ -315,6 +664,7 @@ export function initProps(obj) {
   if (pi === null) {
     pi = [];
     for (const info of cls.slots.values()) {
+      if (info.virtual) continue; // (hooked properties without a stored value)
       if (info.hasDef) pi.push([info.key, propDefault(info)]);
       else if (!info.type) pi.push([info.key, null]);
     }
@@ -329,12 +679,13 @@ export function instantiate(cls, A, f) {
     const what = cls.isInterface ? 'interface' : cls.isTrait ? 'trait' : cls.isEnum ? 'enum' : 'abstract class';
     throwError('Error', `Cannot instantiate ${what} ${cls.name}`);
   }
+  if (cls === generatorClass) throwError('Error', 'The "Generator" class is reserved for internal use and cannot be manually instantiated');
   const obj = new PHPObject(cls);
   initProps(obj);
   if (cls.ancestors.has('throwable')) initThrowable(obj);
   const ctor = cls.methods.get('__construct');
   if (ctor) {
-    if (ctor.vis !== 'public' && !canAccessMember(ctor, f ? f.cls : null)) throwError('Error', `Call to ${ctor.vis} ${cls.name}::__construct() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
+    if (ctor.vis !== 'public' && !canAccessMember(ctor, f ? f.cls : null)) throwError('Error', `Call to ${ctor.vis} ${ctor.cls.name}::__construct() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
     const args = A ? A(f, ctor.fn) : [];
     if (cls.hasDestructor) {
       try { callFunction(ctor.fn, args, obj, ctor.cls, cls, null); }
@@ -344,14 +695,10 @@ export function instantiate(cls, A, f) {
   if (cls.hasDestructor && !rt.destructibles.includes(obj)) trackDestructible(obj);
   return obj;
 }
-function trackDestructible(obj) {
+export function trackDestructible(obj) {
   rt.destructibles.push(obj);
   const fr = rt.frame;
   if (fr && fr !== rt.globalFrame) (fr.destr || (fr.destr = [])).push(obj);
-}
-function newObject(clsName, args) { // from native code
-  const cls = lookupClass(clsName);
-  return instantiate(cls, () => args, rt.frame);
 }
 
 export function callMethodName(obj, name, args) {
@@ -366,6 +713,8 @@ export function callMethodName(obj, name, args) {
 export function callMethod(obj, m, args) { return callFunction(m.fn, args, obj, m.cls, obj.cls, null); }
 
 // ---------------------------------------------------------------- property access
+// names starting with NUL are how private and protected properties are mangled
+function badPropName() { throwError('Error', 'Cannot access property starting with "\\0"'); }
 function propInfoFor(obj, name, scope) {
   if (scope !== null && scope !== undefined) {
     const pi = scope.privProps.size ? scope.privProps.get(name) : undefined;
@@ -387,12 +736,35 @@ function guardEnter(obj, kind, name) {
   return true;
 }
 function guardLeave(obj, kind, name) { obj.guards.delete(kind + name); }
+const guardFree = (obj, kind, name) => !obj.guards || !obj.guards.has(kind + name);
+// declared properties removed with unset() (as opposed to never initialized ones)
+const wasUnset = (obj, key) => obj.unsetKeys !== undefined && obj.unsetKeys.has(key);
 export function magicGet(obj, name) {
   const m = obj.cls.methods.get('__get');
   if (!m || !guardEnter(obj, 'g', name)) return undefined;
   try { return callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'g', name); }
 }
 
+// does accessing the property (missing from the props of lazy object `obj`) initialize the object?
+// A lazy slot does; an undefined property does unless the magic method handles it.
+function lazyMiss(obj, key, info, kind, magic, name) {
+  if (info !== undefined) return obj.lazy.keys.has(key);
+  return !(obj.cls.methods.has(magic) && guardFree(obj, kind, name));
+}
+// initializes a lazy object for an access of property `name`, made by fn(target); a proxy's magic
+// method that accesses the property accesses the real instance's without calling the magic method
+function lazyFwd(obj, kind, name, fn) {
+  const t = lazyInit(obj);
+  if (t === obj || guardFree(obj, kind, name) || !guardEnter(t, kind, name)) return fn(t);
+  try { return fn(t); } finally { guardLeave(t, kind, name); }
+}
+// the object an indirect access ($o->p[] = ..., &$o->p) of property `name` of a lazy object goes to
+function lazyFor(obj, name, f) {
+  const info = propInfoFor(obj, name, f ? f.cls : null);
+  if (info !== undefined && ((info.vis !== 'public' && !propAccessible(info, f ? f.cls : null)) || (info.hooks && !inHook(info, obj, f)))) return obj;
+  const key = info === undefined ? name : info.key;
+  return obj.props.has(key) || !lazyMiss(obj, key, info, 'g', '__get', name) ? obj : lazyInit(obj);
+}
 export function readProp(obj, name, f) {
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
@@ -404,28 +776,34 @@ export function readProp(obj, name, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
-  }
+    if (info.hooks) { const r = hookedRead(obj, info, name, f); if (r !== NO_HOOK) return r; }
+  } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
-  if (obj.cls.nativeGet) { const r = obj.cls.nativeGet(obj, name); if (r !== undefined) return r; }
-  const r = magicGet(obj, name);
+  if (obj.lazy !== undefined && lazyMiss(obj, key, info, 'g', '__get', name)) return lazyFwd(obj, 'g', name, (t) => readProp(t, name, f));
+  if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipget', [name]); if (r !== undefined) return r; }
+  // (a typed property that was never initialized doesn't fall back to __get; an unset() one does)
+  const r = info && info.type && !wasUnset(obj, key) ? undefined : magicGet(obj, name);
   if (r !== undefined) return r;
   if (info && info.type) throwError('Error', `Typed property ${info.cls.name}::$${name} must not be accessed before initialization`);
-  if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
   warn(`Undefined property: ${obj.cls.name}::$${name}`);
   return null;
 }
 export function readPropQuiet(obj, name, f, issetOnly) {
+  if (name.charCodeAt(0) === 0 && name.length) return undefined;
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
   let key = name;
   if (info !== undefined) {
     if (info.vis !== 'public' && !propAccessible(info, scope)) return magicIsset(obj, name, issetOnly);
     key = info.key;
+    if (info.hooks) { const r = hookedRead(obj, info, name, f); if (r !== NO_HOOK) return r === null ? undefined : r; }
   }
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
-  if (obj.cls.nativeGet) { const r = obj.cls.nativeGet(obj, name); if (r !== undefined) return r; }
+  if (obj.lazy !== undefined && lazyMiss(obj, key, info, 'i', '__isset', name)) return lazyFwd(obj, 'i', name, (t) => readPropQuiet(t, name, f, issetOnly));
+  if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipisset', [name]); if (r !== undefined) return r === null ? undefined : r; }
   return magicIsset(obj, name, issetOnly);
 }
 export function magicIsset(obj, name, issetOnly) {
@@ -449,21 +827,48 @@ export function writeProp(obj, name, v, f) {
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
     key = info.key;
-    if (info.readonly) {
-      if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
-      if (scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${obj.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+    if (info.hooks && !inHook(info, obj, f)) {
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'modify', f);
+      if (info.hooks.set) { callFunction(info.hooks.set, [v], obj, info.hooks.set.cls, obj.cls, null); return; }
+      if (info.virtual) throwError('Error', `Property ${obj.cls.name}::$${name} is read-only`);
+    } else if (info.hooks && info.virtual) throwError('Error', `Must not write to virtual property ${obj.cls.name}::$${name}`);
+    if (obj.lazy !== undefined && !obj.props.has(key) && obj.lazy.keys.has(key)) return writeProp(lazyInit(obj), name, v, f);
+    if (info.readonly && !consumeReinit(obj, key)) {
+      // (named after the declaring class)
+      if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
+      if (info.setVis === undefined && scope !== info.cls) throwError('Error', `Cannot initialize readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'modify', f);
+    } else if (info.setVis && !setAccessible(info, scope) && !(obj.reinit !== undefined && obj.reinit.has(key))) {
+      if (!obj.props.has(key) && wasUnset(obj, key) && magicSet(obj, name, v)) return;
+      asymError(info, 'modify', f);
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
-    if (!obj.props.has(key) && obj.cls.methods.has('__set') && !info.type && false) { /* declared-but-unset */ }
   } else if (!obj.props.has(name)) {
+    if (obj.lazy !== undefined && lazyMiss(obj, name, undefined, 's', '__set', name)) return lazyFwd(obj, 's', name, (t) => writeProp(t, name, v, f));
+    if (obj.cls.nipHooks && nipHook(obj, '__nipset', [name, v]) !== undefined) return;
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
-    if (obj.cls.isEnum) throwError('Error', `Cannot create dynamic property ${obj.cls.name}::$${name}`);
-    if (obj.cls.noDynamic) throwError('Error', `Cannot create dynamic property ${obj.cls.name}::$${name}`);
-  }
+    if (name.charCodeAt(0) === 0 && name.length) badPropName();
+    newDynamicProp(obj, name);
+  } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) slot.v = v; else obj.props.set(key, v);
-  if (slot instanceof PHPObject && slot !== v && slot.cls.hasDestructor) gcCheck(slot);
+  if (slot !== v && slot !== null && typeof slot === 'object' && !(slot instanceof Ref)) {
+    dropRef(slot);
+    if (slot instanceof PHPObject && slot.cls.hasDestructor) {
+      // the assigned value is the assignment's result: the old value's destructor can't free it
+      rt.inflight.push(v);
+      try { gcCheck(slot); } finally { rt.inflight.pop(); }
+    }
+  }
+}
+// Prelude classes can handle accesses to undefined properties before the magic methods do
+// (ArrayObject::ARRAY_AS_PROPS): __nipGet/__nipIsset/__nipSet/__nipUnset return [true, value]
+// when they handled the access.
+function nipHook(obj, mname, args) {
+  const m = obj.cls.methods.get(mname);
+  const r = callFunction(m.fn, args, obj, m.cls, obj.cls, null);
+  return r instanceof PHPArray && r.get(0) === true ? r.get(1) : undefined;
 }
 function magicSet(obj, name, v) {
   const m = obj.cls.methods.get('__set');
@@ -471,33 +876,113 @@ function magicSet(obj, name, v) {
   try { callFunction(m.fn, [name, v], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 's', name); }
   return true;
 }
+function hookedIndirect(obj, info, name) {
+  throwError('Error', `Indirect modification of ${obj.cls.name}::$${name} is not allowed`);
+}
+// the reference a &get hook returns (null: the hook doesn't return by reference)
+function hookRef(obj, info) {
+  const g = info.hooks.get;
+  if (!g || !g.byRef) return null;
+  rt.lastRetRef = null;
+  const v = callFunction(g, [], obj, g.cls, obj.cls, null);
+  const rr = rt.lastRetRef; rt.lastRetRef = null;
+  return rr !== null && rr !== NOREF ? rr : new Ref(v);
+}
+// asymmetric visibility (PHP 8.4): may the scope write the property?
+export function setAccessible(info, scope) {
+  if (!info.setVis || info.cls === scope) return true;
+  const proto = info.proto || info.cls;
+  return info.setVis === 'protected' && !!scope && (scope.ancestors.has(proto.lname) || proto.ancestors.has(scope.lname));
+}
+export function asymError(info, op, f) {
+  const scope = f ? (f.sc || f.cls) : null;
+  const vis = info.setVis === 'private' ? 'private(set)' : info.readonly ? 'protected(set) readonly' : 'protected(set)';
+  throwError('Error', `Cannot ${op} ${vis} property ${info.cls.name}::$${info.name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+}
+// while an object is being cloned, each of its readonly properties may be modified once
+function consumeReinit(obj, key) {
+  if (obj.reinit === undefined || !obj.reinit.has(key)) return false;
+  obj.reinit.delete(key);
+  return true;
+}
+// a readonly property modified other than by assignment
+function readonlyIndirect(obj, key, info, name) {
+  if (consumeReinit(obj, key)) return;
+  throwError('Error', `Cannot ${obj.props.has(key) && rt.phpVersion < 80400 ? '' : 'indirectly '}modify readonly property ${info.cls.name}::$${name}`); // (PHP 8.4: always "indirectly")
+}
+// an inaccessible property handled by __get: a key no slot has, so callers take the magic path
+const MAGIC_KEY = '\0\0magic';
+// a hooked property whose &get hook gives the reference
+const HOOK_REF = '\0\0hookref';
 function resolvePropKey(obj, name, f, forWrite) {
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
   if (info === undefined) return [name, null];
-  if (info.vis !== 'public' && !propAccessible(info, scope)) throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
-  if (forWrite && info.readonly && obj.props.has(info.key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
+  if (info.vis !== 'public' && !propAccessible(info, scope)) {
+    if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
+    throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
+  }
+  if (forWrite && info.hooks && !inHook(info, obj, f)) {
+    if (forWrite === 'bind') throwError('Error', 'Cannot assign by reference to overloaded object');
+    if (info.hooks.get && info.hooks.get.byRef) return [HOOK_REF, info];
+    hookedIndirect(obj, info, name);
+  }
+  if (forWrite && info.setVis && !info.readonly && !setAccessible(info, scope)) {
+    const sl = obj.props.get(info.key);
+    if (!((sl instanceof Ref ? sl.v : sl) instanceof PHPObject)) asymError(info, 'indirectly modify', f); // (objects can be modified)
+  }
+  if (forWrite && info.readonly && obj.props.has(info.key) && !(obj.reinit !== undefined && obj.reinit.has(info.key))) throwError('Error', `Cannot ${rt.phpVersion >= 80400 ? 'indirectly ' : ''}modify readonly property ${obj.cls.name}::$${name}`);
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
-  const [key] = resolvePropKey(obj, name, f, true);
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return bindProp(t, name, ref, f); }
+  const [key, info] = resolvePropKey(obj, name, f, 'bind');
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
+  if (!info && !obj.props.has(key)) {
+    // a property __get handles can't be bound to a reference
+    if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) {
+      rt.lastRetRef = null;
+      const r = magicGet(obj, name);
+      const rr = rt.lastRetRef; rt.lastRetRef = null;
+      if (r !== undefined && (rr === null || rr === NOREF)) notice(`Indirect modification of overloaded property ${obj.cls.name}::$${name} has no effect`);
+      throwError('Error', 'Cannot assign by reference to overloaded object');
+    }
+    newDynamicProp(obj, name);
+  }
   obj.props.set(key, ref);
 }
+// PHP 8.2: creating an undeclared property is deprecated unless the class (or a parent) has
+// #[AllowDynamicProperties]; readonly classes and enums don't allow it at all
+function newDynamicProp(obj, name) {
+  const c = obj.cls;
+  if (c.isEnum || c.noDynamic) throwError('Error', `Cannot create dynamic property ${c.name}::$${name}`);
+  if (!c.allowDynamic && rt.file !== PRELUDE_FILE) deprecated(`Creation of dynamic property ${c.anon ? displayName(c) : c.name}::$${name} is deprecated`);
+}
 export function propRef(obj, name, f) {
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return propRef(t, name, f); }
   const [key, info] = resolvePropKey(obj, name, f, true);
+  if (key === HOOK_REF) return hookRef(obj, info);
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) return slot;
+  // (an object in a property the scope may not write: a reference to a copy of the handle)
+  if (info && info.setVis && slot instanceof PHPObject && !setAccessible(info, f ? f.cls : null)) return new Ref(slot);
   if (slot === undefined && !info) {
     rt.lastRetRef = null;
     const r = magicGet(obj, name);
     const rr = rt.lastRetRef; rt.lastRetRef = null;
     if (r !== undefined) { if (rr !== null && rr !== NOREF) return rr; notice(`Indirect modification of overloaded property ${obj.cls.name}::$${name} has no effect`); return new Ref(r); }
   }
+  if (slot === undefined && !info) newDynamicProp(obj, name);
   const r = new Ref(slot === undefined ? null : slot);
   obj.props.set(key, r);
   return r;
 }
 export function propArr(obj, name, f) {
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return propArr(t, name, f); }
   const [key, info] = resolvePropKey(obj, name, f, false);
   let slot = obj.props.get(key);
   if (slot === undefined && !info) {
@@ -514,7 +999,15 @@ export function propArr(obj, name, f) {
   const isRef = slot instanceof Ref;
   let v = isRef ? slot.v : slot;
   if (v instanceof PHPObject) return v;
-  if (info && info.readonly && obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
+  if (info && info.hooks && !inHook(info, obj, f)) {
+    const rr = hookRef(obj, info);
+    if (rr !== null) return rr.v instanceof PHPObject ? rr.v : writableArrIn(rr);
+    const r = hookedRead(obj, info, name, f);
+    if (r instanceof PHPObject) return r;
+    hookedIndirect(obj, info, name);
+  }
+  if (info && info.readonly) readonlyIndirect(obj, key, info, name);
+  if (info && info.setVis && !setAccessible(info, f ? f.cls : null)) asymError(info, 'indirectly modify', f);
   if (v instanceof PHPArray) {
     if (v.cow || v.fe) { v = v.clone(); if (isRef) slot.v = v; else obj.props.set(key, v); }
     return v;
@@ -522,6 +1015,7 @@ export function propArr(obj, name, f) {
   if (v === null || v === undefined) {
     if (info && info.type && v === undefined && !info.type.alts.includes('array') && !info.type.alts.includes('mixed') && !info.type.alts.includes('iterable')) throwError('Error', `Typed property ${obj.cls.name}::$${name} must not be accessed before initialization`);
     const na = new PHPArray();
+    if (slot === undefined && !info) newDynamicProp(obj, name);
     if (isRef) slot.v = na; else obj.props.set(key, na);
     return na;
   }
@@ -537,37 +1031,98 @@ export function unsetProp(obj, name, f) {
       if (m) { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); return; }
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
-    if (info.readonly) throwError('Error', `Cannot unset readonly property ${obj.cls.name}::$${name}`);
+    if (info.hooks && !inHook(info, obj, f)) throwError('Error', `Cannot unset hooked property ${obj.cls.name}::$${name}`);
     key = info.key;
-  }
-  if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); gcCheck(old instanceof Ref ? old.v : old); return; }
+    const has = obj.props.has(key);
+    if (info.readonly || info.setVis) {
+      // (an unset() property that __unset() handles is no error)
+      const m = obj.cls.methods.get('__unset');
+      if (!has && wasUnset(obj, key) && m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
+      if (info.readonly && has && !consumeReinit(obj, key)) throwError('Error', `Cannot unset readonly property ${info.cls.name}::$${name}`);
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'unset', f);
+      // (PHP 8.3: an uninitialized readonly property may be unset from its class only)
+      if (info.readonly && !has && !info.setVis && scope !== info.cls && !(scope && obj.cls.ancestors.has(scope.lname) && scope.props.get(name) && scope.props.get(name).cls === scope)) {
+        throwError('Error', `Cannot unset readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      }
+    }
+    if (obj.lazy !== undefined && !obj.props.has(key) && obj.lazy.keys.has(key)) return unsetProp(lazyInit(obj), name, f);
+    if (!obj.props.has(key) && !wasUnset(obj, key)) { (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key); return; } // (an uninitialized one: no __unset())
+    (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key);
+  } else if (obj.lazy !== undefined && !obj.props.has(key) && lazyMiss(obj, key, info, 'u', '__unset', name)) return lazyFwd(obj, 'u', name, (t) => unsetProp(t, name, f));
+  if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
+  if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
-  if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } }
+  if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
+  if (name.charCodeAt(0) === 0 && name.length) badPropName();
 }
 
+// the initialized readonly properties of an object (which __clone() may modify once each)
+export function readonlyKeys(o) {
+  let keys;
+  for (const info of o.cls.props.values()) if (info.readonly && o.props.has(info.key)) (keys || (keys = new Set())).add(info.key);
+  return keys;
+}
 export function cloneObject(o, f) {
-  if (!(o instanceof PHPObject)) throwError('Error', '__clone method called on non-object');
+  if (!(o instanceof PHPObject)) {
+    if (rt.phpVersion >= 80500) throwError('TypeError', `clone(): Argument #1 ($object) must be of type object, ${typeOf(o)} given`); // (clone is a function)
+    throwError('Error', '__clone method called on non-object');
+  }
   if (o.cls.isEnum) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (o.cls === generatorClass) throwError('Error', 'Trying to clone an uncloneable object of class Generator');
+  if (o.lazy !== undefined) {
+    const t = lazyInit(o);
+    if (o.lazy !== undefined) { // a proxy: the clone is a proxy for a clone of the real instance
+      const c = new PHPObject(o.cls);
+      for (const [k, v] of o.props) c.props.set(k, cp(v instanceof Ref ? v.v : v));
+      c.lazy = { ...o.lazy, keys: new Set(o.lazy.keys), instance: cloneObject(t, f) };
+      return c;
+    }
+  }
   const c = new PHPObject(o.cls);
   for (const [k, v] of o.props) c.props.set(k, cp(v instanceof Ref ? v.v : v));
   for (const key of ['fn', 'bound', 'thisObj', 'scope', 'sc', 'trace', 'native']) if (o[key] !== undefined) c[key] = o[key];
   if (o.cls.nativeClone) o.cls.nativeClone(o, c);
   const m = o.cls.methods.get('__clone');
+  // internal classes (here: prelude classes) with a private __clone() can't be cloned at all
+  if (m && m.vis === 'private' && m.cls.decl && m.cls.decl.file === PRELUDE_FILE) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (m) {
     if (m.vis !== 'public' && !canAccessMember(m, f ? f.cls : null)) throwError('Error', `Call to ${m.vis} ${o.cls.name}::__clone() from ${f && f.cls ? 'scope ' + f.cls.name : 'global scope'}`);
-    c.cloning = true;
-    try { callFunction(m.fn, [], c, m.cls, c.cls, null); } finally { c.cloning = false; }
+    c.reinit = readonlyKeys(c);
+    try { callFunction(m.fn, [], c, m.cls, c.cls, null); } finally { c.reinit = undefined; }
   }
   if (o.cls.hasDestructor) trackDestructible(c);
   return c;
 }
 
+// whether a class's objects have hooked properties (PHP 8.4), which enumerations read with their get
+// hooks
+export const hasHookedProps = (cls) => cls.hookedProps ?? (cls.hookedProps = [...cls.slots.values()].some((i) => !!i.hooks));
+// is a declared property slot (a parent's private one included) visible in the scope?
+export const slotVisible = (info, scope) => (info.vis === 'private' ? info.cls === scope : info.vis === 'public' || propAccessible(info, scope));
+// [name, value] pairs of the properties of an object with hooked properties that are visible in the
+// scope (with all: all of them), in declaration order, the hooked ones read with their get hooks
+// (virtual ones without one left out), then the dynamic ones
+export function hookedProps(obj, scope, all) {
+  const out = [], names = new Set();
+  for (const [key, info] of obj.cls.slots) {
+    if (info.internal || (!all && (!slotVisible(info, scope) || names.has(info.name)))) continue;
+    const g = info.hooks && info.hooks.get;
+    if (g) out.push([info.name, callFunction(g, [], obj, g.cls, obj.cls, null)]);
+    else if (info.virtual || !obj.props.has(key)) continue;
+    else { const sl = obj.props.get(key); out.push([info.name, sl instanceof Ref ? sl.v : sl]); }
+    names.add(info.name);
+  }
+  for (const [k, sl] of obj.props) if (!obj.cls.slots.has(k) && !names.has(k)) out.push([k, sl instanceof Ref ? sl.v : sl]);
+  return out;
+}
 // visible props as [name, value] pairs for a given scope
 export function objVisibleProps(obj, scope) {
+  if (obj.lazy !== undefined) obj = lazyInit(obj);
+  if (hasHookedProps(obj.cls)) return hookedProps(obj, scope, false);
   const out = [];
   for (const [k, s] of obj.props) {
     const v = s instanceof Ref ? s.v : s;
+    if (obj.cls.hasInternal && isInternalSlot(obj.cls, k)) continue;
     if (k.charCodeAt(0) === 0) {
       const p = k.indexOf('\0', 1);
       const owner = k.slice(1, p), name = k.slice(p + 1);
@@ -587,8 +1142,11 @@ export function toArrayCast(v) {
   if (v instanceof PHPObject) {
     if (v.cls === closureClass) return PHPArray.from([v]);
     if (v.cls.nativeToArray) return v.cls.nativeToArray(v);
+    const np = nipProps(v);
+    if (np) return np;
     const a = new PHPArray();
-    for (const [k, s] of v.props) {
+    if (v.lazy !== undefined && v.lazy.instance !== null) v = v.lazy.instance; // (an initialized proxy; a lazy object isn't initialized)
+    for (const [k, s] of objectPropsRaw(v)) {
       const val = s instanceof Ref ? s.v : s;
       const info = v.cls.props.get(k);
       let key = k;

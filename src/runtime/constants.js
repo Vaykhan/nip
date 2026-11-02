@@ -23,6 +23,8 @@ export function defConsts() {
   c('PHP_FD_SETSIZE', 1024); c('PHP_OUTPUT_HANDLER_STDFLAGS', 112);
   const E = { E_ERROR, E_WARNING, E_PARSE, E_NOTICE, E_CORE_ERROR, E_CORE_WARNING, E_COMPILE_ERROR, E_COMPILE_WARNING, E_USER_ERROR, E_USER_WARNING, E_USER_NOTICE, E_STRICT, E_RECOVERABLE_ERROR, E_DEPRECATED, E_USER_DEPRECATED, E_ALL };
   for (const [k, v] of Object.entries(E)) c(k, v);
+  // digits as written in PHP's math constants; they round to the same doubles
+  // eslint-disable-next-line no-loss-of-precision
   const M = { M_PI: Math.PI, M_E: Math.E, M_LOG2E: Math.LOG2E, M_LOG10E: Math.LOG10E, M_LN2: Math.LN2, M_LN10: Math.LN10, M_PI_2: Math.PI / 2, M_PI_4: Math.PI / 4, M_1_PI: 1 / Math.PI, M_2_PI: 2 / Math.PI, M_SQRTPI: 1.77245385090551602729, M_2_SQRTPI: 1.12837916709551257390, M_SQRT2: Math.SQRT2, M_SQRT3: 1.73205080756887729352, M_SQRT1_2: Math.SQRT1_2, M_LNPI: 1.14472988584940017414, M_EULER: 0.57721566490153286061 };
   for (const [k, v] of Object.entries(M)) c(k, mkf(v));
   const ints = {

@@ -18,13 +18,13 @@ const OUT = path.resolve(process.argv[2] || path.join(ROOT, 'dist', 'nip.cjs'));
 // Evaluation order of the bundle.
 const MODULES = [
   'values.js', 'convert.js', 'compare.js', 'arith.js', 'utf8.js', 'lexer.js', 'parser.js',
-  'compiler/common.js', 'compiler/lvalue.js', 'compiler/expr.js', 'compiler/stmt.js', 'compiler/generator.js',
-  'runtime/state.js', 'runtime/errors.js', 'runtime/functions.js', 'runtime/callables.js', 'runtime/classes.js',
-  'runtime/gc.js', 'runtime/generators.js', 'runtime/program.js',
+  'compiler/common.js', 'compiler/ast-export.js', 'compiler/checks.js', 'compiler/lvalue.js', 'compiler/expr.js', 'compiler/stmt.js', 'compiler/generator.js',
+  'runtime/state.js', 'runtime/version.js', 'runtime/errors.js', 'runtime/functions.js', 'runtime/callables.js', 'runtime/arginfo.js', 'runtime/inheritance.js', 'runtime/classes.js', 'runtime/lazy.js',
+  'runtime/gc.js', 'runtime/generators.js', 'runtime/fibers.js', 'runtime/program.js',
   'lib/core.js', 'lib/dump.js', 'lib/printf.js', 'lib/string.js', 'lib/hash.js', 'lib/mbstring.js', 'lib/math.js',
   'lib/array.js', 'lib/var.js', 'lib/functions.js', 'lib/errors.js', 'lib/output.js', 'lib/json.js',
-  'lib/serialize.js', 'lib/pcre.js', 'lib/date.js', 'lib/file.js',
-  'runtime/native-classes.js', 'prelude.js', 'runtime/constants.js', 'lib/misc.js', 'lib/crypt.js',
+  'lib/serialize.js', 'lib/regex.js', 'lib/pcre.js', 'lib/date.js', 'lib/file.js',
+  'runtime/native-classes.js', 'prelude.js', 'runtime/constants.js', 'lib/misc.js', 'lib/crypt.js', 'lib/reflection.js',
   'runtime/boot.js', 'runtime/run.js', 'cli.js', 'index.js',
 ];
 // Modules that only import others; they contain no code of their own.
@@ -60,11 +60,38 @@ for (const mod of MODULES) {
   code = code.replace(/^export (?=(?:async )?function|class |const |let )/gm, '');
   if (mod === 'prelude.js') code = inlinePrelude(code);
   if (/import\.meta/.test(code)) throw new Error(`build: import.meta used in ${mod}`);
-  for (const m of code.matchAll(/^(?:async )?(?:function\*?|class) +([\w$]+)/gm)) {
-    if (declared.has(m[1])) throw new Error(`build: ${m[1]} is declared in both ${declared.get(m[1])} and ${mod}`);
-    declared.set(m[1], mod);
+  for (const name of topLevelNames(code)) {
+    if (declared.has(name)) throw new Error(`build: ${name} is declared in both ${declared.get(name)} and ${mod}`);
+    declared.set(name, mod);
   }
   parts.push(`// ---- src/${mod}\n${code.replace(/\n+$/, '')}\n`);
+}
+
+// names declared at the top level of a module: functions, classes, and every name of
+// `const a = 1, b = 2` / `let a, b` declarations (on the first line of the declaration)
+function topLevelNames(code) {
+  const names = [];
+  for (const m of code.matchAll(/^(?:async )?(?:function\*?|class) +([\w$]+)/gm)) names.push(m[1]);
+  for (const m of code.matchAll(/^(?:const|let) +(.*)$/gm)) {
+    let depth = 0, quote = null, start = true;
+    const line = m[1];
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote) { if (c === '\\') i++; else if (c === quote) quote = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { quote = c; continue; }
+      if (c === '/' && line[i + 1] === '/') break;
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (c === ',' && depth === 0) { start = true; continue; }
+      else if (c === ';' && depth === 0) break;
+      if (start && depth === 0) {
+        const id = /^\s*([A-Za-z_$][\w$]*)/.exec(line.slice(i));
+        if (id) { names.push(id[1]); i += id[0].length - 1; }
+        start = false;
+      }
+    }
+  }
+  return names;
 }
 
 function inlinePrelude(code) {

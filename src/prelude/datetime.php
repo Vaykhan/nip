@@ -2,7 +2,7 @@
 class DateTimeZone {
   const UTC = 1024; const ALL = 2047;
   private $__tz;
-  public function __construct(string $timezone = "UTC") { if (!__valid_tz($timezone)) throw new Exception("DateTimeZone::__construct(): Unknown or bad timezone ($timezone)"); $this->__tz = $timezone; }
+  public function __construct(string $timezone = "UTC") { if (!__valid_tz($timezone)) throw new DateInvalidTimeZoneException("DateTimeZone::__construct(): Unknown or bad timezone ($timezone)"); $this->__tz = $timezone; }
   public function getName(): string { return $this->__tz; }
   public function getOffset(DateTimeInterface $datetime): int { return __tz_info($datetime->getTimestamp(), $this->__tz)['offset']; }
   public static function listIdentifiers(int $timezoneGroup = 2047, ?string $countryCode = null): array { return ['UTC']; }
@@ -10,7 +10,7 @@ class DateTimeZone {
 class DateInterval {
   public $y = 0; public $m = 0; public $d = 0; public $h = 0; public $i = 0; public $s = 0; public $f = 0; public $invert = 0; public $days = false;
   public function __construct(string $duration = "PT0S") {
-    if (!preg_match('/^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/', $duration, $m)) throw new Exception("DateInterval::__construct(): Unknown or bad format ($duration)");
+    if (!preg_match('/^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/', $duration, $m)) throw new DateMalformedIntervalStringException("Unknown or bad format ($duration)");
     $this->y = (int)($m[1] ?? 0); $this->m = (int)($m[2] ?? 0); $this->d = (int)($m[4] ?? 0) + 7 * (int)($m[3] ?? 0);
     $this->h = (int)($m[5] ?? 0); $this->i = (int)($m[6] ?? 0); $this->s = (int)($m[7] ?? 0);
   }
@@ -22,7 +22,8 @@ class DateInterval {
     return strtr($format, $map);
   }
 }
-class DateTime implements DateTimeInterface {
+// DateTime and DateTimeImmutable are unrelated classes in PHP; they share this implementation
+trait __DateTimeImpl {
   protected $__ts; protected $__tz; protected $__us = 0;
   public function __construct(string $datetime = "now", ?DateTimeZone $timezone = null) {
     $this->__tz = $timezone ? $timezone->getName() : date_default_timezone_get();
@@ -30,7 +31,7 @@ class DateTime implements DateTimeInterface {
     if (preg_match('/\.(\d{1,6})/', $datetime, $um)) $this->__us = (int)str_pad($um[1], 6, '0');
     elseif ($datetime === 'now') { $this->__us = (int)(fmod(microtime(true), 1) * 1000000); }
     $ts = __strtotime_tz(preg_replace('/\.\d+/', '', $datetime), time(), $this->__tz);
-    if ($ts === false) throw new Exception("DateTime::__construct(): Failed to parse time string ($datetime) at position 0 (" . substr($datetime, 0, 1) . "): The timezone could not be found in the database");
+    if ($ts === false) throw new DateMalformedStringException("Failed to parse time string ($datetime) at position 0 (" . substr($datetime, 0, 1) . "): The timezone could not be found in the database");
     $this->__ts = $ts;
   }
   public function format(string $format): string { return __date_tz($format, $this->__ts, $this->__tz, $this->__us); }
@@ -44,7 +45,7 @@ class DateTime implements DateTimeInterface {
   public function setDate(int $year, int $month, int $day) { $c = $this->__mut(); $t = __tz_info($c->__ts, $c->__tz); $c->__ts = __local_to_ts($year, $month, $day, $t['h'], $t['i'], $t['s'], $c->__tz); return $c; }
   public function setTime(int $hour, int $minute, int $second = 0, int $microsecond = 0) { $c = $this->__mut(); $t = __tz_info($c->__ts, $c->__tz); $c->__ts = __local_to_ts($t['y'], $t['m'], $t['d'], $hour, $minute, $second, $c->__tz); $c->__us = $microsecond; return $c; }
   public function setISODate(int $year, int $week, int $dayOfWeek = 1) { $c = $this->__mut(); $jan4 = __local_to_ts($year, 1, 4, 0, 0, 0, $c->__tz); $dow = (int)__date_tz('N', $jan4, $c->__tz); $t = __tz_info($c->__ts, $c->__tz); $base = $jan4 - ($dow - 1) * 86400; $d = __tz_info($base + (($week - 1) * 7 + $dayOfWeek - 1) * 86400, $c->__tz); $c->__ts = __local_to_ts($d['y'], $d['m'], $d['d'], $t['h'], $t['i'], $t['s'], $c->__tz); return $c; }
-  public function modify(string $modifier) { $c = $this->__mut(); $ts = __strtotime_tz($modifier, $c->__ts, $c->__tz); if ($ts === false) { trigger_error("DateTime::modify(): Failed to parse time string ($modifier) at position 0 (" . substr($modifier, 0, 1) . ")", E_USER_WARNING); return false; } $c->__ts = $ts; return $c; }
+  public function modify(string $modifier) { $c = $this->__mut(); $ts = __strtotime_tz($modifier, $c->__ts, $c->__tz); if ($ts === false) throw new DateMalformedStringException(($this instanceof DateTimeImmutable ? "DateTimeImmutable" : "DateTime") . "::modify(): Failed to parse time string ($modifier) at position 0 (" . substr($modifier, 0, 1) . "): The timezone could not be found in the database"); $c->__ts = $ts; return $c; }
   private function __applyInterval(DateInterval $iv, int $sign) {
     $c = $this->__mut(); $sign = $iv->invert ? -$sign : $sign;
     if ($iv->days !== false && $iv->y === 0 && $iv->m === 0 && false) { $c->__ts += $sign * $iv->days * 86400; return $c; }
@@ -102,9 +103,15 @@ class DateTime implements DateTimeInterface {
   public static function createFromImmutable($object) { $o = new static('@' . $object->getTimestamp()); $o->__tz = $object->getTimezone()->getName(); return $o; }
   public static function getLastErrors() { return false; }
   public function __serialize(): array { return ['date' => $this->format('Y-m-d H:i:s.u'), 'timezone_type' => 3, 'timezone' => $this->__tz]; }
+  public function __nipProps(): array { return ['date' => $this->format('Y-m-d H:i:s.u'), 'timezone_type' => 3, 'timezone' => $this->__tz]; }
+  public function __nipCompare($other) { return [$this->__ts, $this->__us] <=> [$other->getTimestamp(), $other->getMicrosecond()]; }
   public function __unserialize(array $data): void { $this->__tz = $data['timezone']; $this->__ts = __strtotime_tz(substr($data['date'], 0, 19), time(), $this->__tz); }
 }
-class DateTimeImmutable extends DateTime {
+class DateTime implements DateTimeInterface {
+  use __DateTimeImpl;
+}
+class DateTimeImmutable implements DateTimeInterface {
+  use __DateTimeImpl;
   protected function __mut() { return clone $this; }
   public static function createFromMutable($object) { $o = new static('@' . $object->getTimestamp()); return $o->setTimezone($object->getTimezone()); }
 }
@@ -132,3 +139,12 @@ function date_format($object, $format) { return $object->format($format); }
 function date_modify($object, $modifier) { return $object->modify($modifier); }
 function date_timestamp_get($object) { return $object->getTimestamp(); }
 function date_interval_format($object, $format) { return $object->format($format); }
+class DateError extends Error {}
+class DateObjectError extends DateError {}
+class DateRangeError extends DateError {}
+class DateException extends Exception {}
+class DateInvalidOperationException extends DateException {}
+class DateInvalidTimeZoneException extends DateException {}
+class DateMalformedIntervalStringException extends DateException {}
+class DateMalformedPeriodStringException extends DateException {}
+class DateMalformedStringException extends DateException {}

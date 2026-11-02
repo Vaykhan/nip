@@ -7,6 +7,9 @@ import os from 'node:os';
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const [resFile, outFile] = process.argv.slice(2);
 const res = JSON.parse(fs.readFileSync(resFile));
+// result files list test names relative to the php-src checkout
+const root = path.resolve(process.env.PHPSRC || '/tmp/php-src');
+const abs = (t) => path.resolve(root, t);
 function sections(src) { const out = {}; let cur = null; for (const line of src.split('\n')) { const m = /^--([A-Z_]+)--\s*$/.exec(line); if (m) { cur = m[1]; out[cur] = []; continue; } if (cur) out[cur].push(line); } for (const k of Object.keys(out)) out[k] = out[k].join('\n'); return out; }
 const list = res.fail;
 const recs = [];
@@ -16,7 +19,7 @@ function run(cmd, args, cwd) { return new Promise((r) => { cp.execFile(cmd, args
 async function worker() {
   while (next < list.length) {
     const file = list[next++];
-    const s = sections(fs.readFileSync(file, 'latin1'));
+    const s = sections(fs.readFileSync(abs(file), 'latin1'));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-')); const name = path.basename(file).replace(/\.phpt$/, '.php');
     fs.writeFileSync(path.join(dir, name), s.FILE, 'latin1');
     const ini = ['-d', 'display_errors=1', '-d', 'log_errors=0', '-d', 'error_reporting=32767', '-d', 'html_errors=0'];

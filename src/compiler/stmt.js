@@ -1,21 +1,25 @@
 // Compilation of statements (control flow, declarations, foreach, try/catch, ...).
 
-import { cp, FatalSig, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
-import { toBool, toStr } from '../convert.js';
+import { cp, FatalSig, NOREF, normKey, objHandles, PHPArray, PHPObject, Ref } from '../values.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq } from '../compare.js';
-import { isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
+import { CALL_KINDS, isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
 import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
-import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { compilingByRef, declareFunction, valueName } from '../runtime/functions.js';
-import { callMethodName, canAccessMember, declareClass, propAccessible } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { checkTimeLimit, notice, setPrevious, throwError, toThrowSig, warn } from '../runtime/errors.js';
+import { callFunction, compilingByRef, declareFunction } from '../runtime/functions.js';
+import { callMethodName, canAccessMember, declareClass, hasHookedProps, objectProps, propAccessible, slotVisible } from '../runtime/classes.js';
+import { caughtTemps, dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
+import { callValue } from '../runtime/callables.js';
 import { generatorClass } from '../runtime/native-classes.js';
+import { lazyInit } from '../runtime/lazy.js';
 
 export function cStmts(list) {
-  const fns = [];
-  for (const s of list) { const c = cStmt(s); if (c) fns.push(c); }
+  const fns = [], nodes = [];
+  for (const s of list) { const c = cStmt(s); if (c) { fns.push(c); nodes.push(s); } }
+  const targets = gotoTargets(fns, nodes);
+  if (targets) return labelledStmts(fns, nodes, targets);
   const n = fns.length;
   if (n === 0) return () => undefined;
   if (n === 1) return fns[0];
@@ -27,48 +31,137 @@ export function cStmts(list) {
 }
 function cBody(n) { return n.k === 'Block' ? cStmts(n.body) : cStmts([n]); }
 
+// goto support. A `goto` returns a GOTO signal that travels up like `break`. A statement list
+// that contains the label (directly, or inside an if/else branch, block, try or catch body it
+// can enter) resumes there. Compiled statements containing enterable labels carry `.labels` (a
+// Set) and `.enter(f, label)`, which runs the statement starting at the label. Loops, switch
+// and finally don't expose their labels: PHP rejects jumps into them at compile time.
+export const GOTO = 4;
+export function gotoTargets(fns, nodes) {
+  let map = null;
+  for (let i = 0; i < fns.length; i++) {
+    const labels = nodes[i].k === 'Label' ? [nodes[i].name] : fns[i].labels;
+    if (labels) for (const name of labels) (map || (map = new Map())).set(name, i);
+  }
+  return map;
+}
+function labelledStmts(fns, nodes, targets) {
+  const n = fns.length;
+  const exec = (f, label) => {
+    let i = 0;
+    for (;;) {
+      let r;
+      if (label !== null) {
+        const j = targets.get(label);
+        r = nodes[j].k === 'Label' ? undefined : fns[j].enter(f, label);
+        i = j + 1; label = null;
+      } else {
+        if (i >= n) return undefined;
+        r = fns[i++](f);
+      }
+      if (r !== undefined) {
+        if (r.t === GOTO && targets.has(r.label)) { label = r.label; continue; }
+        return r;
+      }
+    }
+  };
+  const run = (f) => exec(f, null);
+  run.labels = new Set(targets.keys());
+  run.enter = exec;
+  return run;
+}
+// gives an if/try statement the labels of its enterable parts (each a compiled body or null)
+function exposeLabels(fn, parts, enter) {
+  const labels = new Set();
+  for (const p of parts) if (p && p.labels) for (const l of p.labels) labels.add(l);
+  if (labels.size) { fn.labels = labels; fn.enter = enter; }
+  return fn;
+}
+
 export function cStmt(n) {
   if (!n) return null;
   const fn = STMT[n.k];
   if (!fn) throw new FatalSig(`Unsupported statement type ${n.k}`, n.l);
-  return fn(n);
+  const c = fn(n);
+  return n.ticks ? withTick(c, n.ticks) : c;
+}
+// declare(ticks=N): run the tick functions after every N ticked statements
+function withTick(c, every) {
+  const t = (f) => { const r = c(f); tick(every); return r; };
+  if (c.labels) { t.labels = c.labels; t.enter = (f, label) => { const r = c.enter(f, label); tick(every); return r; }; }
+  return t;
+}
+export function tick(every) {
+  if (++rt.tickCount < every) return; // counts even when no tick function is registered
+  rt.tickCount = 0;
+  for (const t of rt.tickFns.slice()) {
+    if (t.calling) continue;
+    t.calling = true;
+    rt.fiberSwitchBlocked++; // nor can tick functions
+    try { callValue(t.cb, t.args); } finally { t.calling = false; rt.fiberSwitchBlocked--; }
+  }
 }
 
+// a finally block run while exception `pending` unwinds: an exception it throws gets the pending
+// one as previous (zend_exception_set_previous)
+function finallyAfter(F, f, pending) {
+  if (!pending) return F(f);
+  try { return F(f); } catch (e) { const s = toThrowSig(e); if (s && s.obj !== pending.obj) setPrevious(s.obj, pending.obj); throw e; }
+}
 const STMT = {
   Block(n) { return cStmts(n.body); },
   Echo(n) {
     const l = n.l;
     if (n.args.length === 1 && n.args[0].k === 'Lit') { const s = toStr(n.args[0].v); return () => { rt.echo(s); }; }
     const args = n.args.map(cExpr);
-    if (args.length === 1) { const A = args[0]; return (f) => { rt.line = l; const v = A(f); rt.echo(typeof v === 'string' ? v : toStr(v)); }; }
-    return (f) => { rt.line = l; for (let i = 0; i < args.length; i++) { const v = args[i](f); rt.echo(typeof v === 'string' ? v : toStr(v)); } };
+    if (args.length === 1) { const A = args[0]; return (f) => { rt.line = l; if (idq.n) idSafePoint(); const v = A(f); rt.echo(typeof v === 'string' ? v : toStr(v)); }; }
+    return (f) => { rt.line = l; if (idq.n) idSafePoint(); for (let i = 0; i < args.length; i++) { const v = args[i](f); rt.echo(typeof v === 'string' ? v : toStr(v)); } };
   },
   ExprStmt(n) {
+    if (n.e.k === 'Var' && n.e.name !== 'this') return () => undefined; // `$x;` compiles to nothing in PHP (no warning)
+    if (!n.voidCast && CALL_KINDS.has(n.e.k)) n.e.discarded = true; // (see #[\NoDiscard])
     const E = cExpr(n.e); const l = n.l;
-    if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; E(f); };
-    return (f) => { rt.line = l; const v = E(f); if (v instanceof PHPObject && v.cls.hasDestructor && !v.destructed) gcCheck(v); };
+    // statement starts are where freed object handles get reclaimed (see runtime/gc.js)
+    if (n.e.k === 'Assign' || n.e.k === 'AssignOp' || n.e.k === 'PreInc' || n.e.k === 'PostInc' || n.e.k === 'AssignRef') return (f) => { rt.line = l; if (idq.n) idSafePoint(); E(f); };
+    return (f) => {
+      rt.line = l;
+      if (idq.n) idSafePoint();
+      // objects the statement created and nothing kept (temporaries) give their handles back
+      const outer = objHandles.fresh;
+      objHandles.fresh = [];
+      let v;
+      try { v = E(f); } finally {
+        const fresh = objHandles.fresh;
+        objHandles.fresh = outer;
+        if (fresh.length) caughtTemps(fresh);
+      }
+      if (v instanceof PHPObject) { dropRef(v); if (v.cls.hasDestructor && !v.destructed) gcCheck(v); }
+    };
   },
   If(n) {
     const conds = [cExpr(n.c), ...n.elifs.map((e) => cExpr(e.c))];
     const bodies = [cBody(n.then), ...n.elifs.map((e) => cBody(e.body))];
     const els = n.els ? cBody(n.els) : null;
     const l = n.l;
+    const parts = [...bodies, els];
+    const enter = (f, label) => parts.find((p) => p && p.labels && p.labels.has(label)).enter(f, label);
     if (conds.length === 1) {
       const C = conds[0], T = bodies[0];
-      if (els) return (f) => { rt.line = l; return toBool(C(f)) ? T(f) : els(f); };
-      return (f) => { rt.line = l; if (toBool(C(f))) return T(f); };
+      if (els) return exposeLabels((f) => { rt.line = l; return toBool(C(f)) ? T(f) : els(f); }, parts, enter);
+      return exposeLabels((f) => { rt.line = l; if (toBool(C(f))) return T(f); }, parts, enter);
     }
-    return (f) => {
+    return exposeLabels((f) => {
       rt.line = l;
       for (let i = 0; i < conds.length; i++) if (toBool(conds[i](f))) return bodies[i](f);
       if (els) return els(f);
-    };
+    }, parts, enter);
   },
   While(n) {
     const C = cExpr(n.c), B = cBody(n.body), l = n.l;
     return (f) => {
       rt.line = l;
       while (toBool(C(f))) {
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -82,6 +175,7 @@ const STMT = {
     const C = cExpr(n.c), B = cBody(n.body);
     return (f) => {
       do {
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -100,6 +194,7 @@ const STMT = {
         let ok = true;
         for (let i = 0; i < cond.length; i++) { const v = cond[i](f); if (i === cond.length - 1) ok = toBool(v); }
         if (!ok) break;
+        if (rt.deadline !== 0) checkTimeLimit();
         const r = B(f);
         if (r !== undefined) {
           if (r.t === 1) { if (r.n > 1) return mkBreak(r.n - 1); break; }
@@ -113,6 +208,7 @@ const STMT = {
   Foreach(n) {
     const E = cExpr(n.e);
     const LE = n.byRef ? cLval(n.e) : null;
+    const subjIsVar = ['Var', 'Index', 'Prop', 'SProp', 'VarVar'].includes(n.e.k);
     const K = n.kv ? cLval(n.kv) : null;
     const V = cLval(n.v);
     const isList = n.v.k === 'List';
@@ -124,15 +220,35 @@ const STMT = {
       rt.line = l;
       if (n.byRef) {
         const subj0 = LE.getq(f);
-        if (subj0 instanceof PHPObject) return foreachObject(f, subj0, K, V, B, true, isList);
+        if (subj0 instanceof PHPObject) {
+          if (subj0.cls.ancestors.has('iterator') && subj0.cls.lname !== 'generator') throwError('Error', 'An iterator cannot be used with foreach by reference');
+          if (subj0.gen && !subj0.gen.fn.byRef) throwError('Exception', 'You can only iterate a generator by-reference if it declared that it yields by-reference');
+          return foreachObject(f, subj0, K, V, B, true, isList);
+        }
         if (subj0 !== undefined && subj0 !== null && !(subj0 instanceof PHPArray)) { warn(`foreach() argument must be of type array|object, ${valueName(subj0)} given`); return; }
-        const arr = LE.arr(f);
+        let arr = LE.arr(f);
         if (!(arr instanceof PHPArray)) return foreachObject(f, arr, K, V, B, true, isList);
-        arr.iters++;
+        // like PHP's hash iterators: the position is the next index to look at, and it follows
+        // the entries when functions like array_shift() renumber the array
+        const it = { pos: 0 };
+        const attach = (a) => { a.iters++; (a.itList || (a.itList = [])).push(it); };
+        const detach = (a) => { a.iters--; const l = a.itList; l.splice(l.indexOf(it), 1); };
+        attach(arr);
         try {
-          for (let i = 0; i < arr.k.length; i++) {
+          for (;;) {
+            // the variable may have been given another array
+            const cur = subjIsVar ? LE.getq(f) : arr;
+            if (cur !== arr) {
+              if (!(cur instanceof PHPArray)) break;
+              detach(arr);
+              arr = LE.arr(f); // the position carries over
+              attach(arr);
+            }
+            let i = it.pos;
+            while (i < arr.k.length && arr.k[i] === undefined) i++;
+            if (i >= arr.k.length) break;
+            it.pos = i + 1;
             const key = arr.k[i];
-            if (key === undefined) continue;
             let slot = arr.v[i];
             if (!(slot instanceof Ref)) { slot = new Ref(slot); arr.v[i] = slot; }
             V.bind(f, slot);
@@ -144,13 +260,14 @@ const STMT = {
               return r;
             }
           }
-        } finally { arr.iters--; }
+        } finally { detach(arr); }
         return;
       }
       const subj = E(f);
       if (subj instanceof PHPArray) {
         if (subj.size === 0) return;
         subj.fe = (subj.fe || 0) + 1;
+        feSubjects.push(subj);
         try {
           const ks = subj.k, vs = subj.v;
           for (let i = 0; i < ks.length; i++) {
@@ -170,23 +287,27 @@ const STMT = {
               return r;
             }
           }
-        } finally { subj.fe--; }
+        } finally { subj.fe--; feSubjects.pop(); dropRef(subj); }
         return;
       }
-      if (subj instanceof PHPObject) return foreachObject(f, subj, K, V, B, false, isList);
+      if (subj instanceof PHPObject) {
+        feSubjects.push(subj);
+        try { return foreachObject(f, subj, K, V, B, false, isList); } finally { feSubjects.pop(); dropRef(subj); }
+      }
       warn(`foreach() argument must be of type array|object, ${valueName(subj)} given`);
     };
   },
   Switch(n) {
     const E = cExpr(n.e);
-    const flat = [];
+    const flat = [], flatNodes = [];
     const starts = [];
     let defIdx = -1;
     for (const c of n.cases) {
       starts.push({ T: c.test ? cExpr(c.test) : null, at: flat.length });
       if (!c.test) defIdx = starts.length - 1;
-      for (const s of c.body) { const cs = cStmt(s); if (cs) flat.push(cs); }
+      for (const s of c.body) { const cs = cStmt(s); if (cs) { flat.push(cs); flatNodes.push(s); } }
     }
+    const targets = gotoTargets(flat, flatNodes); // gotos between labels inside the switch
     const l = n.l;
     return (f) => {
       rt.line = l;
@@ -195,7 +316,11 @@ const STMT = {
       for (let i = 0; i < starts.length; i++) { const s = starts[i]; if (s.T && looseEq(v, s.T(f))) { start = s.at; break; } }
       if (start < 0) { if (defIdx < 0) return; start = starts[defIdx].at; }
       for (let i = start; i < flat.length; i++) {
-        const r = flat[i](f);
+        let r = flat[i](f);
+        while (r !== undefined && r.t === GOTO && targets && targets.has(r.label)) {
+          i = targets.get(r.label);
+          r = flatNodes[i].k === 'Label' ? undefined : flat[i].enter(f, r.label);
+        }
         if (r !== undefined) {
           if (r.t === 1 || r.t === 2) { if (r.n > 1) return r.t === 1 ? mkBreak(r.n - 1) : mkCont(r.n - 1); return; }
           return r;
@@ -220,42 +345,65 @@ const STMT = {
       return (f) => { rt.line = l; rt.lastRetRef = null; const v = E0(f); const r = rt.lastRetRef; rt.lastRetRef = null; f.ret = v; if (r !== null && r !== NOREF && r.v === v) f.retRef = r; else if (r !== NOREF) notice('Only variable references should be returned by reference'); return RETURN; };
     }
     const E = cValue(n.e); const l = n.l;
-    return (f) => { rt.line = l; f.ret = E(f); return RETURN; };
+    return (f) => { rt.line = l; if (idq.n) idSafePoint(); f.ret = E(f); return RETURN; };
   },
   Try(n) {
     const B = cBody(n.body);
     const catches = n.catches.map((c) => ({ types: c.types.map((t) => t.toLowerCase()), v: c.v, B: cBody(c.body) }));
     const F = n.fin ? cBody(n.fin) : null;
-    return (f) => {
+    // label: entering the try body (or a catch body, see below) at a goto label
+    const run0 = (f, label, mark) => {
       let res;
       try {
-        res = B(f);
+        if (label !== undefined && catches.some((c) => c.B.labels && c.B.labels.has(label))) {
+          const c = catches.find((x) => x.B.labels && x.B.labels.has(label));
+          if (!F) return c.B.enter(f, label);
+          try { res = c.B.enter(f, label); }
+          finally { const fr = F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+          return res;
+        }
+        res = label === undefined ? B(f) : B.enter(f, label);
       } catch (e) {
         const sig = toThrowSig(e);
         if (!sig) throw e;
         const obj = sig.obj;
+        // objects the try block created that only the unwound expressions held are gone
+        const created = objHandles.recent.slice(mark);
+        objHandles.recent.length = mark;
+        if (created.length) caughtTemps(created);
         let handled = false;
         for (const c of catches) {
           if (c.types.some((t) => obj.cls.ancestors.has(t))) {
-            if (c.v) { const r = f.vars[c.v]; if (r) r.v = obj; else f.vars[c.v] = new Ref(obj); }
+            if (c.v) { const r = f.vars[c.v]; if (r) { const old = r.v; r.v = obj; if (old !== obj && old !== null && typeof old === 'object') dropRef(old); } else f.vars[c.v] = new Ref(obj); }
             handled = true;
             if (F) {
-              try { res = c.B(f); }
-              finally { const fr = F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+              let pending = null;
+              try { res = c.B(f); } catch (e2) { pending = toThrowSig(e2); throw e2; }
+              finally { const fr = finallyAfter(F, f, pending); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
               return res;
             }
             return c.B(f);
           }
         }
         if (!handled) {
-          if (F) { const fr = F(f); if (fr !== undefined) return fr; }
+          if (F) { const fr = finallyAfter(F, f, sig); if (fr !== undefined) return fr; }
           throw sig;
         }
       }
       if (F) { const fr = F(f); if (fr !== undefined) return fr; }
       return res;
     };
+    const run = (f, label) => {
+      const outer = objHandles.recent, mark = outer === null ? 0 : outer.length;
+      if (outer === null) objHandles.recent = [];
+      try { return run0(f, label, mark); }
+      finally { if (outer === null) objHandles.recent = null; else if (outer.length > mark) outer.length = mark; }
+    };
+    return exposeLabels((f) => run(f, undefined), [B, ...catches.map((c) => c.B)], run);
   },
+  Label() { return () => undefined; },
+  Nop() { return () => undefined; },
+  Goto(n) { const sig = { t: GOTO, label: n.label }; return () => sig; },
   Global(n) {
     const names = n.names.map((x) => (typeof x === 'string' ? x : cExpr(x.e)));
     return (f) => {
@@ -273,7 +421,7 @@ const STMT = {
         const owner = f.closure || f.fn;
         if (!owner) { st = rt.mainStatics || (rt.mainStatics = new Map()); }
         else {
-          if (!owner.statics) owner.statics = new Map();
+          if (!owner.statics) { owner.statics = new Map(); rt.staticOwners.add(owner); }
           st = owner.statics;
           // methods: statics are per-class (late static binding scope)
           if (f.fn && f.fn.isMethod && f.sc && !f.closure) {
@@ -292,14 +440,22 @@ const STMT = {
   },
   Unset(n) {
     const ls = n.list.map(cLval);
-    return (f) => { for (const lv of ls) lv.unset(f); };
+    const l = n.l;
+    return (f) => { rt.line = l; for (const lv of ls) lv.unset(f); };
   },
   ConstDecl(n) {
     const items = n.items.map((i) => ({ name: i.name, E: cExpr(i.e) }));
+    const l = n.l;
+    const dep = n.attrs ? n.attrs.find((a) => a.name.replace(/^\\/, '').toLowerCase() === 'deprecated') : null;
     return (f) => {
+      rt.line = l;
       for (const it of items) {
-        if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined`); continue; }
-        rt.consts.set(it.name, it.E(f));
+        if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined${rt.phpVersion >= 80500 ? ', this will be an error in PHP 9' : ''}`); continue; }
+        const v = it.E(f);
+        if (dep) rt.deprecatedConsts.set(it.name, dep); // (#[\Deprecated] const, PHP 8.5)
+        rt.consts.set(it.name, v);
+        rt.userConsts.set(it.name, { file: rt.file, attrs: n.attrs || null }); // (for ReflectionConstant)
+        if (v !== null && typeof v === 'object') rt.constRoots.push(v);
       }
     };
   },
@@ -325,12 +481,16 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
   };
   if (obj.cls === generatorClass) {
     const g = obj.gen;
+    if (g.started && g.done) throwError('Exception', 'Cannot traverse an already closed generator');
     g.ensure(true);
+    if (g.advanced) throwError('Exception', 'Cannot rewind a generator that was already run');
+    const line = rt.line; // the generator is resumed from the foreach line
     while (!g.done) {
       if (byRef) { const rr = g.curRef || new Ref(g.cur); V.bind(f, rr); } else assignV(g.cur);
       if (K) K.set(f, g.key);
       const h = handle(run());
       if (h === 1) return; if (h !== 0) return h;
+      rt.line = line;
       g.next();
     }
     return;
@@ -361,8 +521,11 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     }
     return;
   }
-  // plain object: visible properties
-  const keys = [...obj.props.keys()];
+  if (obj.lazy !== undefined) obj = lazyInit(obj);
+  if (hasHookedProps(obj.cls)) return foreachHooked(f, obj, K, V, byRef, assignV, run, handle);
+  // plain object: visible properties, from the live property table (properties added meanwhile
+  // are visited too, as in PHP)
+  const keys = obj.props.keys();
   for (const k of keys) {
     if (!obj.props.has(k)) continue;
     let name = k;
@@ -376,11 +539,51 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     }
     if (byRef) {
       let slot = obj.props.get(k);
+      const info = obj.cls.slots.get(k);
+      if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
       if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
       V.bind(f, slot);
     } else { const s = obj.props.get(k); assignV(s instanceof Ref ? s.v : s); }
     if (K) K.set(f, normKey(name));
     const h = handle(run());
+    if (h === 1) return; if (h !== 0) return h;
+  }
+}
+
+// foreach over an object with hooked properties (PHP 8.4): the declared properties visible here in
+// declaration order, the hooked ones read with their get hooks (by reference: only with a &get
+// hook), then the dynamic ones (live: those added meanwhile are visited too)
+function foreachHooked(f, obj, K, V, byRef, assignV, run, handle) {
+  const names = new Set();
+  const refTo = (k, name, info) => {
+    if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
+    let slot = obj.props.get(k);
+    if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
+    return slot;
+  };
+  const visit = (name) => { if (K) K.set(f, normKey(name)); return handle(run()); };
+  for (const [k, info] of obj.cls.slots) {
+    if (info.internal || !slotVisible(info, f.cls) || names.has(info.name)) continue;
+    const g = info.hooks && info.hooks.get;
+    if (!g && (info.virtual || !obj.props.has(k))) continue;
+    names.add(info.name);
+    if (g) {
+      if (byRef && !g.byRef) throwError('Error', `Cannot create reference to property ${obj.cls.name}::$${info.name}`);
+      rt.lastRetRef = null;
+      const v = callFunction(g, [], obj, g.cls, obj.cls, null);
+      const rr = rt.lastRetRef; rt.lastRetRef = null;
+      if (byRef) V.bind(f, rr !== null && rr !== NOREF ? rr : new Ref(v)); else assignV(v);
+    } else if (byRef) {
+      if (info.hooks) throwError('Error', `Cannot create reference to property ${obj.cls.name}::$${info.name}`);
+      V.bind(f, refTo(k, info.name, info));
+    } else { const sl = obj.props.get(k); assignV(sl instanceof Ref ? sl.v : sl); }
+    const h = visit(info.name);
+    if (h === 1) return; if (h !== 0) return h;
+  }
+  for (const k of obj.props.keys()) {
+    if (obj.cls.slots.has(k) || names.has(k) || !obj.props.has(k)) continue;
+    if (byRef) V.bind(f, refTo(k, k, null)); else { const sl = obj.props.get(k); assignV(sl instanceof Ref ? sl.v : sl); }
+    const h = visit(k);
     if (h === 1) return; if (h !== 0) return h;
   }
 }
@@ -404,7 +607,7 @@ export function iterateObject(obj, cb) {
   }
   if (obj.cls.ancestors.has('iteratoraggregate')) return iterateObject(callMethodName(obj, 'getIterator', []), cb);
   if (obj.cls.nativeIter) { for (const [k, v] of obj.cls.nativeIter(obj)) if (cb(k, v) === false) return; return; }
-  for (const [k, s] of [...obj.props]) {
+  for (const [k, s] of objectProps(obj)) {
     const info = obj.cls.props.get(k);
     if (info && info.vis !== 'public' && !canAccessMember(info, rt.frame ? rt.frame.cls : null)) continue;
     if (cb(normKey(k), s instanceof Ref ? s.v : s) === false) return;

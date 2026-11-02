@@ -12,7 +12,7 @@ export const PRELUDE_CORE = 'core.php';
 export const PRELUDE_LAZY = [
   'array-iterator.php', 'array-object.php', 'spl-doubly-linked-list.php', 'spl-heap.php', 'spl-priority-queue.php',
   'spl-fixed-array.php', 'spl-object-storage.php', 'weak-map.php', 'iterators.php', 'misc-iterators.php',
-  'recursive-iterators.php', 'datetime.php',
+  'recursive-iterators.php', 'datetime.php', 'reflection.php',
 ];
 
 const PRELUDE_DIR = new URL('./prelude/', import.meta.url);

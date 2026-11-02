@@ -8,7 +8,7 @@ import { toBool } from '../convert.js';
 import { isValidUtf8, utf8Decode, utf8Encode } from '../utf8.js';
 import { rt } from '../runtime/state.js';
 import { makeException } from '../runtime/errors.js';
-import { callMethodName, objVisibleProps } from '../runtime/classes.js';
+import { callMethodName, nipProps, objVisibleProps } from '../runtime/classes.js';
 import { def, I, S } from './core.js';
 
 const JSON_ERR_MSG = { 0: 'No error', 1: 'Maximum stack depth exceeded', 2: 'State mismatch (invalid or malformed JSON)', 3: 'Control character error, possibly incorrectly encoded', 4: 'Syntax error', 5: 'Malformed UTF-8 characters, possibly incorrectly encoded', 6: 'Recursion detected', 7: 'Inf and NaN cannot be JSON encoded', 8: 'Type is not supported', 9: 'The decoded property name is invalid', 10: 'Single unpaired UTF-16 surrogate in unicode escape' };
@@ -93,7 +93,8 @@ function jsonEncode(v, flags, depth, ind, seen) {
     }
     if (v.cls.isEnum) { if (!v.cls.enumBacked) return jsonFail(flags, 8, '0'); return jsonEncode(v.props.get('value'), flags, depth, ind, seen); }
     if (seen.has(v)) return jsonFail(flags, 6, 'null');
-    const props = v.cls.nativeToArray ? v.cls.nativeToArray(v).entries() : objVisibleProps(v, null);
+    const np = v.cls.nativeToArray ? null : nipProps(v);
+    const props = v.cls.nativeToArray ? v.cls.nativeToArray(v).entries() : np ? np.entries() : objVisibleProps(v, null);
     if (!props.length) return '{}';
     seen.add(v);
     try {

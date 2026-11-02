@@ -1,13 +1,14 @@
 // Compiler shared pieces: control signals, warnings, array/string element reads.
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
-import { Flt, INT_LIKE, normKey, NUM_LEAD, numericStr, PHPArray, PHPObject, Ref } from '../values.js';
-import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
+import { Flt, fmtRepr, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
+import { floatToInt, oobWarn, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callMethodName } from '../runtime/classes.js';
 
 export const BREAK1 = { t: 1, n: 1 }, CONT1 = { t: 2, n: 1 }, RETURN = { t: 3 };
+export const NULLSAFE_SHORT = { short: true }; // thrown by a nullsafe operator to skip the rest of its chain
 export const mkBreak = (n) => (n === 1 ? BREAK1 : { t: 1, n });
 export const mkCont = (n) => (n === 1 ? CONT1 : { t: 2, n });
 export const SUPERGLOBALS = new Set(['_SERVER', '_GET', '_POST', '_ENV', '_COOKIE', '_FILES', '_REQUEST', '_SESSION']);
@@ -32,6 +33,25 @@ export function isFresh(n) { // expressions producing a new value (no copy marki
 }
 export const isLvalNode = (n) => LVAL_KINDS.has(n.k);
 
+// in fiber mode (see compiler/generator.js) every call to user code may suspend
+export const CALL_KINDS = new Set(['Call', 'MCall', 'SCall']);
+export function hasSuspend(n) {
+  if (n === null || typeof n !== 'object') return false;
+  if (n._hs !== undefined) return n._hs;
+  let r = false;
+  if (CALL_KINDS.has(n.k) || n.k === 'Yield' || n.k === 'YieldFrom') r = true;
+  else if (n.k === 'Closure' || n.k === 'ClassDecl' || n.k === 'FuncDecl') r = false;
+  else if (Array.isArray(n)) r = n.some(hasSuspend);
+  else {
+    for (const key in n) {
+      if (key === 'l' || key === '_hy' || key === '_hs') continue;
+      const v = n[key];
+      if (v && typeof v === 'object' && hasSuspend(v)) { r = true; break; }
+    }
+  }
+  if (!Array.isArray(n)) n._hs = r;
+  return r;
+}
 export function hasYield(n) {
   if (n === null || typeof n !== 'object') return false;
   if (n._hy !== undefined) return n._hy;
@@ -41,7 +61,7 @@ export function hasYield(n) {
   else if (Array.isArray(n)) r = n.some(hasYield);
   else {
     for (const key in n) {
-      if (key === 'l' || key === '_hy') continue;
+      if (key === 'l' || key === '_hy' || key === '_hs') continue;
       const v = n[key];
       if (v && typeof v === 'object' && hasYield(v)) { r = true; break; }
     }
@@ -80,30 +100,19 @@ export function keyRepr(k) { return typeof k === 'string' ? `"${k}"` : String(k)
 // ---------------------------------------------------------------- array/string reads
 export function readIndex(base, key, quiet) {
   if (base instanceof PHPArray) {
-    const k = normKey(key);
+    const k = normKey(key, quiet ? KEY_ISSET : 0);
     const i = base.index(k);
     if (i === undefined) { if (!quiet) warn(`Undefined array key ${keyRepr(k)}`); return quiet ? undefined : null; }
     const v = base.v[i];
     return v instanceof Ref ? v.v : v;
   }
   if (typeof base === 'string') {
-    let idx;
-    if (typeof key === 'number') idx = key;
-    else if (typeof key === 'string') {
-      const n = numericStr(key);
-      if (n === null || !INT_LIKE.test(key)) {
-        if (quiet) return undefined;
-        const m = NUM_LEAD.exec(key);
-        if (m && /^\s*[+-]?\d+/.test(key)) { warn(`Illegal string offset "${key}"`); idx = toInt(key); }
-        else throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
-      } else idx = toInt(n);
-    } else if (key === null || key === undefined) { if (quiet) return undefined; throwError('TypeError', 'Cannot access offset of type null on string'); }
-    else if (typeof key === 'boolean') { idx = key ? 1 : 0; }
-    else if (key instanceof Flt) { idx = floatToInt(key.v); if (!quiet) warn('String offset cast occurred'); }
-    else if (typeof key === 'bigint') idx = Number(key);
-    else { if (quiet) return undefined; throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`); }
-    if (idx < 0) idx += base.length;
-    if (idx < 0 || idx >= base.length) { if (!quiet) warn(`Uninitialized string offset ${toStr(key)}`); return quiet ? undefined : ''; }
+    let idx = strOffsetKey(key, quiet);
+    if (idx === undefined) return undefined;
+    const off = idx; // PHP reports the integer offset, before negative offsets are resolved
+    if (typeof idx === 'bigint') idx = -1; // beyond 2^53: out of range for any string
+    else if (idx < 0) idx += base.length;
+    if (idx < 0 || idx >= base.length) { if (!quiet) warn(`Uninitialized string offset ${off}`); return quiet ? undefined : ''; }
     return base[idx];
   }
   if (base instanceof PHPObject) {
@@ -116,17 +125,38 @@ export function readIndex(base, key, quiet) {
     throwError('Error', `Cannot use object of type ${base.cls.name} as array`);
   }
   if (base === null || base === undefined) { if (!quiet) warn('Trying to access array offset on null'); return quiet ? undefined : null; }
-  if (!quiet) warn(`Trying to access array offset on ${typeOf(base)}`);
+  if (!quiet) warn(`Trying to access array offset on ${valueName(base)}`);
   return quiet ? undefined : null;
 }
 
+// a string offset as an integer (zend_check_string_offset): integer strings, with a warning
+// when followed by other characters; floats, bools and null with a warning. isset: undefined when
+// it isn't one (without warnings).
+const INT_LEAD = /^[ \t\n\r\v\f]*[+-]?\d+/;
+export function strOffsetKey(key, isset) {
+  if (typeof key === 'number' || typeof key === 'bigint') return key;
+  if (typeof key === 'string') {
+    if (INT_LIKE.test(key)) return toInt(key);
+    const m = NUM_LEAD.exec(key);
+    if (isset || !m || !INT_LEAD.test(key) || /[.eE]/.test(m[0])) {
+      if (isset) return undefined;
+      throwError('TypeError', 'Cannot access offset of type string on string');
+    }
+    warn(`Illegal string offset "${key}"`);
+    return toInt(key);
+  }
+  if (key === null || key === undefined || typeof key === 'boolean' || key instanceof Flt) {
+    if (!isset) warn('String offset cast occurred');
+    else if (key instanceof Flt && Number(floatToInt(key.v)) !== key.v && !oobWarn(key.v)) deprecated(`Implicit conversion from float ${fmtRepr(key.v)} to int loses precision`);
+    return key instanceof Flt ? floatToInt(key.v) : key ? 1 : 0;
+  }
+  if (isset) return undefined;
+  throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
+}
 export let strOffsetChar = null;
 export function strSetOffset(s, key, v) {
-  let idx = typeof key === 'number' ? key : toInt(key);
-  if (typeof key === 'string' && !INT_LIKE.test(key)) {
-    if (/^\s*[+-]?\d/.test(key)) warn(`Illegal string offset "${key}"`);
-    else throwError('TypeError', `Cannot access offset of type ${typeOf(key)} on string`);
-  }
+  let idx = strOffsetKey(key, false);
+  if (typeof idx === 'bigint') idx = Number(idx);
   if (idx < 0) idx += s.length;
   if (idx < 0) { warn(`Illegal string offset ${toStr(key)}`); return s; }
   let c = toStr(v);

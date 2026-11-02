@@ -1,44 +1,85 @@
 // Function and class introspection: function_exists, call_user_func, class_exists, get_object_vars, ...
 
-import { cp, normKey, PHPArray, PHPObject, Ref } from '../values.js';
-import { toBool, typeOf } from '../convert.js';
+import { cp, ExitSig, normKey, PHPArray, PHPObject, PHPResource } from '../values.js';
+import { toBool, toStr, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
-import { isRefParam } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
-import { throwError, warn } from '../runtime/errors.js';
-import { FRAME_FUNCS } from '../runtime/functions.js';
-import { callValue, invokeCallable, resolveCallable } from '../runtime/callables.js';
+import { deprecated, PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
+import { FRAME_FUNCS, noDiscardWarn } from '../runtime/functions.js';
+import { callValue, invokeCallable, nativeCallback, refCallArgs } from '../runtime/callables.js';
 import {
-  canAccessMember, classConst, classExists, lookupClass, lookupStaticProp, objVisibleProps,
-  propAccessible, propDefault
+  canAccessMember, classConst, classExists, cloneObject, lookupClass, lookupStaticProp, objVisibleProps,
+  propAccessible, propDefault, readonlyKeys, writeProp
 } from '../runtime/classes.js';
-import { A, def, S } from './core.js';
+import { A, alias, def, I, S } from './core.js';
+import { since } from '../runtime/version.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
-def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
-def('call_user_func', (callback, ...args) => callValue(callback, args));
+def('function_exists', (function_name) => { let n = S(function_name); if (n[0] === '\\') n = n.slice(1); if (rt.disabledFns && rt.disabledFns.has(n.toLowerCase())) return false; return rt.fns.has(n.toLowerCase()) || !!FRAME_FUNCS[n.toLowerCase()] || lazyFnSrc.has(n.toLowerCase()); });
+// (a call_user_func() whose result is discarded discards the callback's: #[\NoDiscard])
+const discarded = (c, args) => { const d = rt.discardNext; rt.discardNext = false; if (d && c.fn.noDiscard !== undefined) noDiscardWarn(c.fn, args, c.cls); };
+def('call_user_func', (callback, ...args) => { const c = nativeCallback(callback); discarded(c, args); return invokeCallable(c, refCallArgs(c, args)); });
 def('call_user_func_array', (callback, args) => {
   const a = A(args);
   const pos = []; let named = null;
   for (const [k, v] of a.entries()) { if (typeof k === 'string') { if (!named) named = new Map(); named.set(k, v); } else pos.push(v); }
-  const c = resolveCallable(callback, rt.frame, true);
-  // by-ref params: wrap values in refs
-  if (c.fn.refs) for (let i = 0; i < pos.length; i++) if (isRefParam(c.fn, i)) pos[i] = new Ref(pos[i]);
+  const c = nativeCallback(callback);
+  discarded(c, pos);
   if (named) pos.named = named;
+  refCallArgs(c, pos);
   return invokeCallable(c, pos);
 });
+// clone() with properties to change (PHP 8.5): assigned in the caller's scope after __clone(),
+// readonly ones included
+def('clone', (f, object, withProperties = null) => {
+  if (!(object instanceof PHPObject)) throwError('TypeError', `clone(): Argument #1 ($object) must be of type object, ${typeOf(object)} given`);
+  if (withProperties !== null && !(withProperties instanceof PHPArray)) throwError('TypeError', `clone(): Argument #2 ($withProperties) must be of type array, ${typeOf(withProperties)} given`);
+  const c = cloneObject(object, f);
+  if (withProperties && withProperties.size) {
+    c.reinit = readonlyKeys(c);
+    try {
+      for (const [k, v] of withProperties.entries()) {
+        const name = String(k);
+        if (name.charCodeAt(0) === 0 && name.length) throwError('Error', 'Cannot access property starting with "\\0"');
+        writeProp(c, name, cp(v), f);
+      }
+    } finally { c.reinit = undefined; }
+  }
+  return c;
+}, { frame: true });
+since(80500, 'fn', 'clone');
+// exit() and die() as functions (PHP 8.4): exit(string|int $status = 0): never
+def('exit', (status = 0) => {
+  let v = status;
+  if (v === null) { deprecated('exit(): Passing null to parameter #1 ($status) of type string|int is deprecated'); v = 0; }
+  if (v instanceof PHPObject && v.cls.methods.has('__tostring')) v = toStr(v);
+  if (typeof v === 'string') { rt.echo(v); throw new ExitSig(0); }
+  if (typeof v === 'boolean') v = v ? 1 : 0;
+  if (v instanceof PHPArray || v instanceof PHPObject || v instanceof PHPResource) throwError('TypeError', `exit(): Argument #1 ($status) must be of type string|int, ${typeOf(v)} given`);
+  throw new ExitSig(Number(I(v)));
+});
+alias('die', 'exit');
+rt.fns.get('die').name = 'exit';
+since(80400, 'fn', 'exit', 'die');
 def('forward_static_call', (callback, ...args) => callValue(callback, args));
 def('forward_static_call_array', (callback, args) => callValue(callback, A(args).values()));
 def('get_class', (object = undefined) => {
-  if (object === undefined) { const f = rt.frame; if (f && f.cls) return f.cls.name; throwError('Error', 'get_class() without arguments must be called from within a class'); }
+  if (object === undefined) {
+    const f = rt.frame;
+    if (f && f.cls) { deprecated('Calling get_class() without arguments is deprecated'); return f.cls.name; }
+    throwError('Error', 'get_class() without arguments must be called from within a class');
+  }
   if (!(object instanceof PHPObject)) throwError('TypeError', `get_class(): Argument #1 ($object) must be of type object, ${typeOf(object)} given`);
   return object.cls.name;
 }, { min: 0 });
 def('get_parent_class', (object_or_class = undefined) => {
   let c;
-  if (object_or_class === undefined) c = rt.frame ? rt.frame.cls : null;
+  if (object_or_class === undefined) { deprecated('Calling get_parent_class() without arguments is deprecated'); c = rt.frame ? rt.frame.cls : null; }
   else if (object_or_class instanceof PHPObject) c = object_or_class.cls;
-  else c = classExists(S(object_or_class), true);
+  else {
+    c = typeof object_or_class === 'string' ? classExists(object_or_class, true) : null;
+    if (!c) throwError('TypeError', `get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, ${typeOf(object_or_class)} given`);
+  }
   return c && c.parent ? c.parent.name : false;
 }, { min: 0 });
 def('get_object_vars', (object) => PHPArray.fromPairs(objVisibleProps(object, rt.frame ? rt.frame.cls : null).map(([k, v]) => [normKey(k), cp(v)])));
@@ -104,8 +145,9 @@ def('class_uses', (object_or_class) => {
   for (const tu of c.decl ? c.decl.traits : []) for (const n of tu.names) { const t = lookupClass(n); out.set(t.name, t.name); }
   return out;
 });
-def('spl_object_id', (object) => object.id);
-def('spl_object_hash', (object) => object.id.toString(16).padStart(32, '0'));
+const objArg = (fn, v) => { if (!(v instanceof PHPObject)) throwError('TypeError', `${fn}(): Argument #1 ($object) must be of type object, ${typeOf(v)} given`); return v; };
+def('spl_object_id', (object) => objArg('spl_object_id', object).id);
+def('spl_object_hash', (object) => objArg('spl_object_hash', object).id.toString(16).padStart(32, '0'));
 def('spl_autoload_register', (callback = null, _throw = true, prepend = false) => {
   if (callback === null) return true;
   if (toBool(prepend)) rt.autoloaders.unshift(callback); else rt.autoloaders.push(callback);
@@ -113,8 +155,11 @@ def('spl_autoload_register', (callback = null, _throw = true, prepend = false) =
 });
 def('spl_autoload_unregister', (callback) => { const i = rt.autoloaders.findIndex((c) => looseEq(c, callback) || c === callback); if (i >= 0) { rt.autoloaders.splice(i, 1); return true; } return false; });
 def('spl_autoload_functions', () => PHPArray.from(rt.autoloaders.slice()));
-def('get_declared_classes', () => PHPArray.from([...rt.classes.values()].filter((c) => !c.isInterface && !c.isTrait).map((c) => c.name)));
-def('get_declared_interfaces', () => PHPArray.from([...rt.classes.values()].filter((c) => c.isInterface).map((c) => c.name)));
+// declared classes, interfaces and traits; class_alias() names are listed lowercased
+const declared = (pred) => PHPArray.from([...rt.classes].filter(([k, c]) => pred(c) && !c.anon && !(c.isTrait && c.decl && c.decl.file === PRELUDE_FILE)).map(([k, c]) => (k === c.lname ? c.name : k)));
+def('get_declared_classes', () => declared((c) => !c.isInterface && !c.isTrait));
+def('get_declared_interfaces', () => declared((c) => c.isInterface));
+def('get_declared_traits', () => declared((c) => c.isTrait));
 def('get_defined_functions', () => {
   const out = new PHPArray(); const internal = new PHPArray(), user = new PHPArray();
   for (const [k, f] of rt.fns) (f.native ? internal : user).push(k);
@@ -123,8 +168,12 @@ def('get_defined_functions', () => {
 def('define', (constant_name, value, case_insensitive = false) => {
   const n = S(constant_name);
   if (n.includes('::')) throwError('ValueError', 'define(): Argument #1 ($constant_name) cannot be a class constant');
-  if (rt.consts.has(n)) { warn(`Constant ${n} already defined`); return false; }
-  rt.consts.set(n, cp(value)); return true;
+  // true/false/null (any case) and __COMPILER_HALT_OFFSET__ can't be defined
+  if (rt.consts.has(n) || /^(true|false|null)$/i.test(n) || n === '__COMPILER_HALT_OFFSET__') { warn(`Constant ${n} already defined${rt.phpVersion >= 80500 ? ', this will be an error in PHP 9' : ''}`); return false; }
+  rt.consts.set(n, cp(value));
+  rt.userConsts.set(n, { file: rt.file, attrs: null });
+  if (value !== null && typeof value === 'object') rt.constRoots.push(value);
+  return true;
 });
 def('defined', (constant_name) => {
   const n = S(constant_name);
@@ -133,7 +182,7 @@ def('defined', (constant_name) => {
 });
 def('constant', (name) => {
   const n = S(name);
-  if (n.includes('::')) { const [c, k] = n.split('::'); return classConst(lookupClass(c), k, rt.frame); }
+  if (n.includes('::')) { const [c, k] = n.split('::'); return classConst(lookupClass(c), k, rt.frame, true); }
   const v = rt.consts.get(n.replace(/^\\/, ''));
   if (v === undefined) throwError('Error', `Undefined constant "${n}"`);
   return v;

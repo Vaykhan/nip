@@ -1,22 +1,30 @@
 // Compilation of assignable expressions (variables, $a[...], properties, static props, list()).
 
-import { cp, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
-import { toBool, toStr, typeOf } from '../convert.js';
+import { cp, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import {
-  isLvalNode, keyRepr, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
+  isLvalNode, keyRepr, NULLSAFE_SHORT, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
   writableArrIn
 } from './common.js';
-import { cExpr } from './expr.js';
+import { cExpr, nullsafeChain } from './expr.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, notice, throwError, warn } from '../runtime/errors.js';
 import { coercePropType } from '../runtime/functions.js';
 import {
-  bindProp, callMethodName, findStaticProp, lookupClass, lookupStaticProp, propArr, propRef, readProp,
+  asymError, bindProp, callMethodName, findStaticProp, lookupClass, lookupStaticProp, propArr, propRef, readProp, setAccessible,
   readPropQuiet, unsetProp, writeProp
 } from '../runtime/classes.js';
-import { gcCheck } from '../runtime/gc.js';
+import { dropRef, gcCheck } from '../runtime/gc.js';
 
 export function cLval(n) {
+  if (n.chainTop) {
+    const lv = cLvalNode(n);
+    lv.get = nullsafeChain(lv.get); lv.getq = nullsafeChain(lv.getq); if (lv.isset) lv.isset = nullsafeChain(lv.isset);
+    return lv;
+  }
+  return cLvalNode(n);
+}
+function cLvalNode(n) {
   switch (n.k) {
     case 'Var': return typeof n.name === 'string' ? lvVar(n.name, n) : lvVarVar({ k: 'VarVar', e: n.name }, n);
     case 'VarVar': return lvVarVar(n);
@@ -63,8 +71,9 @@ function lvVar(name, node) {
     name,
     get(f) { const r = f.vars[name]; if (r === undefined) { warnUndefVar(name); return null; } return r.v; },
     getq(f) { const r = f.vars[name]; return r === undefined ? undefined : r.v; },
-    set(f, v) { const r = f.vars[name]; if (r !== undefined) { const old = r.v; r.v = v; if (old instanceof PHPObject && old !== v && old.cls.hasDestructor) gcCheck(old); } else f.vars[name] = new Ref(v); },
-    bind(f, ref) { f.vars[name] = ref; },
+    fetchW(f) { return (f.vars[name] || (f.vars[name] = new Ref(null))).v; },
+    set(f, v) { const r = f.vars[name]; if (r !== undefined) { const old = r.v; r.v = v; if (old !== v && old !== null && typeof old === 'object') { dropRef(old); if (old instanceof PHPObject && old.cls.hasDestructor) gcCheck(old); } } else f.vars[name] = new Ref(v); },
+    bind(f, ref) { const old = f.vars[name]; f.vars[name] = ref; if (old !== undefined && old !== ref && old.v !== null && typeof old.v === 'object') dropRef(old.v); },
     ref(f) { return f.vars[name] || (f.vars[name] = new Ref(null)); },
     arr(f) {
       const r = f.vars[name] || (f.vars[name] = new Ref(null));
@@ -72,7 +81,7 @@ function lvVar(name, node) {
       if (v instanceof PHPArray && !v.cow && !v.fe) return v;
       return writableArrIn(r);
     },
-    unset(f) { const r = f.vars[name]; delete f.vars[name]; if (r !== undefined && r.v instanceof PHPObject && r.v.cls.hasDestructor) gcCheck(r.v); },
+    unset(f) { const r = f.vars[name]; delete f.vars[name]; if (r !== undefined) { dropRef(r.v); if (r.v instanceof PHPObject && r.v.cls.hasDestructor) gcCheck(r.v); } },
     place() { return this; },
     modify(f, fn, quiet) {
       let r = f.vars[name];
@@ -90,6 +99,7 @@ function lvVarVar(n) {
     place: (f) => lvVarDyn(nm(f)),
     get: (f) => sub(f).get(f), getq: (f) => sub(f).getq(f), set: (f, v) => sub(f).set(f, v), bind: (f, r) => sub(f).bind(f, r),
     ref: (f) => sub(f).ref(f), arr: (f) => sub(f).arr(f), unset: (f) => sub(f).unset(f), modify: (f, fn, q) => sub(f).modify(f, fn, q),
+    fetchW: (f) => { const l = sub(f); return l.fetchW ? l.fetchW(f) : l.get(f); },
   };
 }
 export const lvVarCache = new Map();
@@ -106,14 +116,14 @@ const globalsProxy = { isGlobalsProxy: true };
 function lvIndex(n) {
   const P = isLvalNode(n.o) ? cLval(n.o) : lvTemp(n.o);
   const I = n.i ? cExpr(n.i) : null;
-  const noIdx = () => throwError('Error', 'Cannot use [] for reading');
   if (P.globals) {
     const gref = (f) => { const k = toStr(I(f)); return rt.globals[k] || (rt.globals[k] = new Ref(null)); };
     return {
       get: (f) => { const k = toStr(I(f)); const r = rt.globals[k]; if (!r) { warn(`Undefined global variable $${k}`); return null; } return r.v; },
       getq: (f) => { const r = rt.globals[toStr(I(f))]; return r ? r.v : undefined; },
-      set: (f, v) => { gref(f).v = v; }, bind: (f, r) => { rt.globals[toStr(I(f))] = r; }, ref: gref,
-      arr: (f) => writableArrIn(gref(f)), unset: (f) => { delete rt.globals[toStr(I(f))]; },
+      set: (f, v) => { const g = gref(f); const old = g.v; g.v = v; if (old !== v) dropRef(old); },
+      bind: (f, r) => { const k = toStr(I(f)); const old = rt.globals[k]; rt.globals[k] = r; if (old && old !== r) dropRef(old.v); }, ref: gref,
+      arr: (f) => writableArrIn(gref(f)), unset: (f) => { const k = toStr(I(f)); const old = rt.globals[k]; delete rt.globals[k]; if (old) dropRef(old.v); },
       modify: (f, fn) => { const r = gref(f); return (r.v = fn(r.v)); },
     };
   }
@@ -152,6 +162,26 @@ function indexOps(P, I) {
       if (!I) noIdx();
       return readIndex(base, I(f), true);
     },
+    // isset($obj[k]) on an ArrayAccess object only asks offsetExists()
+    isset(f) {
+      const base = P.getq(f);
+      if (base === undefined || base === null) return undefined;
+      if (!I) noIdx();
+      const key = I(f);
+      if (base instanceof PHPObject && base.cls.ancestors.has('arrayaccess')) return toBool(callMethodName(base, 'offsetExists', [key])) ? true : undefined;
+      return readIndex(base, key, true);
+    },
+    // the element as a container being written to ($a[k]->p = v): a missing one is created as null
+    fetchW(f) {
+      const base = P.getq(f);
+      if (!(base instanceof PHPArray) && base !== undefined && base !== null) return lv.get(f);
+      const c = P.arr(f);
+      if (!(c instanceof PHPArray)) return lv.get(f);
+      if (!I) { c.push(null); return null; }
+      const k = normKey(I(f));
+      if (!c.has(k)) { c.set(k, null); return null; }
+      return c.get(k);
+    },
     peek(f) {
       const b = P.peek ? P.peek(f) : P.getq(f);
       if (b instanceof PHPArray) return readIndex(b, I ? I(f) : null, true);
@@ -169,14 +199,17 @@ function indexOps(P, I) {
       }
       const c = P.arr(f);
       if (c instanceof PHPArray) {
-        if (I) c.set(normKey(I(f)), v); else c.push(v);
+        if (I) { const k = normKey(I(f)); const old = c.get(k); c.set(k, v); if (old !== v && old !== null && typeof old === 'object') dropRef(old); } else c.push(v);
         return;
       }
       if (c instanceof PHPObject) { arrayAccessSet(c, I ? I(f) : null, v); return; }
     },
     bind(f, ref) {
       const c = P.arr(f);
-      if (c instanceof PHPArray) { if (I) c.setRaw(normKey(I(f)), ref); else c.push(ref); return; }
+      if (c instanceof PHPArray) {
+        if (I) { const k = normKey(I(f)); const old = c.getRaw(k); c.setRaw(k, ref); if (old !== undefined && old !== ref) dropRef(old instanceof Ref ? old.v : old); } else c.push(ref);
+        return;
+      }
       throwError('Error', 'Cannot assign by reference to overloaded object');
     },
     ref(f) {
@@ -230,7 +263,7 @@ function indexOps(P, I) {
     unset(f) {
       const cur = P.getq(f);
       if (cur === undefined || cur === null) return;
-      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f)); const old = c.get(k); c.delete(k); gcCheck(old); return; }
+      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f), KEY_UNSET); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
       if (cur instanceof PHPObject) { if (cur.cls.ancestors.has('arrayaccess')) callMethodName(cur, 'offsetUnset', [I(f)]); else throwError('Error', `Cannot use object of type ${cur.cls.name} as array`); return; }
       if (typeof cur === 'string') throwError('Error', 'Cannot unset string offsets');
     },
@@ -280,28 +313,30 @@ function arrayAccessSet(o, k, v) {
 function lvProp(n) {
   const O = isLvalNode(n.o) ? cLval(n.o) : lvTemp(n.o);
   const N = typeof n.name === 'string' ? null : cExpr(n.name);
-  const lv = propOps(O, N, typeof n.name === 'string' ? n.name : null, n.nullsafe);
+  const nullsafe = n.nullsafe ? (n.short ? 'short' : true) : false;
+  const lv = propOps(O, N, typeof n.name === 'string' ? n.name : null, nullsafe);
   lv.place = (f) => {
     const op = O.place ? O.place(f) : constPlace(O.get(f));
     const name = N ? toStr(N(f)) : null;
-    return propOps(op, null, N ? name : n.name, n.nullsafe);
+    return propOps(op, null, N ? name : n.name, nullsafe);
   };
   return lv;
 }
 function propOps(O, N, sname, nullsafe) {
   const nm = N ? (f) => toStr(N(f)) : () => sname;
+  const fetchO = (f) => (O.fetchW ? O.fetchW(f) : O.get(f));
   const objW = (f, name) => {
-    const o = O.get(f);
+    const o = fetchO(f);
     if (o instanceof PHPObject) return o;
     if (o === null || o === undefined) throwError('Error', `Attempt to assign property "${name}" on null`);
-    throwError('Error', `Attempt to assign property "${name}" on ${typeOf(o)}`);
+    throwError('Error', `Attempt to assign property "${name}" on ${valueName(o)}`);
   };
   return {
     get(f) {
       const o = O.get(f);
       if (o instanceof PHPObject) return readProp(o, nm(f), f);
-      if ((o === null || o === undefined)) { if (nullsafe) return null; warn(`Attempt to read property "${nm(f)}" on null`); return null; }
-      warn(`Attempt to read property "${nm(f)}" on ${typeOf(o)}`); return null;
+      if ((o === null || o === undefined)) { if (nullsafe) { if (nullsafe === 'short') throw NULLSAFE_SHORT; return null; } warn(`Attempt to read property "${nm(f)}" on null`); return null; }
+      warn(`Attempt to read property "${nm(f)}" on ${valueName(o)}`); return null;
     },
     getq(f) {
       const o = O.getq(f);
@@ -316,12 +351,24 @@ function propOps(O, N, sname, nullsafe) {
     set(f, v) { const name = nm(f); writeProp(objW(f, name), name, v, f); },
     bind(f, ref) { const name = nm(f); const o = objW(f, name); bindProp(o, name, ref, f); },
     ref(f) { const name = nm(f); return propRef(objW(f, name), name, f); },
+    fetchW(f) {
+      const name = nm(f);
+      const o = fetchO(f);
+      if (!(o instanceof PHPObject)) throwError('Error', `Attempt to modify property "${name}" on ${valueName(o)}`);
+      // handled by __get, or declared (maybe inaccessible or unset): read as usual
+      if (o.cls.methods.has('__get')) return readProp(o, name, f);
+      const v = readPropQuiet(o, name, f);
+      if (v !== undefined) return v;
+      if (o.cls.props.has(name)) return readProp(o, name, f);
+      writeProp(o, name, null, f); // a dynamic property is created
+      return null;
+    },
     arr(f) {
       const name = nm(f);
-      const o = O.get(f);
+      const o = fetchO(f);
       if (!(o instanceof PHPObject)) {
         if (o === null || o === undefined) throwError('Error', `Attempt to modify property "${name}" on null`);
-        throwError('Error', `Attempt to modify property "${name}" on ${typeOf(o)}`);
+        throwError('Error', `Attempt to modify property "${name}" on ${valueName(o)}`);
       }
       return propArr(o, name, f);
     },
@@ -348,15 +395,17 @@ function spropOps(C, N, sname) {
   const n = { name: sname };
   const nm = N ? (f) => toStr(N(f)) : () => n.name;
   const info = (f) => findStaticProp(C(f), nm(f), f);
+  // (asymmetric visibility, PHP 8.4)
+  const winfo = (f, op) => { const i = info(f); if (i.setVis && !setAccessible(i, f.cls)) asymError(i, op, f); return i; };
   return {
     get: (f) => info(f).ref.v,
     getq: (f) => { const cls = C(f); const i = lookupStaticProp(cls, nm(f)); return i ? i.ref.v : undefined; },
-    set: (f, v) => { const i = info(f); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
-    bind: (f, r) => { info(f).ref = r; },
-    ref: (f) => info(f).ref,
-    arr: (f) => writableArrIn(info(f).ref),
+    set: (f, v) => { const i = winfo(f, 'modify'); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
+    bind: (f, r) => { winfo(f, 'indirectly modify').ref = r; },
+    ref: (f) => winfo(f, 'indirectly modify').ref,
+    arr: (f) => writableArrIn(winfo(f, 'indirectly modify').ref),
     unset: () => throwError('Error', 'Attempt to unset static property'),
-    modify: (f, fn) => { const i = info(f); const nv = fn(i.ref.v); i.ref.v = i.type ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return nv; },
+    modify: (f, fn) => { const i = winfo(f, 'indirectly modify'); const nv = fn(i.ref.v); i.ref.v = i.type ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return nv; },
   };
 }
 
@@ -365,7 +414,6 @@ function lvList(n) {
     if (!it) return null;
     return { K: it.key ? cExpr(it.key) : null, L: cLval(it.v), byRef: it.byRef };
   });
-  const keyed = items.some((it) => it && it.K);
   const assign = (f, v, srcLv) => {
     let idx = 0;
     for (const it of items) {
@@ -373,7 +421,19 @@ function lvList(n) {
       const key = it.K ? it.K(f) : idx++;
       if (it.byRef) {
         if (!srcLv) throwError('Error', 'Cannot assign reference to non referenceable value');
+        if (typeof v === 'string' && v !== '') throwError('Error', 'Cannot create references to/from string offsets');
         const c = srcLv.arr(f);
+        if (c instanceof PHPObject) {
+          if (!c.cls.ancestors.has('arrayaccess')) throwError('Error', `Cannot use object of type ${c.cls.name} as array`);
+          rt.lastRetRef = null;
+          const val = callMethodName(c, 'offsetGet', [key]);
+          const r = rt.lastRetRef; rt.lastRetRef = null;
+          // (&offsetGet() returns a reference to bind to)
+          if (r !== null && r !== NOREF && r.v === val) { it.L.bind(f, r); continue; }
+          notice(`Indirect modification of overloaded element of ${c.cls.name} has no effect`);
+          it.L.bind(f, new Ref(cp(val)));
+          continue;
+        }
         const k = normKey(key);
         let slot = c.getRaw(k);
         if (!(slot instanceof Ref)) { slot = new Ref(slot === undefined ? null : slot); c.setRaw(k, slot); }
@@ -391,7 +451,6 @@ function lvList(n) {
       else it.L.set(f, cp(val));
     }
   };
-  void keyed;
   const bad = () => throwError('Error', 'Cannot use list() in this context');
   return { listAssign: assign, set: (f, v) => assign(f, v, null), get: bad, getq: bad, ref: bad, bind: bad, arr: bad, unset: bad, modify: bad, hasRef: items.some((it) => it && it.byRef) };
 }
@@ -407,14 +466,17 @@ export function cClassRef(c) {
       if (!f.cls.parent) throwError('Error', 'Cannot use "parent" when current class scope has no parent');
       return f.cls.parent;
     };
-    let cached = null;
-    return () => cached || (cached = lookupClass(c));
+    let cached = null, cachedEpoch = -1; // see compileNamedCall
+    return () => {
+      if (cachedEpoch !== rt.epoch || !cached) { cached = lookupClass(c); cachedEpoch = rt.epoch; }
+      return cached;
+    };
   }
   const E = cExpr(c);
   return (f) => {
     const v = E(f);
     if (v instanceof PHPObject) return v.cls;
     if (typeof v === 'string') return lookupClass(v);
-    throwError('Error', 'Cannot use value of type ' + typeOf(v) + ' as class name');
+    throwError('Error', 'Class name must be a valid object or a string');
   };
 }

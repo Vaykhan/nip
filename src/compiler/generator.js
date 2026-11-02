@@ -1,34 +1,75 @@
 // Generator-mode compilation: bodies of functions containing yield become JS generator functions.
+//
+// The same compiler builds "fiber mode" bodies (fiberBody()): code running inside a Fiber, where
+// every call to a user function may suspend. There, calls are treated like yields: hoisted out of
+// their expression and run with yield* (see PendingCall in expr.js), and Fiber::suspend() is a
+// JS yield that unwinds to the Fiber driver in runtime/fibers.js.
 
 import { cp, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
-import { toBool, toStr } from '../convert.js';
+import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq, strictEq } from '../compare.js';
-import { hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
+import { CALL_KINDS, hasSuspend, hasYield, isLvalNode, mkBreak, mkCont, RETURN } from './common.js';
 import { cLval } from './lvalue.js';
-import { cExpr, matchRepr } from './expr.js';
-import { cStmt, iterateObject } from './stmt.js';
+import { cExpr, compileDeferred, matchRepr, PendingCall } from './expr.js';
+import { cStmt, GOTO, gotoTargets, iterateObject, tick } from './stmt.js';
 import { rt } from '../runtime/state.js';
-import { throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { valueName } from '../runtime/functions.js';
+import { notice, throwError, toThrowSig, warn } from '../runtime/errors.js';
+import { callFunctionG } from '../runtime/functions.js';
 import { callMethodName } from '../runtime/classes.js';
 import { GenThrow } from '../runtime/generators.js';
+import { FiberExit } from '../runtime/fibers.js';
 import { generatorClass } from '../runtime/native-classes.js';
 
-function genWrap(fn) { return function* (f) { return fn(f); }; }
+let fiberMode = false;
+const suspends = (n) => (fiberMode ? hasSuspend(n) : hasYield(n));
+// the fiber-mode body of a (non-generator) user function, compiled on first use
+export function fiberBody(fn) {
+  const d = fn.decl;
+  if (!d._fbody) {
+    const prev = fiberMode;
+    fiberMode = true;
+    try { d._fbody = cStmtsG(d.body || []); } finally { fiberMode = prev; }
+  }
+  return d._fbody;
+}
+export const FIBER_SUSPEND = { suspend: true };
+function* runPending(p) {
+  if (p.fn.suspends) { // Fiber::suspend()
+    if (rt.currentFiber && rt.currentFiber.fiber.closing) throwError('FiberError', 'Cannot suspend in a force-closed fiber');
+    const sent = yield p.args.length ? (p.args[0] instanceof Ref ? p.args[0].v : p.args[0]) : null;
+    if (sent instanceof GenThrow) throw new ThrowSig(sent.obj);
+    return sent === undefined ? null : sent;
+  }
+  return yield* callFunctionG(p.fn, p.args, p.thisObj, p.cls, p.sc, p.closure);
+}
+
+// wraps a non-yielding body so it can be driven like a generator
+function genWrap(fn) {
+  const g = function* (f) { return fn(f); };
+  if (fn.labels) { g.labels = fn.labels; g.enter = function* (f, label) { return fn.enter(f, label); }; }
+  return g;
+}
 
 function cExprG(n) {
-  if (!hasYield(n)) return genWrap(cExpr(n));
+  if (!suspends(n)) return genWrap(cExpr(n));
   switch (n.k) {
     case 'Yield': {
       const K = n.key ? cExprG(n.key) : null;
       const V = n.v ? cExprG(n.v) : null;
-      const Lv = n.v && isLvalNode(n.v) && !hasYield(n.v) ? cLval(n.v) : null;
+      const Lv = n.v && isLvalNode(n.v) && !suspends(n.v) ? cLval(n.v) : null;
+      const isCall = !!n.v && ['Call', 'MCall', 'SCall', 'NullsafeMCall'].includes(n.v.k);
       return function* (f) {
         const k = K ? yield* K(f) : undefined;
         let v = null, ref = null;
         if (V) {
           if (Lv && f.fn && f.fn.byRef) { ref = Lv.ref(f); v = ref.v; }
-          else v = cp(yield* V(f));
+          else if (f.fn && f.fn.byRef) {
+            // a by-reference generator: a function's returned reference, else a notice
+            rt.lastRetRef = null;
+            v = yield* V(f);
+            const rr = isCall ? rt.lastRetRef : null;
+            if (rr instanceof Ref) { ref = rr; v = rr.v; } else { notice('Only variable references should be yielded by reference'); v = cp(v); }
+          } else v = cp(yield* V(f));
         }
         const sent = yield [k, v, false, ref];
         if (sent instanceof GenThrow) throw new ThrowSig(sent.obj);
@@ -48,7 +89,9 @@ function cExprG(n) {
           if (g.done) return g.ret;
           g.ensure(true);
           while (!g.done) {
-            const sent = yield [g.key, g.cur, true];
+            let sent;
+            // destroying this generator destroys the one it delegates to first
+            try { sent = yield [g.key, g.cur, true]; } catch (e) { if (e instanceof FiberExit) g.destroy(); throw e; }
             if (sent instanceof GenThrow) g.throwIn(sent.obj); else g.send(sent === undefined ? null : sent);
           }
           return g.ret;
@@ -68,7 +111,7 @@ function cExprG(n) {
     case 'And': { const A = cExprG(n.a), B = cExprG(n.b); return function* (f) { return toBool(yield* A(f)) && toBool(yield* B(f)); }; }
     case 'Or': { const A = cExprG(n.a), B = cExprG(n.b); return function* (f) { return toBool(yield* A(f)) || toBool(yield* B(f)); }; }
     case 'Coalesce': {
-      const A = isLvalNode(n.a) && !hasYield(n.a) ? genWrap(cLval(n.a).getq) : cExprG(n.a);
+      const A = isLvalNode(n.a) && !suspends(n.a) ? genWrap(cLval(n.a).getq) : cExprG(n.a);
       const B = cExprG(n.b);
       return function* (f) { const v = yield* A(f); return v === undefined || v === null ? yield* B(f) : v; };
     }
@@ -93,39 +136,89 @@ function cExprG(n) {
   const replace = (node) => {
     if (!node || typeof node !== 'object') return node;
     if (Array.isArray(node)) return node.map(replace);
-    if (!hasYield(node)) return node;
-    if (['Yield', 'YieldFrom', 'Ternary', 'And', 'Or', 'Coalesce', 'Match'].includes(node.k)) {
+    if (!suspends(node)) return node;
+    if (['Yield', 'YieldFrom', 'Ternary', 'And', 'Or', 'Coalesce', 'Match'].includes(node.k) || (fiberMode && CALL_KINDS.has(node.k))) {
       const id = 't' + (genTempCounter++) + '_' + (tempId++);
       hoisted.push({ id, G: cExprG(node) });
       return { k: 'Temp', id, l: node.l };
     }
     const copy = {};
     for (const key in node) { if (key === '_hy') continue; copy[key] = (key === 'l' || key === 'k') ? node[key] : replace(node[key]); }
-    copy._hy = false;
+    copy._hy = false; copy._hs = false;
     return copy;
   };
-  const replaced = replace(n);
-  const E = cExpr(replaced);
+  // a call in fiber mode: hoist suspending arguments, then run the call itself with yield*
+  const isCall = fiberMode && CALL_KINDS.has(n.k);
+  let replaced;
+  if (isCall) {
+    replaced = {};
+    for (const key in n) { if (key === '_hy' || key === '_hs') continue; replaced[key] = (key === 'l' || key === 'k') ? n[key] : replace(n[key]); }
+    replaced._hy = false; replaced._hs = false;
+  } else replaced = replace(n);
+  const E = isCall ? compileDeferred(() => cExpr(replaced)) : cExpr(replaced);
   return function* (f) {
     if (!f.temps) f.temps = Object.create(null);
     for (const h of hoisted) f.temps[h.id] = yield* h.G(f);
-    return E(f);
+    const v = E(f);
+    return v instanceof PendingCall ? yield* runPending(v) : v;
   };
 }
 let genTempCounter = 0;
 
 export function cStmtsG(list) {
-  const fns = list.map(cStmtG).filter(Boolean);
+  const fns = [], nodes = [];
+  for (const s of list) { const c = cStmtG(s); if (c) { fns.push(c); nodes.push(s); } }
+  const targets = gotoTargets(fns, nodes);
+  if (targets) return labelledStmtsG(fns, nodes, targets);
   return function* (f) {
     for (let i = 0; i < fns.length; i++) { const r = yield* fns[i](f); if (r !== undefined) return r; }
     return undefined;
   };
 }
+// generator-mode version of labelledStmts() in stmt.js
+function labelledStmtsG(fns, nodes, targets) {
+  const n = fns.length;
+  const exec = function* (f, label) {
+    let i = 0;
+    for (;;) {
+      let r;
+      if (label !== null) {
+        const j = targets.get(label);
+        r = nodes[j].k === 'Label' ? undefined : yield* fns[j].enter(f, label);
+        i = j + 1; label = null;
+      } else {
+        if (i >= n) return undefined;
+        r = yield* fns[i++](f);
+      }
+      if (r !== undefined) {
+        if (r.t === GOTO && targets.has(r.label)) { label = r.label; continue; }
+        return r;
+      }
+    }
+  };
+  const run = function* (f) { return yield* exec(f, null); };
+  run.labels = new Set(targets.keys());
+  run.enter = exec;
+  return run;
+}
+function exposeLabelsG(fn, parts, enter) {
+  const labels = new Set();
+  for (const p of parts) if (p && p.labels) for (const l of p.labels) labels.add(l);
+  if (labels.size) { fn.labels = labels; fn.enter = enter; }
+  return fn;
+}
 function cBodyG(n) { return n.k === 'Block' ? cStmtsG(n.body) : cStmtsG([n]); }
 
 function cStmtG(n) {
+  const c = cStmtG0(n);
+  if (!c || !n.ticks || !suspends(n)) return c;
+  const t = function* (f) { const r = yield* c(f); tick(n.ticks); return r; };
+  if (c.labels) { t.labels = c.labels; t.enter = function* (f, label) { const r = yield* c.enter(f, label); tick(n.ticks); return r; }; }
+  return t;
+}
+function cStmtG0(n) {
   if (!n) return null;
-  if (!hasYield(n)) { const s = cStmt(n); return s ? genWrap(s) : null; }
+  if (!suspends(n)) { const s = cStmt(n); return s ? genWrap(s) : null; }
   const l = n.l;
   switch (n.k) {
     case 'Block': return cStmtsG(n.body);
@@ -139,11 +232,12 @@ function cStmtG(n) {
       const conds = [cExprG(n.c), ...n.elifs.map((e) => cExprG(e.c))];
       const bodies = [cBodyG(n.then), ...n.elifs.map((e) => cBodyG(e.body))];
       const els = n.els ? cBodyG(n.els) : null;
-      return function* (f) {
+      const parts = [...bodies, els];
+      return exposeLabelsG(function* (f) {
         rt.line = l;
         for (let i = 0; i < conds.length; i++) if (toBool(yield* conds[i](f))) return yield* bodies[i](f);
         if (els) return yield* els(f);
-      };
+      }, parts, function* (f, label) { return yield* parts.find((p) => p && p.labels && p.labels.has(label)).enter(f, label); });
     }
     case 'While': {
       const C = cExprG(n.c), B = cBodyG(n.body);
@@ -227,19 +321,24 @@ function cStmtG(n) {
     }
     case 'Switch': {
       const E = cExprG(n.e);
-      const flat = []; const starts = []; let defIdx = -1;
+      const flat = [], flatNodes = []; const starts = []; let defIdx = -1;
       for (const c of n.cases) {
         starts.push({ T: c.test ? cExprG(c.test) : null, at: flat.length });
         if (!c.test) defIdx = starts.length - 1;
-        for (const s of c.body) { const cs = cStmtG(s); if (cs) flat.push(cs); }
+        for (const s of c.body) { const cs = cStmtG(s); if (cs) { flat.push(cs); flatNodes.push(s); } }
       }
+      const targets = gotoTargets(flat, flatNodes);
       return function* (f) {
         const v = yield* E(f);
         let start = -1;
         for (const s of starts) if (s.T && looseEq(v, yield* s.T(f))) { start = s.at; break; }
         if (start < 0) { if (defIdx < 0) return; start = starts[defIdx].at; }
         for (let i = start; i < flat.length; i++) {
-          const r = yield* flat[i](f);
+          let r = yield* flat[i](f);
+          while (r !== undefined && r.t === GOTO && targets && targets.has(r.label)) {
+            i = targets.get(r.label);
+            r = flatNodes[i].k === 'Label' ? undefined : yield* flat[i].enter(f, r.label);
+          }
           if (r !== undefined) {
             if (r.t === 1 || r.t === 2) { if (r.n > 1) return r.t === 1 ? mkBreak(r.n - 1) : mkCont(r.n - 1); return; }
             return r;
@@ -251,13 +350,23 @@ function cStmtG(n) {
       const B = cBodyG(n.body);
       const catches = n.catches.map((c) => ({ types: c.types.map((t) => t.toLowerCase()), v: c.v, B: cBodyG(c.body) }));
       const F = n.fin ? cBodyG(n.fin) : null;
-      return function* (f) {
+      const run = function* (f, label) { // label: see the Try statement in stmt.js
         let res;
         try {
-          res = yield* B(f);
+          const c = label === undefined ? null : catches.find((x) => x.B.labels && x.B.labels.has(label));
+          if (c) {
+            if (!F) return yield* c.B.enter(f, label);
+            try { res = yield* c.B.enter(f, label); }
+            finally { const fr = yield* F(f); if (fr !== undefined) return fr; } // eslint-disable-line no-unsafe-finally
+            return res;
+          }
+          res = label === undefined ? yield* B(f) : yield* B.enter(f, label);
         } catch (e) {
           const sig = toThrowSig(e);
-          if (!sig) throw e;
+          if (!sig) {
+            if (F && e instanceof FiberExit) { const fr = yield* F(f); if (fr !== undefined) return fr; }
+            throw e;
+          }
           const obj = sig.obj;
           for (const c of catches) {
             if (c.types.some((t) => obj.cls.ancestors.has(t))) {
@@ -276,6 +385,7 @@ function cStmtG(n) {
         if (F) { const fr = yield* F(f); if (fr !== undefined) return fr; }
         return res;
       };
+      return exposeLabelsG(function* (f) { return yield* run(f, undefined); }, [B, ...catches.map((c) => c.B)], run);
     }
   }
   // fallback: statements that only contain yields in expressions

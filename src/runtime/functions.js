@@ -1,22 +1,26 @@
 // User function calls: frames, parameter binding, type checks and coercion, returns.
 
 import {
-  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, PHPArray, PHPObject, Ref
-} from '../values.js';
-import { floatToInt, toBool, toInt, toStr, typeOf } from '../convert.js';
-import { Frame, RETURN } from '../compiler/common.js';
+  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, objHandles, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
+import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
+import { Frame, hasSuspend, RETURN } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { cStmts } from '../compiler/stmt.js';
-import { cStmtsG } from '../compiler/generator.js';
-import { rt } from './state.js';
-import { deprecated, throwError, warn } from './errors.js';
+import { cStmtsG, fiberBody } from '../compiler/generator.js';
+import { E_USER_DEPRECATED, E_USER_WARNING, rt } from './state.js';
+import { deprecated, PRELUDE_FILE, raise, throwError, warn } from './errors.js';
 import { findMethod, isCallable } from './callables.js';
-import { gcAfterCall } from './gc.js';
+import { frameExit, gcAfterCall } from './gc.js';
 import { makeGenerator } from './generators.js';
+import { writeProp } from './classes.js';
 
+function argsHoldObjects(args) {
+  for (let i = 0; i < args.length; i++) { const a = args[i]; if (a !== null && typeof a === 'object' && (a instanceof PHPObject || (a instanceof Ref && a.v instanceof PHPObject))) return true; }
+  return false;
+}
 export function fnDisplayName(fn) {
   if (!fn) return '';
-  if (fn.isMethod && fn.cls) return fn.cls.name + '::' + fn.name;
+  if (fn.isMethod && fn.cls) { const cn = fn.cls.name, z = cn.indexOf('\0'); return (z >= 0 ? cn.slice(0, z) : cn) + '::' + fn.name; } // (anonymous classes: up to the NUL)
   return fn.name;
 }
 
@@ -30,21 +34,61 @@ export function compileFunction(decl, opts = {}) {
   const vi = params.findIndex((p) => p.variadic);
   const fn = {
     name: decl.name, decl, params, byRef: decl.byRef, ret: decl.ret, isGen: decl.isGen,
+    isCtor: !!opts.method && decl.name.toLowerCase() === '__construct', // see frameExit()
     file: decl.file, line: decl.l, strict: decl.strict,
     refs: refs.some(Boolean) ? refs : null, refRest: vi >= 0 && params[vi].byRef ? vi : null,
-    body: null, statics: null, isMethod: !!opts.method, cls: opts.cls || null, isClosure: decl.name === '{closure}',
-    required: params.filter((p) => !p.def && !p.variadic).length,
+    body: null, statics: null, isMethod: !!opts.method, cls: opts.cls || null, isClosure: !!(decl.closure || decl.arrow),
+    required: params.reduce((r, p, i) => (!p.def && !p.variadic ? i + 1 : r), 0), // optional params before required ones are required
     simple: params.every((p) => !p.byRef && !p.variadic && !p.type && !p.promote),
   };
   if (fn.refs && fn.refRest !== null) fn.refs = refs.slice(0, vi);
   if (fn.refRest !== null && !fn.refs) fn.refs = [];
+  if (decl.attrs && rt.phpVersion >= 80400) {
+    const nd = rt.phpVersion >= 80500 && attrNamed(decl.attrs, 'nodiscard');
+    if (nd) fn.noDiscard = attrArg(nd, 0, 'message', null);
+    const dep = attrNamed(decl.attrs, 'deprecated');
+    if (dep) fn.deprecated = dep;
+  }
   return fn;
+}
+export const attrNamed = (attrs, lname) => (attrs ? attrs.find((a) => a.name.replace(/^\\/, '').toLowerCase() === lname) : undefined);
+// an argument of an engine attribute, by position or name ('' if missing); evaluated in the scope
+// of the class (constant expressions)
+function attrArg(a, i, name, cls) {
+  const arg = (a.args || []).find((x) => x.name === name) || ((a.args || [])[i] && !(a.args[i].name) ? a.args[i] : null);
+  if (!arg) return '';
+  const e = arg.e;
+  const v = e.k === 'Lit' ? e.v : cExpr(e)(new Frame(null, null, cls || null, cls || null));
+  return v === null || v === undefined ? '' : toStr(v);
+}
+// #[\Deprecated] (PHP 8.4): " since 1.2, use x() instead"
+export function deprecationSuffix(a, cls) {
+  const message = attrArg(a, 0, 'message', cls), since = attrArg(a, 1, 'since', cls);
+  return (since ? ' since ' + since : '') + (message ? ', ' + message : '');
+}
+export function deprecatedFn(fn, cls, args) {
+  const owner = fn.isMethod ? (cls || fn.cls) : null;
+  let name = fn.name;
+  const ln = name.toLowerCase();
+  if ((ln === '__call' || ln === '__callstatic') && args && typeof args[0] === 'string') name = args[0];
+  const suffix = deprecationSuffix(fn.deprecated, owner || fn.cls);
+  raise(E_USER_DEPRECATED, owner ? `Method ${owner.name}::${name}() is deprecated${suffix}` : `Function ${name}() is deprecated${suffix}`);
+}
+// #[\NoDiscard] (PHP 8.5): the warning for a call whose result isn't used (given before the call)
+export function noDiscardWarn(fn, args, cls) {
+  const suffix = fn.noDiscard ? ', ' + fn.noDiscard : '';
+  let name = fn.name;
+  const ln = name.toLowerCase();
+  if ((ln === '__call' || ln === '__callstatic') && typeof args[0] === 'string') name = args[0];
+  const owner = fn.isMethod ? (cls || fn.cls) : null;
+  raise(E_USER_WARNING, owner ? `The return value of method ${owner.name}::${name}() should either be used or intentionally ignored by casting it as (void)${suffix}`
+    : `The return value of function ${name}() should either be used or intentionally ignored by casting it as (void)${suffix}`);
 }
 export let compilingByRef = false;
 export function compileBody(fn) {
   const d = fn.decl;
   const saved = compilingByRef;
-  compilingByRef = !!d.byRef;
+  compilingByRef = !!d.byRef && !d.isGen; // (in a generator, & means yielding by reference)
   try {
     if (d.isGen) { if (!d._gbody) d._gbody = cStmtsG(d.body || []); fn.genBody = d._gbody; return null; }
     if (!d._body) d._body = cStmts(d.body || []);
@@ -76,15 +120,56 @@ function throwInCallee(fn, f, cls, msg) {
 function argCountError(fn, given, f) {
   const max = fn.params.some((p) => p.variadic) ? Infinity : fn.params.length;
   const word = fn.required === max ? 'exactly' : 'at least';
+  // prelude functions stand in for internal ones, which word the error differently
+  if (fn.file === PRELUDE_FILE) throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${word} ${fn.required} argument${fn.required === 1 ? '' : 's'}, ${given} given`);
   const top = rt.stack[rt.stack.length - 1];
-  const where = top && top.native === true ? '' : ` in ${rt.file} on line ${rt.line}`;
+  // the caller's location is shown for calls from user code (call_user_func() compiles to one)
+  const viaBuiltin = top && top.native === true && !/^call_user_func(_array)?$/.test(top.fn.name);
+  const where = viaBuiltin ? '' : ` in ${rt.file} on line ${rt.line}`;
   throwInCallee(fn, f, 'ArgumentCountError', `Too few arguments to function ${fnDisplayName(fn)}(), ${given} passed${where} and ${word} ${fn.required} expected`);
 }
 
+// a skipped optional parameter before a named argument (filled with its default, see bindParams)
+const DEFAULT_ARG = {};
+// named arguments are moved to their parameters' positions (as PHP sends them); those of no
+// parameter stay named, for a variadic parameter
+function placeNamed(fn, f, args) {
+  const ps = fn.params, pos = args.slice(), extra = new Map();
+  const vi = ps.findIndex((p) => p.variadic);
+  let max = pos.length;
+  for (const [k, v] of args.named) {
+    const idx = ps.findIndex((p) => p.name === k && !p.variadic);
+    if (idx < 0) { if (vi >= 0) { extra.set(k, v); continue; } throwError('Error', `Unknown named parameter $${k}`); }
+    if (idx < args.length || pos[idx] !== undefined) throwError('Error', `Named parameter $${k} overwrites previous argument`);
+    if (ps[idx].byRef && !(v instanceof Ref)) throwError('Error', `${fnDisplayName(fn)}(): Argument #${idx + 1} ($${k}) could not be passed by reference`);
+    pos[idx] = v;
+    if (idx + 1 > max) max = idx + 1;
+  }
+  for (let i = args.length; i < max; i++) {
+    if (pos[i] !== undefined) continue;
+    if (!ps[i].def) throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${ps[i].name}) not passed`);
+    pos[i] = DEFAULT_ARG;
+    pos.defaults = true;
+  }
+  if (extra.size) pos.named = extra;
+  return pos;
+}
+// strict_types of the call being made: the calling file's, except for calls made by builtins
+// (callbacks), which are never strict
+export function callerStrict() {
+  const top = rt.stack[rt.stack.length - 1];
+  if (top !== undefined && top.native === true) return false;
+  return rt.frame && rt.frame.fn ? !!rt.frame.fn.strict : rt.mainStrict;
+}
 function bindParams(fn, f, args) {
+  if (args.named !== undefined) args = placeNamed(fn, f, args);
   const ps = fn.params, np = ps.length, na = args.length;
   const named = args.named;
-  if (fn.simple === true && na >= np && named === undefined) {
+  if (na > np && fn.file === PRELUDE_FILE && !(np && ps[np - 1].variadic)) {
+    // internal functions reject extra arguments
+    throwInCallee(fn, f, 'ArgumentCountError', `${fnDisplayName(fn)}() expects ${fn.required === np ? 'exactly' : 'at most'} ${np} argument${np === 1 ? '' : 's'}, ${na} given`);
+  }
+  if (fn.simple === true && na >= np && named === undefined && args.defaults === undefined) {
     const vars = f.vars;
     for (let i = 0; i < np; i++) {
       let v = args[i];
@@ -93,7 +178,7 @@ function bindParams(fn, f, args) {
     }
     return;
   }
-  const strict = rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict;
+  const strict = callerStrict();
   for (let i = 0; i < np; i++) {
     const p = ps[i];
     if (p.variadic) {
@@ -108,10 +193,9 @@ function bindParams(fn, f, args) {
       break;
     }
     let v;
-    if (i < na) v = args[i];
-    else if (named !== undefined && named.has(p.name)) v = named.get(p.name);
+    if (i < na && args[i] !== DEFAULT_ARG) v = args[i];
     else if (p.def) {
-      v = p.def(f);
+      v = p.defNode.kind === 'Lit' ? p.def(f) : evalDefault(fn, f, p);
       if (p.type && v !== null) v = coerceParam(fn, p, i, v, false, f);
       f.vars[p.name] = new Ref(cp(v));
       if (p.promote) promoteParam(f, p, v);
@@ -119,6 +203,7 @@ function bindParams(fn, f, args) {
     } else argCountError(fn, na, f);
     if (p.byRef) {
       if (!(v instanceof Ref)) v = new Ref(v);
+      if (p.type !== null && p.type !== undefined) { const c = coerceParam(fn, p, i, v.v, strict, f); if (c !== v.v) v.v = c; }
       f.vars[p.name] = v;
       if (p.promote) promoteParam(f, p, v.v);
       continue;
@@ -129,28 +214,57 @@ function bindParams(fn, f, args) {
     f.vars[p.name] = new Ref(v);
     if (p.promote) promoteParam(f, p, v);
   }
-  if (named !== undefined) {
-    for (const k of named.keys()) {
-      const idx = ps.findIndex((p) => p.name === k);
-      if (idx < 0 && !ps.some((p) => p.variadic)) throwError('Error', `Unknown named parameter $${k}`);
-      if (idx >= 0 && idx < na && !ps[idx].variadic) throwError('Error', `Named parameter $${k} overwrites previous argument`);
-    }
-  }
+  // func_get_args() sees the defaults of the parameters named arguments skipped
+  for (let i = 0; i < na; i++) if (args[i] === DEFAULT_ARG) args[i] = f.vars[ps[i].name].v;
+  return args;
+}
+// a default that isn't a literal is evaluated in the callee: errors show it in the trace, at the
+// default's line
+function evalDefault(fn, f, p) {
+  const savedLine = rt.line, savedFile = rt.file;
+  f.callLine = savedLine; f.callFile = savedFile;
+  rt.stack.push(f);
+  rt.file = fn.file; if (p.defNode.l) rt.line = p.defNode.l;
+  try { return p.def(f); }
+  finally { rt.stack.pop(); rt.line = savedLine; rt.file = savedFile; }
 }
 function promoteParam(f, p, v) {
   const obj = f.this;
   if (!obj) return;
   const info = obj.cls.props.get(p.name);
+  if (info && info.hooks) { writeProp(obj, p.name, v, f); return; } // (through the set hook)
   obj.props.set(info ? info.key : p.name, cp(v));
 }
 
 export const FAIL = { fail: true };
-export function typeStr(t) {
-  const one = (a) => (typeof a === 'string' ? a : '(' + a.inter.join('&') + ')');
-  if (t.alts.length === 1 && typeof t.alts[0] === 'object') return t.alts[0].inter.join('&') + (t.nullable ? '|null' : '');
-  const s = t.alts.map(one).join('|');
-  if (t.nullable) return t.alts.length === 1 && t.alts[0] !== 'mixed' ? '?' + s : (t.alts[0] === 'mixed' ? s : s + '|null');
-  return s;
+// Type as PHP prints it (zend_type_to_string): class types in declaration order, then builtin
+// types in a fixed order, then null ("?T" for a single type). In errors, `iterable` is shown as
+// Traversable|array; Reflection keeps it (keepIterable). With a class scope, self/parent are
+// resolved to class names (error messages); without one they stay as written (Reflection).
+const BUILTIN_TYPE_ORDER = ['static', 'callable', 'object', 'array', 'string', 'int', 'float', 'bool', 'false', 'true', 'void', 'never'];
+// the members of a union type in PHP's order: class names (and intersections, as arrays), then
+// builtins; `iterable` stays itself when keepIterable, else becomes Traversable|array
+export function typeParts(t, scope, keepIterable) {
+  const names = [], builtins = new Set();
+  for (const a of t.alts) {
+    if (typeof a === 'object') names.push(a.inter);
+    else if (a === 'iterable') { if (keepIterable) builtins.add('iterable'); else { names.push('Traversable'); builtins.add('array'); } }
+    else if (BUILTIN_TYPE_ORDER.includes(a) || a === 'mixed') builtins.add(a);
+    else if (scope && a === 'self') names.push(scope.name);
+    else if (scope && a === 'parent' && scope.parent) names.push(scope.parent.name);
+    else names.push(a);
+  }
+  const order = keepIterable ? ['iterable', ...BUILTIN_TYPE_ORDER] : BUILTIN_TYPE_ORDER;
+  return names.concat(order.filter((b) => builtins.has(b) && !((b === 'false' || b === 'true') && builtins.has('bool'))));
+}
+export function typeStr(t, scope, keepIterable) {
+  const alts = t.alts;
+  if (alts.length === 1 && typeof alts[0] === 'object' && !t.nullable) return alts[0].inter.join('&');
+  if (alts.includes('mixed')) return 'mixed';
+  const parts = typeParts(t, scope, keepIterable).map((p) => (typeof p === 'string' ? p : '(' + p.join('&') + ')'));
+  let str = parts.join('|');
+  if (t.nullable) str = str && parts.length === 1 && !str.includes('&') ? '?' + str : (str ? str + '|null' : 'null');
+  return str;
 }
 function matchType(alt, v, ctx) {
   switch (alt) {
@@ -184,7 +298,7 @@ export function coerceType(type, v, strict, ctx) {
   const alts = type.alts;
   for (let i = 0; i < alts.length; i++) if (matchType(alts[i], v, ctx)) return v;
   const hasInt = alts.includes('int'), hasFloat = alts.includes('float'), hasStr = alts.includes('string');
-  const hasBool = alts.includes('bool') || (alts.includes('true') && toBool(v)) || (alts.includes('false') && !toBool(v));
+  const hasBool = alts.includes('bool'); // (true and false alone don't coerce)
   if (strict) {
     if (isInt(v) && hasFloat) return mkf(Number(v));
     return FAIL;
@@ -196,9 +310,10 @@ export function coerceType(type, v, strict, ctx) {
     return FAIL;
   }
   if (v instanceof Flt) {
-    if (hasInt && isFinite(v.v)) {
-      if (!Number.isInteger(v.v)) { if (!hasStr) { deprecated(`Implicit conversion from float ${fmtRepr(v.v)} to int loses precision`); return floatToInt(v.v); } }
-      else return floatToInt(v.v);
+    // (zend_parse_arg_long_weak: finite and in range; a fractional part is deprecated)
+    if (hasInt && isFinite(v.v) && v.v >= -9223372036854775808 && v.v < 9223372036854775808) {
+      if (!Number.isInteger(v.v)) deprecated(`Implicit conversion from float ${fmtRepr(v.v)} to int loses precision`);
+      return floatToInt(v.v);
     }
     if (hasStr) return toStr(v);
     if (hasBool) return toBool(v);
@@ -227,13 +342,31 @@ export function coerceType(type, v, strict, ctx) {
   if (v instanceof PHPObject && hasStr && findMethod(v.cls, '__tostring')) return toStr(v);
   return FAIL;
 }
-export function valueName(v) { return v === true ? 'true' : v === false ? 'false' : typeOf(v); }
+// internal functions (and the prelude functions standing in for them) accept null for scalar
+// parameters in coercive mode, with a deprecation (PHP 8.1)
+const NULL_TO_SCALAR = { string: '', int: 0, float: null, bool: false };
+function internalNullArg(fn, p, i) {
+  const alt = p.type.alts.find((a) => a in NULL_TO_SCALAR);
+  if (alt === undefined || p.type.alts.some((a) => typeof a !== 'string' || !(a in NULL_TO_SCALAR))) return undefined;
+  deprecated(`${fnDisplayName(fn)}(): Passing null to parameter #${i + 1} ($${p.name}) of type ${typeStr(p.type, fn.cls)} is deprecated`);
+  return alt === 'float' ? mkf(0) : NULL_TO_SCALAR[alt];
+}
 function coerceParam(fn, p, i, v, strict, f) {
-  const r = coerceType(p.type, v, strict, { cls: fn.cls, sc: f ? f.sc : (rt.frame ? rt.frame.sc : null) });
+  if (v === null && !strict && fn.file === PRELUDE_FILE && !p.type.nullable) { const d = internalNullArg(fn, p, i); if (d !== undefined) return d; }
+  const ctx = { cls: fn.cls, sc: f ? f.sc : (rt.frame ? rt.frame.sc : null) };
+  let r;
+  if (fn.file !== PRELUDE_FILE && (v instanceof Flt || typeof v === 'string') && !strict) {
+    // a user function's parameters are received in the callee: deprecations show its line
+    const sl = rt.line, sf = rt.file;
+    rt.line = fn.line; rt.file = fn.file;
+    try { r = coerceType(p.type, v, strict, ctx); } finally { rt.line = sl; rt.file = sf; }
+  } else r = coerceType(p.type, v, strict, ctx);
   if (r === FAIL) {
     const top = rt.stack[rt.stack.length - 1];
-    const where = top && top.native === true ? '' : `, called in ${rt.file} on line ${rt.line}`;
-    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1} ($${p.name}) must be of type ${typeStr(p.type)}, ${valueName(v)} given${where}`);
+    const viaBuiltin = top && top.native === true && !/^call_user_func(_array)?$/.test(top.fn.name);
+    const where = viaBuiltin || fn.file === PRELUDE_FILE ? '' : `, called in ${rt.file} on line ${rt.line}`;
+    // (variadic arguments have no parameter name)
+    throwInCallee(fn, f, 'TypeError', `${fnDisplayName(fn)}(): Argument #${i + 1}${p.variadic ? '' : ` ($${p.name})`} must be of type ${typeStr(p.type, fn.cls)}, ${valueName(v)} given${where}`);
   }
   return r;
 }
@@ -241,21 +374,29 @@ function checkReturn(fn, v, f, none) {
   const t = fn.ret;
   if (t.alts.length === 1) {
     const a = t.alts[0];
-    if (a === 'void' || a === 'mixed') return v;
+    if (a === 'void') return v;
     if (a === 'never') throwError('TypeError', `${fnDisplayName(fn)}(): never-returning function must not implicitly return`);
+    if (a === 'mixed' && !none) return v;
   }
-  const r = coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
-  if (r === FAIL) throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(t)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
+  // an implicit return satisfies only void
+  const r = none ? FAIL : coerceType(t, v, fn.strict, { cls: fn.cls, sc: f.sc });
+  if (r === FAIL) {
+    // static reads as the called class
+    const shown = t.alts.includes('static') && (f.sc || fn.cls) ? { ...t, alts: t.alts.map((a) => (a === 'static' ? (f.sc || fn.cls).name : a)) } : t;
+    throwError('TypeError', `${fnDisplayName(fn)}(): Return value must be of type ${typeStr(shown, fn.cls)}, ${none ? 'none' : valueName(v === undefined ? null : v)} returned`);
+  }
   return r;
 }
 export function coercePropType(info, v, clsName, name) {
   const r = coerceType(info.type, v, rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict, { cls: info.cls, sc: info.cls });
-  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type)}`);
+  // (self and parent are printed as declared)
+  if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type, null)}`);
   return r;
 }
 
 const MAX_DEPTH = 1000000;
 export function callFunction(fn, args, thisObj, cls, sc, closure) {
+  if (fn.deprecated !== undefined) { if (rt.deprecatedShown === fn) rt.deprecatedShown = null; else deprecatedFn(fn, cls, args); }
   if (fn.native !== undefined) {
     if (fn.isMethod) return callNativeMethod(fn, thisObj, args, sc);
     return callNative(fn, args);
@@ -265,7 +406,8 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
     f.closure = closure;
     if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
   }
-  bindParams(fn, f, args);
+  f.args = args; // (an error while binding shows the arguments in the trace)
+  args = bindParams(fn, f, args) || args;
   f.args = args;
   if (fn.isGen) return makeGenerator(fn, f);
   const body = fn.body || compileBody(fn);
@@ -274,8 +416,57 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   rt.frame = f; rt.file = fn.file;
   f.callLine = prevLine; f.callFile = prevFile;
   rt.stack.push(f);
+  const allocs = objHandles.allocs;
+  let r, ret;
+  try {
+    r = body(f);
+    ret = r === RETURN ? f.ret : null;
+    // the return type is checked in the callee (errors point at its return statement)
+    if (fn.ret !== null && fn.ret !== undefined) {
+      if (r !== RETURN && fn.decl && fn.decl.endLine) rt.line = fn.decl.endLine; // falling off the end: the closing brace
+      ret = checkReturn(fn, ret, f, r !== RETURN);
+    }
+  } catch (e) {
+    // an exception unwinds the call: its locals go too (not what the exception holds)
+    rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
+    if (e instanceof ThrowSig) { frameExit(f.vars, e.obj, fn.isCtor ? thisObj : null); if (f.ret !== null && typeof f.ret === 'object') frameExit([f.ret], e.obj); }
+    throw e;
+  }
+  rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--;
+  if (f.retRef) rt.lastRetRef = f.retRef; else if (fn.byRef) rt.lastRetRef = NOREF;
+  if (f.destr) gcAfterCall(f, ret);
+  // the locals are gone: objects only they held lose their handles (when objects were created
+  // during the call or passed to it)
+  if (allocs !== objHandles.allocs || argsHoldObjects(args)) frameExit(f.vars, ret, fn.isCtor ? thisObj : null);
+  return ret;
+}
+
+// fiber mode (see compiler/generator.js): like callFunction(), but runs the callee's fiber-mode
+// body, so it can suspend; builtins and generator functions are called normally
+export function* callFunctionG(fn, args, thisObj, cls, sc, closure) {
+  if (fn.native !== undefined || fn.isGen) return callFunction(fn, args, thisObj, cls, sc, closure);
+  // a body without calls can't suspend: run it normally
+  if (fn.mayCall === undefined) fn.mayCall = hasSuspend(fn.decl.body || []);
+  if (!fn.mayCall) return callFunction(fn, args, thisObj, cls, sc, closure);
+  const f = new Frame(fn, thisObj, cls, sc);
+  if (closure !== null && closure !== undefined) {
+    f.closure = closure;
+    if (closure.bound) for (const [k, v] of closure.bound) f.vars[k] = v instanceof Ref ? v : new Ref(cp(v));
+  }
+  f.args = args; // (an error while binding shows the arguments in the trace)
+  args = bindParams(fn, f, args) || args;
+  f.args = args;
+  const saved = compilingByRef;
+  compilingByRef = !!fn.decl.byRef;
+  let body;
+  try { body = fiberBody(fn); } finally { compilingByRef = saved; }
+  const prevFrame = rt.frame, prevLine = rt.line, prevFile = rt.file;
+  if (++rt.depth > MAX_DEPTH) { rt.depth = 0; throw new FatalSig(`Maximum function nesting level of '${MAX_DEPTH}' reached, aborting!`); }
+  rt.frame = f; rt.file = fn.file;
+  f.callLine = prevLine; f.callFile = prevFile;
+  rt.stack.push(f);
   let r;
-  try { r = body(f); }
+  try { r = yield* body(f); }
   finally { rt.stack.pop(); rt.frame = prevFrame; rt.line = prevLine; rt.file = prevFile; rt.depth--; }
   const ret = r === RETURN ? f.ret : null;
   if (f.retRef) rt.lastRetRef = f.retRef; else if (fn.byRef) rt.lastRetRef = NOREF;
@@ -283,21 +474,31 @@ export function callFunction(fn, args, thisObj, cls, sc, closure) {
   if (fn.ret !== null && fn.ret !== undefined) return checkReturn(fn, ret, f, r !== RETURN);
   return ret;
 }
-
 export function callNative(fn, args) {
   if (args.length < fn.min) {
     if (args.named) args = mapNamedNative(fn, args);
     if (args.length < fn.min) throwError('ArgumentCountError', `${fn.name}() expects ${fn.max === fn.min ? 'exactly' : 'at least'} ${fn.min} argument${fn.min === 1 ? '' : 's'}, ${args.length} given`);
   } else if (args.named) args = mapNamedNative(fn, args);
   if (args.length > fn.max) throwError('ArgumentCountError', `${fn.name}() expects ${fn.max === fn.min ? 'exactly' : 'at most'} ${fn.max} argument${fn.max === 1 ? '' : 's'}, ${args.length} given`);
-  const prev = rt.nativeName, prevArgs = rt.nativeArgs; rt.nativeName = fn.name; rt.nativeArgs = args;
+  const prev = rt.nativeName, prevArgs = rt.nativeArgs, prevStrict = rt.nativeStrict;
+  rt.nativeStrict = callerStrict(); rt.nativeName = fn.name; rt.nativeArgs = args;
   const st = rt.stack;
-  st.push(new NativeFrame(fn, args));
+  const nf = new NativeFrame(fn, args);
+  // builtins PHP compiles to opcodes when called directly (zend_try_compile_special_func) have no
+  // frame in traces
+  const top = st[st.length - 1];
+  if (INLINED[fn.name] === args.length && !args.named && !(top !== undefined && top.native === true)) nf.inlined = true;
+  st.push(nf);
+  let r;
   try {
-    const r = fn.frame ? fn.native(rt.frame, ...args) : fn.native(...args);
-    return r === undefined ? null : r;
-  } finally { rt.nativeName = prev; rt.nativeArgs = prevArgs; st.pop(); }
+    r = fn.frame ? fn.native(rt.frame, ...args) : fn.native(...args);
+  } finally { rt.nativeName = prev; rt.nativeArgs = prevArgs; rt.nativeStrict = prevStrict; st.pop(); }
+  if (r === undefined) r = null;
+  // objects passed to a builtin and held nowhere else are freed when it returns
+  if (argsHoldObjects(args)) frameExit(args, r);
+  return r;
 }
+const INLINED = Object.assign(Object.create(null), { strlen: 1, count: 1, sizeof: 1, get_class: 1, gettype: 1, array_key_exists: 2 });
 export class NativeFrame {
   constructor(fn, args) { this.fn = fn; this.args = args; this.callLine = rt.line; this.callFile = rt.file; this.this = null; this.cls = null; this.native = true; }
 }
@@ -382,5 +583,5 @@ export const FRAME_FUNCS = {
     if (p && f.vars[p.name]) return f.vars[p.name].v;
     const a = f.args[i]; return a instanceof Ref ? a.v : (a === undefined ? null : a);
   },
-  get_called_class(f) { return f.sc ? f.sc.name : false; },
+  get_called_class(f) { if (!f.sc) throwError('Error', 'get_called_class() must be called from within a class'); return f.sc.name; },
 };

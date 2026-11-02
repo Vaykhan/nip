@@ -2,9 +2,9 @@
 
 import pathMod from 'node:path';
 import { I64MIN, mkf, ParseErr } from './values.js';
-import { toBool } from './convert.js';
 import { neg } from './arith.js';
 import { lex } from './lexer.js';
+import { rt } from './runtime/state.js';
 
 const BIN_BP = {
   'or': [1, 'L'], 'xor': [2, 'L'], 'and': [3, 'L'],
@@ -12,36 +12,78 @@ const BIN_BP = {
   '|': [11, 'L'], '^': [12, 'L'], '&': [13, 'L'],
   '==': [14, 'N'], '!=': [14, 'N'], '===': [14, 'N'], '!==': [14, 'N'], '<>': [14, 'N'], '<=>': [14, 'N'],
   '<': [15, 'N'], '<=': [15, 'N'], '>': [15, 'N'], '>=': [15, 'N'],
-  '.': [16, 'L'], '<<': [17, 'L'], '>>': [17, 'L'],
+  '|>': [15.5, 'L'], '.': [16, 'L'], '<<': [17, 'L'], '>>': [17, 'L'],
   '+': [18, 'L'], '-': [18, 'L'], '*': [19, 'L'], '/': [19, 'L'], '%': [19, 'L'],
   'instanceof': [21, 'L'], '**': [22, 'R'],
 };
 const ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '.=', '%=', '**=', '&=', '|=', '^=', '<<=', '>>=', '??=']);
+// names a class can't have (zend_is_reserved_class_name)
+export const RESERVED_CLASS_NAMES = new Set(['bool', 'false', 'float', 'int', 'null', 'parent', 'self', 'static', 'string', 'true', 'void', 'never', 'iterable', 'object', 'mixed']);
 const RESERVED_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'callable', 'iterable', 'object', 'mixed', 'void', 'null', 'never', 'false', 'true', 'self', 'parent', 'static']);
 const MAGIC = new Set(['__line__', '__file__', '__dir__', '__function__', '__class__', '__method__', '__namespace__', '__trait__']);
+// statements PHP doesn't tick after (zend_is_unticked_stmt, plus if and switch which don't in practice)
+const UNTICKED = new Set(['Block', 'Label', 'FuncDecl', 'ClassDecl', 'If', 'Switch']);
+// keywords that can't be goto labels where a statement starts
+const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare', 'exit', 'die']);
+
 export const LVAL_KINDS = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'List']);
+const CALL_TARGETS = new Set(['Call', 'MCall', 'NullsafeMCall', 'SCall']);
 
 export class Parser {
   constructor(toks, file, shared) {
     this.toks = toks; this.p = 0; this.file = file;
     this.st = shared || { ns: '', uses: new Map(), useFns: new Map(), useConsts: new Map(), fnStack: [], clsStack: [], anonCount: 0, strict: false };
   }
-  get tok() { return this.toks[this.p]; }
+  get tok() { const t = this.toks[this.p]; if (t.t === 'error') throw new ParseErr(t.v, t.l); return t; }
   peek(o = 1) { return this.toks[this.p + o] || this.toks[this.toks.length - 1]; }
   next() { return this.toks[this.p++]; }
   error(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l); }
-  unexpected(tk) {
+  // a compile error PHP reports while parsing ("Fatal error", not "Parse error")
+  fatal(msg, tk) { tk = tk || this.tok; throw new ParseErr(msg, tk.l, 'Fatal error'); }
+  // the pending doc comment at token tk, if no declaration has taken it yet (see the lexer)
+  takeDoc(tk) { const d = tk && tk.doc; if (!d || d.used) return null; d.used = true; return d.text; }
+  // #[Name(args), ...] groups: [{ name, args, l }]
+  parseAttributes() {
+    let attrs = null, group = 0;
+    while (this.isOp('#[')) {
+      this.p++; group++;
+      while (!this.isOp(']')) {
+        const l = this.tok.l;
+        const raw = this.ident();
+        const name = this.resolveClass(raw);
+        const args = this.isOp('(') ? this.parseArgs() : [];
+        (attrs || (attrs = [])).push({ name, args, l, group, raw });
+        if (!this.accept(',')) break;
+      }
+      this.expect(']');
+    }
+    return attrs;
+  }
+  // "syntax error, unexpected <token>" with the token described as PHP's grammar names it
+  unexpected(tk, expecting) {
     tk = tk || this.tok;
     let d;
     switch (tk.t) {
       case 'eof': d = 'end of file'; break;
       case 'var': d = `variable "$${tk.v}"`; break;
-      case 'id': d = `identifier "${tk.v}"`; break;
-      case 'str': d = `double-quoted string "${tk.v}"`; break;
-      case 'int': case 'float': d = `integer "${tk.v}"`; break;
+      case 'id': {
+        const v = tk.v;
+        if (v[0] === '\\') d = `fully qualified name "${v}"`;
+        else if (/^namespace\\/i.test(v)) d = `namespace-relative name "${v}"`;
+        else if (v.includes('\\')) d = `namespaced name "${v}"`;
+        else d = PHP_KEYWORDS.has(v.toLowerCase()) ? `token "${v.toLowerCase() === 'die' ? 'exit' : v}"` : `identifier "${v}"`; // (die is T_EXIT)
+        break;
+      }
+      case 'str': d = tk.heredoc ? `heredoc start "${tk.heredoc}"` : `${tk.sq ? 'single' : 'double'}-quoted string "${tk.v}"`; break;
+      case 'tpl': d = tk.heredoc ? `heredoc start "${tk.heredoc}"` : 'double-quote mark'; break;
+      case 'shell': d = 'token "`"'; break;
+      case 'cast': d = `token "(${tk.v})"`; break;
+      case 'int': d = `integer "${tk.raw ?? tk.v}"`; break;
+      case 'float': d = `floating-point number "${tk.raw ?? tk.v}"`; break;
       default: d = `token "${tk.v}"`;
     }
-    this.error(`syntax error, unexpected ${d}`, tk);
+    // (expecting: what PHP's grammar lists where only a few tokens may follow)
+    this.error(`syntax error, unexpected ${d}${expecting ? ', expecting ' + expecting : ''}`, tk.heredoc ? { l: tk.l + 1 } : tk);
   }
   isOp(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'op' && t.v === v; }
   isId(v, o = 0) { const t = this.toks[this.p + o]; return t && t.t === 'id' && t.v.toLowerCase() === v; }
@@ -50,6 +92,12 @@ export class Parser {
   expect(v) { if (!this.isOp(v)) this.unexpected(); return this.next(); }
   expectId(v) { if (!this.isId(v)) this.unexpected(); return this.next(); }
   ident() { const t = this.tok; if (t.t !== 'id') this.unexpected(); this.p++; return t.v; }
+  // a name that must not be a keyword (constants, functions and goto labels; functions may be called readonly)
+  plainIdent(expecting) {
+    const t = this.tok;
+    if (t.t === 'id' && PHP_KEYWORDS.has(t.v.toLowerCase()) && t.v.toLowerCase() !== 'readonly') this.unexpected(t, expecting);
+    return this.ident();
+  }
   semi() { if (this.accept(';')) return; if (this.tok.t === 'eof') return; this.unexpected(); }
 
   // ---------------------------------------------------------------- names
@@ -79,6 +127,13 @@ export class Parser {
     if (this.st.ns) return [this.st.ns + '\\' + name, name];
     return [name, null];
   }
+  // a class named by extends/implements/use: self, parent and static can't be (zend_resolve_const_class_name_reference)
+  classRefName(kind, name) {
+    const tk = this.tok;
+    if (name === undefined) name = this.ident();
+    if (/^(self|parent|static)$/i.test(name)) this.fatal(rt.phpVersion >= 80400 ? `Cannot use "${name}" as ${kind} name, as it is reserved` : `Cannot use '${name}' as ${kind} name, as it is reserved`, tk);
+    return this.resolveClass(name);
+  }
   nsName(name) { return this.st.ns ? this.st.ns + '\\' + name : name; }
 
   // ---------------------------------------------------------------- program
@@ -86,7 +141,11 @@ export class Parser {
     const body = [];
     while (this.tok.t !== 'eof') {
       const s = this.parseStatement(true);
-      if (s) body.push(s);
+      if (s) {
+        if (this.st.nsMode === 'braced' && !(s.k === 'Block' && s.top) && s.k !== 'Nop') throw new ParseErr('No code may exist outside of namespace {}', s.l, 'Fatal error');
+        body.push(s);
+        if (s.k !== 'Nop') this.st.topStmts = (this.st.topStmts || 0) + 1;
+      }
     }
     return body;
   }
@@ -115,9 +174,27 @@ export class Parser {
     return { k: 'Block', body, l: this.tok.l };
   }
 
+  // declare(ticks=N): every statement that PHP ticks after gets `ticks` (see cStmt)
   parseStatement(top) {
+    if (!this.isId('declare') && !(this.tok.t === 'op' && this.tok.v === ';')) this.sawStatement = true; // for strict_types placement
+    const st = this.parseStatement0(top);
+    if (st && this.st.ticks && !UNTICKED.has(st.k)) st.ticks = this.st.ticks;
+    return st;
+  }
+  parseStatement0(top) {
+    if (this.isOp('#[')) {
+      const attrs = this.parseAttributes();
+      const st = this.parseStatement(top);
+      if (st && st.k === 'FuncDecl') st.fn.attrs = attrs;
+      else if (st && st.k === 'ClassDecl') st.attrs = attrs;
+      else if (st && st.k === 'ExprStmt' && st.e.k === 'Closure') st.e.fn.attrs = attrs;
+      else if (st && st.k === 'ConstDecl' && rt.phpVersion >= 80500) st.attrs = attrs; // (PHP 8.5)
+      return st;
+    }
     const t = this.tok, l = t.l;
     if (t.t === 'html') { this.p++; return { k: 'Echo', args: [{ k: 'Lit', v: t.v, l }], l }; }
+    // (void) expr; (PHP 8.5): the result is discarded on purpose (see #[\NoDiscard])
+    if (t.t === 'cast' && t.v === 'void') { this.p++; const e = this.parseExpr(); this.semi(); return { k: 'ExprStmt', e, l, voidCast: true }; }
     if (t.t === 'op') {
       if (t.v === '{') return this.parseBlock();
       if (t.v === ';') { this.p++; return null; }
@@ -125,13 +202,14 @@ export class Parser {
     if (t.t === 'id') {
       const kw = t.v.toLowerCase();
       const nx = this.peek();
-      // label for goto: "name:" (unsupported, skip)
+      // goto label: "name:" at the start of a statement
+      if (nx.t === 'op' && nx.v === ':' && !LABEL_RESERVED.has(kw)) { this.p += 2; return { k: 'Label', name: t.v, l }; }
       switch (kw) {
         case 'echo': {
           this.p++;
           const args = [this.parseExpr()];
           while (this.accept(',')) args.push(this.parseExpr());
-          this.semi();
+          if (!this.accept(';') && this.tok.t !== 'eof') this.unexpected(this.tok, '"," or ";"');
           return { k: 'Echo', args, l };
         }
         case 'if': return this.parseIf();
@@ -185,6 +263,7 @@ export class Parser {
           const cases = [];
           while (!(alt ? this.isId('endswitch') : this.isOp('}'))) {
             let test = null;
+            const cl = this.tok.l;
             if (this.acceptId('case')) test = this.parseExpr();
             else if (!this.acceptId('default')) this.unexpected();
             if (!this.accept(':') && !this.accept(';')) this.unexpected();
@@ -193,7 +272,7 @@ export class Parser {
               if (this.tok.t === 'eof') this.unexpected();
               const s = this.parseStatement(); if (s) body.push(s);
             }
-            cases.push({ test, body });
+            cases.push({ test, body, l: cl });
           }
           this.p++;
           if (alt) this.semi();
@@ -202,7 +281,10 @@ export class Parser {
         case 'break': case 'continue': {
           this.p++;
           let n = 1;
-          if (this.tok.t === 'int') n = this.next().v;
+          if (this.tok.t === 'int') {
+            n = this.next().v;
+            if (n < 1) this.fatal(`'${kw}' operator accepts only positive integers`);
+          } else if (!this.isOp(';') && this.tok.t !== 'eof') this.fatal(`'${kw}' operator with non-integer operand is no longer supported`);
           this.semi();
           return { k: kw === 'break' ? 'Break' : 'Continue', n, l };
         }
@@ -217,8 +299,11 @@ export class Parser {
           if ((nx.t === 'id') || (nx.t === 'op' && nx.v === '&' && this.peek(2).t === 'id')) {
             this.p++;
             const byRef = this.accept('&');
-            const name = this.ident();
+            const doc = this.takeDoc(this.tok);
+            const name = this.plainIdent('"("');
+            this.declareSymbol('function', name);
             const fn = this.parseFunctionRest(this.nsName(name), byRef, l);
+            fn.doc = doc;
             return { k: 'FuncDecl', fn, l, top: !!top };
           }
           break;
@@ -262,19 +347,33 @@ export class Parser {
           if (!(nx.t === 'op' && nx.v === '(')) break;
           this.p++; this.expect('(');
           const list = [];
-          if (!this.isOp(')')) { list.push(this.parseExpr()); while (this.accept(',')) { if (this.isOp(')')) break; list.push(this.parseExpr()); } }
+          // (the grammar wants variables: `new C()` is one only once dereferenced)
+          const item = () => {
+            const start = this.tok, e = this.parseExpr();
+            if (e.k === 'New') this.unexpected(rt.phpVersion >= 80400 ? this.tok : start, rt.phpVersion >= 80400 ? '"->" or "?->" or "["' : undefined);
+            return e;
+          };
+          if (!this.isOp(')')) { list.push(item()); while (this.accept(',')) { if (this.isOp(')')) break; list.push(item()); } }
           this.expect(')'); this.semi();
           return { k: 'Unset', list, l };
         }
         case 'namespace': {
           if (nx.t === 'op' && nx.v === '\\') break;
           if (nx.t === 'id' && nx.v.toLowerCase().startsWith('namespace\\')) break;
+          if (!this.st.nsMode && this.st.topStmts) this.fatal('Namespace declaration statement has to be the very first statement or after any declare call in the script');
           this.p++;
           let name = '';
           if (this.tok.t === 'id') name = this.next().v;
+          const mode = this.isOp('{') ? 'braced' : 'simple';
+          if (this.st.nsMode && this.st.nsMode !== mode) this.fatal('Cannot mix bracketed namespace declarations with unbracketed namespace declarations');
+          if (this.st.inNsBlock) this.fatal('Namespace declarations cannot be nested');
+          if (name.toLowerCase() === 'namespace') this.fatal(`Cannot use '${name}' as namespace name`);
           this.st.ns = name; this.st.uses = new Map(); this.st.useFns = new Map(); this.st.useConsts = new Map();
+          this.st.nsMode = mode;
           if (this.isOp('{')) {
-            const b = this.parseBlock();
+            this.st.inNsBlock = true;
+            let b;
+            try { b = this.parseBlock(); } finally { this.st.inNsBlock = false; }
             b.top = true;
             return b;
           }
@@ -292,19 +391,26 @@ export class Parser {
               this.accept('\\');
               const prefix = name.replace(/\\$/, '');
               this.expect('{');
+              const startExpect = kind === 'class' ? 'identifier or namespaced name or "function" or "const"' : 'identifier or namespaced name';
+              let first = true;
               do {
-                if (this.isOp('}')) break;
+                if (this.isOp('}')) { if (first) this.unexpected(this.tok, startExpect); break; }
+                if (this.isOp(',') || (this.tok.t === 'id' && this.tok.v[0] === '\\')) this.unexpected(this.tok, first ? startExpect : '"}"');
                 let k2 = kind;
-                if (this.isId('function')) { this.p++; k2 = 'function'; } else if (this.isId('const')) { this.p++; k2 = 'const'; }
+                if (kind === 'class') { if (this.isId('function')) { this.p++; k2 = 'function'; } else if (this.isId('const')) { this.p++; k2 = 'const'; } }
+                else if (this.isId('function') || this.isId('const')) this.unexpected(this.tok, first ? startExpect : '"}"');
+                first = false;
                 const sub = this.ident();
                 let alias = sub.split('\\').pop();
                 if (this.acceptId('as')) alias = this.ident();
                 this.addUse(k2, prefix + '\\' + sub, alias);
               } while (this.accept(','));
-              this.expect('}');
+              if (!this.isOp('}')) this.unexpected(this.tok, '"}"');
+              this.p++;
             } else {
               let alias = name.split('\\').pop();
               if (this.acceptId('as')) alias = this.ident();
+              else if (!name.includes('\\') && !this.st.ns) this.compileWarning(`The use statement with non-compound name '${name}' has no effect`);
               this.addUse(kind, name, alias);
             }
           } while (this.accept(','));
@@ -314,34 +420,75 @@ export class Parser {
         case 'const': {
           this.p++;
           const items = [];
-          do { const name = this.ident(); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
+          do { const name = this.plainIdent('identifier'); this.declareSymbol('const', name); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
           this.semi();
           return { k: 'ConstDecl', items, l };
         }
         case 'declare': {
           this.p++; this.expect('(');
-          do { const name = this.ident().toLowerCase(); this.expect('='); const e = this.parseExpr(); if (name === 'strict_types') this.st.strict = e.k === 'Lit' && toBool(e.v); } while (this.accept(','));
+          const prevTicks = this.st.ticks;
+          let strict = false;
+          const items = []; // (for zend_ast_export)
+          do {
+            const raw = this.ident(), name = raw.toLowerCase(); this.expect('='); const e = this.parseExpr();
+            items.push({ name: raw, e });
+            if (name === 'ticks') { if (e.k !== 'Lit') throw new ParseErr('declare(ticks) value must be a literal', e.l, 'Fatal error'); this.st.ticks = Number(e.v); }
+            if (name === 'strict_types') {
+              if (e.k !== 'Lit' || (e.v !== 0 && e.v !== 1)) this.fatal('strict_types declaration must have 0 or 1 as its value', t);
+              if (this.sawStatement) this.fatal('strict_types declaration must be the very first statement in the script', t);
+              this.st.strict = e.v === 1;
+              strict = true;
+            }
+          } while (this.accept(','));
           this.expect(')');
-          if (this.isOp('{')) return this.parseBlock();
-          if (this.accept(':')) { const b = this.parseStmtsUntil('enddeclare'); this.p++; this.semi(); return b; }
+          if (strict && (this.isOp('{') || this.isOp(':'))) this.fatal('strict_types declaration must not use block mode', t);
+          // block form: the declaration applies to the block only
+          if (this.isOp('{')) { const b = this.parseBlock(); this.st.ticks = prevTicks; b.declare = items; return b; }
+          if (this.accept(':')) { const b = this.parseStmtsUntil('enddeclare'); this.p++; this.semi(); this.st.ticks = prevTicks; b.declare = items; return b; }
           this.semi();
-          return null;
+          return this.st.ticks || !strict ? { k: 'Nop', l, declare: items } : null; // a declare statement ticks itself
         }
         case '__halt_compiler': {
           this.p = this.toks.length - 1;
           return null;
         }
-        case 'goto': this.error("'goto' is not supported");
+        case 'goto': {
+          this.p++;
+          const label = this.plainIdent('identifier');
+          this.semi();
+          return { k: 'Goto', label, l };
+        }
       }
     }
     const e = this.parseExpr();
     this.semi();
     return { k: 'ExprStmt', e, l };
   }
+  // imports (zend_compile_use): an alias can't name a symbol declared earlier in the file or be
+  // imported twice; declarations can't reuse an imported name (declareSymbol)
+  importsOf(kind) { return kind === 'function' ? this.st.useFns : kind === 'const' ? this.st.useConsts : this.st.uses; }
+  seenSymbols(kind) {
+    const seen = this.st.seen || (this.st.seen = { class: new Set(), function: new Set(), const: new Set() });
+    return seen[kind];
+  }
   addUse(kind, name, alias) {
-    if (kind === 'function') this.st.useFns.set(alias.toLowerCase(), name);
-    else if (kind === 'const') this.st.useConsts.set(alias, name);
-    else this.st.uses.set(alias.toLowerCase(), name);
+    if (kind === 'class' && RESERVED_CLASS_NAMES.has(alias.toLowerCase())) this.fatal(`Cannot use ${name} as ${alias} because '${alias}' is a special class name`);
+    const key = kind === 'const' ? alias : alias.toLowerCase();
+    const what = kind === 'class' ? '' : ' ' + kind;
+    const local = this.st.ns ? this.st.ns.toLowerCase() + '\\' + key : key;
+    if (this.seenSymbols(kind).has(local) && name.toLowerCase() !== local.toLowerCase()) this.fatal(`Cannot use${what} ${name} as ${alias} because the name is already in use`);
+    const imports = this.importsOf(kind);
+    if (imports.has(key)) this.fatal(`Cannot use${what} ${name} as ${alias} because the name is already in use`);
+    imports.set(key, name);
+  }
+  // a warning PHP raises while compiling (checkProgram() reports them)
+  compileWarning(msg) { (this.st.compileWarnings || (this.st.compileWarnings = [])).push({ msg, l: this.tok.l }); }
+  declareSymbol(kind, short) {
+    if (kind === 'const' && /^(true|false|null)$/i.test(short)) this.fatal(`Cannot redeclare constant '${short}'`);
+    const full = this.nsName(short);
+    const imported = this.importsOf(kind).get(kind === 'const' ? short : short.toLowerCase());
+    if (imported !== undefined && (kind === 'const' ? imported !== full : imported.toLowerCase() !== full.toLowerCase())) this.fatal(`Cannot declare ${kind} ${full} because the name is already in use`);
+    this.seenSymbols(kind).add(kind === 'const' ? (this.st.ns ? this.st.ns.toLowerCase() + '\\' + short : short) : full.toLowerCase());
   }
 
   parseIf() {
@@ -367,7 +514,7 @@ export class Parser {
       if (this.isId('elseif')) { this.p++; this.expect('('); const c2 = this.parseExpr(); this.expect(')'); elifs.push({ c: c2, body: this.parseBlockOrStatement() }); continue; }
       if (this.isId('else')) {
         this.p++;
-        if (this.isId('if')) { this.p++; this.expect('('); const c2 = this.parseExpr(); this.expect(')'); elifs.push({ c: c2, body: this.parseBlockOrStatement() }); continue; }
+        if (this.isId('if')) { this.p++; this.expect('('); const c2 = this.parseExpr(); this.expect(')'); elifs.push({ c: c2, body: this.parseBlockOrStatement(), elseIf: true }); continue; }
         els = this.parseBlockOrStatement();
       }
       break;
@@ -379,14 +526,15 @@ export class Parser {
     const l = this.next().l;
     const body = this.parseBlock();
     const catches = []; let fin = null;
-    while (this.acceptId('catch')) {
+    while (this.isId('catch')) {
+      const cl = this.next().l;
       this.expect('(');
       const types = [this.resolveClass(this.ident())];
       while (this.accept('|')) types.push(this.resolveClass(this.ident()));
       let v = null;
       if (this.tok.t === 'var') v = this.next().v;
       this.expect(')');
-      catches.push({ types, v, body: this.parseBlock() });
+      catches.push({ types, v, body: this.parseBlock(), l: cl });
     }
     if (this.acceptId('finally')) fin = this.parseBlock();
     if (!catches.length && !fin) this.error('Cannot use try without catch or finally');
@@ -395,7 +543,8 @@ export class Parser {
 
   // ---------------------------------------------------------------- types
   parseType() {
-    if (this.accept('?')) { const t = this.parseSingleType(); return { alts: [t], nullable: true }; }
+    const l = this.tok.l;
+    if (this.accept('?')) { const t = this.parseSingleType(); return { alts: t === 'null' ? [] : [t], nullable: true, q: true, raw: [t], l }; }
     const alts = [];
     let inter = false;
     for (;;) {
@@ -409,15 +558,25 @@ export class Parser {
       if (this.isOp('&') && !(this.peek().t === 'var' || (this.peek().t === 'op' && (this.peek().v === '...' || this.peek().v === '&')))) { this.p++; inter = true; continue; }
       break;
     }
-    if (inter) return { alts: [{ inter: alts }], nullable: false };
+    if (inter) return { alts: [{ inter: alts }], nullable: false, raw: alts, l };
     const nullable = alts.some((a) => a === 'null' || a === 'mixed');
-    return { alts: alts.filter((a) => a !== 'null'), nullable };
+    return { alts: alts.filter((a) => a !== 'null'), nullable, raw: alts, l };
   }
   parseSingleType() {
+    const tk = this.tok;
     const name = this.ident();
     const ln = name.toLowerCase();
     if (RESERVED_TYPES.has(ln)) return ln;
-    return this.resolveClass(name);
+    const last = ln.slice(ln.lastIndexOf('\\') + 1);
+    if (ln.includes('\\') && RESERVED_TYPES.has(last) && last !== 'self' && last !== 'parent' && last !== 'static') this.fatal(`Type declaration '${last}' must be unqualified`, tk);
+    const cls = this.resolveClass(name);
+    // a bare name that looks like a builtin type (zend_is_confusable_type)
+    if (ln in CONFUSABLE_TYPES && !this.st.uses.has(ln)) {
+      const correct = CONFUSABLE_TYPES[ln], extra = this.st.ns ? ' or import the class with "use"' : '';
+      this.compileWarning(correct ? `"${name}" will be interpreted as a class name. Did you mean "${correct}"? Write "\\${cls}"${extra} to suppress this warning`
+        : `"${name}" is not a supported builtin type and will be interpreted as a class name. Write "\\${cls}"${extra} to suppress this warning`);
+    }
+    return cls;
   }
   atTypeStart() {
     const t = this.tok;
@@ -426,14 +585,27 @@ export class Parser {
   }
 
   // ---------------------------------------------------------------- functions
+  // private(set) / protected(set) / public(set): asymmetric visibility (PHP 8.4)
+  setVisMod() {
+    if (rt.phpVersion < 80400 || !(this.isId('public') || this.isId('protected') || this.isId('private'))) return null;
+    const a = this.peek(1), b = this.peek(2), c = this.peek(3);
+    if (!(a.t === 'op' && a.v === '(' && b.t === 'id' && b.v.toLowerCase() === 'set' && c.t === 'op' && c.v === ')')) return null;
+    const vis = this.tok.v.toLowerCase();
+    this.p += 4;
+    return vis;
+  }
   parseParams() {
     this.expect('(');
     const params = [];
     while (!this.isOp(')')) {
-      const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false };
+      const prm = { name: null, def: null, byRef: false, variadic: false, type: null, promote: null, readonly: false, attrs: this.parseAttributes() };
       for (;;) {
-        if (this.isId('public') || this.isId('protected') || this.isId('private')) { prm.promote = this.next().v.toLowerCase(); continue; }
+        const sv = this.setVisMod();
+        if (sv) { if (prm.setVis) this.fatal('Multiple access type modifiers are not allowed'); prm.setVis = sv; if (!prm.promote) prm.promote = 'public'; continue; }
+        if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (prm.promoteKw) this.fatal('Multiple access type modifiers are not allowed'); prm.promote = this.next().v.toLowerCase(); prm.promoteKw = true; continue; }
         if (this.isId('readonly')) { this.p++; prm.readonly = true; if (!prm.promote) prm.promote = 'public'; continue; }
+        if (this.isId('final') && rt.phpVersion >= 80400) { this.p++; prm.final = true; if (!prm.promote) prm.promote = 'public'; continue; }
+        if (this.isId('static') || this.isId('abstract') || this.isId('final')) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a parameter`);
         break;
       }
       if (this.tok.t !== 'var' && !this.isOp('&') && !this.isOp('...')) prm.type = this.parseType();
@@ -442,15 +614,28 @@ export class Parser {
       const v = this.tok; if (v.t !== 'var') this.unexpected(); this.p++;
       prm.name = v.v;
       if (this.accept('=')) prm.def = this.parseExpr();
+      // a promoted property with hooks (PHP 8.4)
+      if (this.isOp('{') && rt.phpVersion >= 80400 && this.st.clsStack.length) { prm.hooks = this.parseHooks(this.st.clsStack[this.st.clsStack.length - 1], prm); if (!prm.promote) prm.promote = 'public'; }
       params.push(prm);
       if (!this.accept(',')) break;
     }
     this.expect(')');
     return params;
   }
+  // a closure's name: {closure} (in a namespace, Ns\{closure}); since PHP 8.4 it says where the
+  // closure is: {closure:file:line}, {closure:f():line}, {closure:C::m():line}
+  closureName(l) {
+    if (rt.phpVersion < 80400) return this.nsName('{closure}');
+    const outer = this.st.fnStack[this.st.fnStack.length - 1];
+    let where = this.file;
+    if (outer) where = outer.closure || outer.arrow ? outer.name : (outer.cls !== undefined ? outer.cls + '::' : '') + outer.name + '()';
+    return `{closure:${where}:${l}}`;
+  }
+
   parseFunctionRest(name, byRef, l, opts = {}) {
     const fn = { name, byRef, params: null, ret: null, body: null, isGen: false, l, file: this.file, strict: false, static: !!opts.static };
     if (opts.cls !== undefined) fn.cls = opts.cls;
+    if (opts.closure) fn.closure = true;
     fn.params = this.parseParams();
     if (opts.closure && this.acceptId('use')) {
       this.expect('(');
@@ -469,85 +654,107 @@ export class Parser {
       this.st.fnStack.pop();
       fn.body = b.body;
     } else { this.semi(); fn.body = null; }
+    fn.endLine = this.toks[this.p - 1].l;
     fn.strict = this.st.strict;
     return fn;
   }
 
   // ---------------------------------------------------------------- classes
-  parseClass(anonArgs) {
+  parseClass(anonArgs, anonFlags) {
     const l = this.tok.l;
-    const flags = { abstract: false, final: false, readonly: false };
-    while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) flags[this.next().v.toLowerCase()] = true;
+    const flags = anonFlags || { abstract: false, final: false, readonly: false };
+    while (this.isId('abstract') || this.isId('final') || this.isId('readonly')) {
+      const f = this.next().v.toLowerCase();
+      if (flags[f]) this.fatal(`Multiple ${f} modifiers are not allowed`);
+      flags[f] = true;
+    }
+    if (flags.abstract && flags.final) this.fatal('Cannot use the final modifier on an abstract class');
+    const startLine = this.tok.l;
     const kind = this.ident().toLowerCase(); // class|interface|trait|enum
     let name;
+    const doc = this.takeDoc(this.tok);
     if (anonArgs !== undefined) name = 'class@anonymous';
-    else name = this.nsName(this.ident());
-    const cd = { k: 'ClassDecl', kind, name, parent: null, interfaces: [], flags, consts: [], props: [], methods: [], traits: [], cases: [], enumType: null, l, file: this.file, anon: anonArgs !== undefined };
+    else { const short = this.ident(); this.declareSymbol('class', short); name = this.nsName(short); }
+    const cd = { k: 'ClassDecl', kind, name, parent: null, interfaces: [], flags, consts: [], props: [], methods: [], traits: [], cases: [], enumType: null, l, file: this.file, anon: anonArgs !== undefined, doc, startLine, endLine: 0, attrs: null };
     if (kind === 'enum' && this.accept(':')) cd.enumType = this.parseType();
     if (this.acceptId('extends')) {
-      if (kind === 'interface') { do cd.interfaces.push(this.resolveClass(this.ident())); while (this.accept(',')); }
-      else cd.parent = this.resolveClass(this.ident());
+      if (kind === 'interface') { do cd.interfaces.push(this.classRefName('interface')); while (this.accept(',')); }
+      else cd.parent = this.classRefName('class');
     }
-    if (this.acceptId('implements')) { do cd.interfaces.push(this.resolveClass(this.ident())); while (this.accept(',')); }
+    if (this.acceptId('implements')) { do cd.interfaces.push(this.classRefName('interface')); while (this.accept(',')); }
     this.st.clsStack.push(cd);
     this.expect('{');
     while (!this.accept('}')) {
       if (this.tok.t === 'eof') this.unexpected();
       this.parseMember(cd);
     }
+    cd.endLine = this.toks[this.p - 1].l;
     this.st.clsStack.pop();
     return cd;
   }
   parseMember(cd) {
+    const attrs = this.parseAttributes();
     const l = this.tok.l;
     if (this.acceptId('use')) {
-      const names = [this.resolveClass(this.ident())];
-      while (this.accept(',')) names.push(this.resolveClass(this.ident()));
+      const names = [this.classRefName('trait')];
+      while (this.accept(',')) names.push(this.classRefName('trait'));
       const rules = [];
       if (this.accept('{')) {
         while (!this.accept('}')) {
           let tn = null, m = this.ident();
-          if (this.accept('::')) { tn = this.resolveClass(m); m = this.ident(); }
+          if (this.accept('::')) { tn = this.classRefName('trait', m); m = this.ident(); }
           if (this.acceptId('insteadof')) {
-            const ex = [this.resolveClass(this.ident())]; while (this.accept(',')) ex.push(this.resolveClass(this.ident()));
+            const ex = [this.classRefName('trait')]; while (this.accept(',')) ex.push(this.classRefName('trait'));
             rules.push({ kind: 'insteadof', trait: tn, method: m, excl: ex });
           } else {
             this.expectId('as');
-            let vis = null, alias = null;
+            let vis = null, alias = null, final = false;
             if (this.isId('public') || this.isId('protected') || this.isId('private')) vis = this.next().v.toLowerCase();
+            else if (this.isId('final')) { this.next(); final = true; }
+            else if (this.isId('static') || this.isId('abstract')) this.fatal(`Cannot use "${this.next().v.toLowerCase()}" as method modifier in trait alias`);
+            else if (this.isId('readonly')) this.fatal('Cannot use the readonly modifier on a method');
             if (this.tok.t === 'id') alias = this.ident();
-            rules.push({ kind: 'as', trait: tn, method: m, vis, alias });
+            rules.push({ kind: 'as', trait: tn, method: m, vis, alias, final });
           }
           this.semi();
         }
       } else this.semi();
-      cd.traits.push({ names, rules });
+      cd.traits.push({ names, rules, l, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
     if (this.acceptId('case')) {
+      const doc = this.takeDoc(this.tok);
       const name = this.ident();
       let e = null; if (this.accept('=')) e = this.parseExpr();
       this.semi();
-      cd.cases.push({ name, e, l });
+      cd.cases.push({ name, e, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
     const mods = { vis: null, static: false, abstract: false, final: false, readonly: cd.flags.readonly, var: false };
+    const once = (key, word) => { if (mods[key] && (key !== 'readonly' || !cd.flags.readonly || mods.readonlyKw)) this.fatal(`Multiple ${word} modifiers are not allowed`); mods[key] = true; };
     for (;;) {
-      if (this.isId('public') || this.isId('protected') || this.isId('private')) { mods.vis = this.next().v.toLowerCase(); continue; }
-      if (this.isId('static') && !this.isOp('::', 1)) { this.p++; mods.static = true; continue; }
-      if (this.isId('abstract')) { this.p++; mods.abstract = true; continue; }
-      if (this.isId('final')) { this.p++; mods.final = true; continue; }
-      if (this.isId('readonly')) { this.p++; mods.readonly = true; continue; }
+      const sv = this.setVisMod();
+      if (sv) { if (mods.setVis) this.fatal('Multiple access type modifiers are not allowed'); mods.setVis = sv; continue; }
+      if (this.isId('public') || this.isId('protected') || this.isId('private')) { if (mods.vis) this.fatal('Multiple access type modifiers are not allowed'); mods.vis = this.next().v.toLowerCase(); continue; }
+      if (this.isId('static') && !this.isOp('::', 1)) { once('static', 'static'); this.p++; continue; }
+      if (this.isId('abstract')) { once('abstract', 'abstract'); this.p++; continue; }
+      if (this.isId('final')) { once('final', 'final'); this.p++; continue; }
+      if (this.isId('readonly')) { once('readonly', 'readonly'); mods.readonlyKw = true; this.p++; continue; }
       if (this.isId('var')) { this.p++; mods.var = true; continue; }
       break;
     }
+    if (mods.abstract && mods.final && this.isId('function')) this.fatal('Cannot use the final modifier on an abstract method');
+    if (this.isId('const') && mods.readonlyKw) this.fatal('Cannot use the readonly modifier on a class constant');
+    if (this.isId('function') && mods.readonlyKw) this.fatal('Cannot use the readonly modifier on a method');
     if (this.acceptId('const')) {
-      // optional type
-      if (this.tok.t === 'id' && this.peek().t === 'id') this.parseType();
-      else if (this.isOp('?')) this.parseType();
+      // optional type (PHP 8.3)
+      let type = null;
+      if ((this.tok.t === 'id' && this.peek().t === 'id') || this.isOp('?') || this.isOp('(')) type = this.parseType();
+      const group = (cd.seq || 0) + 1;
       do {
+        const doc = this.takeDoc(this.tok);
         const name = this.ident(); this.expect('=');
-        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l });
+        cd.consts.push({ name, e: this.parseExpr(), vis: mods.vis || 'public', final: mods.final, l, type, attrs, doc, group, seq: cd.seq = (cd.seq || 0) + 1 });
       } while (this.accept(','));
       this.semi();
       return;
@@ -555,22 +762,71 @@ export class Parser {
     if (this.acceptId('function')) {
       const byRef = this.accept('&');
       const nameTok = this.tok; if (nameTok.t !== 'id') this.unexpected(); this.p++;
+      const doc = this.takeDoc(nameTok);
       const fn = this.parseFunctionRest(nameTok.v, byRef, l, { cls: cd.name });
-      fn.cls = cd.name;
-      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', final: mods.final, l });
+      fn.cls = cd.name; fn.attrs = attrs; fn.doc = doc;
+      cd.methods.push({ fn, vis: mods.vis || 'public', static: mods.static, abstract: mods.abstract || cd.kind === 'interface', abstractKw: mods.abstract, final: mods.final, l, seq: cd.seq = (cd.seq || 0) + 1 });
       return;
     }
-    // property
+    // property (abstract and final ones are PHP 8.4's)
+    if (mods.abstract && rt.phpVersion < 80400) this.fatal('Cannot use the abstract modifier on a property');
+    if (mods.final && rt.phpVersion < 80400) this.fatal('Cannot use the final modifier on a property');
     let type = null;
     if (this.tok.t !== 'var') type = this.parseType();
+    const group = (cd.seq || 0) + 1; // (props declared together, for zend_ast_export)
     do {
       const v = this.tok; if (v.t !== 'var') this.unexpected(); this.p++;
+      const doc = this.takeDoc(v);
       let def; let hasDef = false;
       if (this.accept('=')) { def = this.parseExpr(); hasDef = true; }
-      cd.props.push({ name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', type, readonly: mods.readonly, l });
+      const prop = { name: v.v, def: hasDef ? def : null, hasDef, static: mods.static, vis: mods.vis || 'public', visKw: mods.vis || (mods.var ? 'public' : null), setVis: mods.setVis || null, group, type, readonly: mods.readonly, abstract: mods.abstract, final: mods.final, l, attrs, doc, seq: cd.seq = (cd.seq || 0) + 1 };
+      if (this.isOp('{') && rt.phpVersion >= 80400) { prop.hooks = this.parseHooks(cd, prop); cd.props.push(prop); return; }
+      cd.props.push(prop);
     } while (this.accept(','));
-    if (this.isOp('{')) this.error('Property hooks are not supported');
     this.semi();
+  }
+
+  // property hooks (PHP 8.4): { get => expr; set(T $value) { ... } final get; &get; get; }; a
+  // hook is a method named $prop::get / $prop::set
+  parseHooks(cd, prop) {
+    this.expect('{');
+    const hooks = {};
+    if (this.isOp('}')) this.fatal('Property hook list must not be empty');
+    while (!this.accept('}')) {
+      const attrs = this.parseAttributes();
+      const hl = this.tok.l;
+      let final = false, abstract = false;
+      for (;;) {
+        if (this.isId('final')) { this.p++; final = true; continue; }
+        if (this.isId('abstract')) { this.p++; abstract = true; continue; }
+        if (this.tok.t === 'id' && /^(public|protected|private|static|readonly)$/i.test(this.tok.v)) this.fatal(`Cannot use the ${this.tok.v.toLowerCase()} modifier on a property hook`);
+        break;
+      }
+      const byRef = this.accept('&');
+      const nameTok = this.tok;
+      if (nameTok.t !== 'id') this.unexpected();
+      this.p++;
+      const kind = nameTok.v.toLowerCase();
+      if (kind !== 'get' && kind !== 'set') this.fatal(`Unknown hook "${nameTok.v}" for property ${cd.name}::$${prop.name}, expected "get" or "set"`, nameTok);
+      if (hooks[kind]) this.fatal(`Cannot redeclare property hook "${kind}"`, nameTok);
+      const fn = { name: `$${prop.name}::${kind}`, byRef, params: [], ret: null, body: null, isGen: false, l: hl, file: this.file, strict: this.st.strict, static: false, cls: cd.name, hook: kind, hookProp: prop.name, attrs, final, abstract };
+      if (this.isOp('(')) { fn.params = this.parseParams(); fn.explicitParams = true; }
+      else if (kind === 'set') fn.params = [{ name: 'value', def: null, byRef: false, variadic: false, type: prop.type, promote: null, readonly: false, attrs: null }];
+      this.st.fnStack.push(fn);
+      try {
+        if (this.accept('=>')) {
+          // get => expr returns it; set => expr assigns it to the property
+          const e = this.parseExpr(); this.semi();
+          const self = { k: 'Prop', o: { k: 'Var', name: 'this', l: hl }, name: prop.name, nullsafe: false, l: hl };
+          fn.body = kind === 'get' ? [{ k: 'Return', e, l: e.l }] : [{ k: 'ExprStmt', e: { k: 'Assign', t: self, e, l: hl }, l: hl }];
+          fn.shortExpr = e;
+        } else if (this.isOp('{')) fn.body = this.parseBlock().body;
+        else { this.semi(); fn.abstract = true; }
+      } finally { this.st.fnStack.pop(); }
+      fn.endLine = this.toks[this.p - 1].l;
+      hooks[kind] = fn;
+    }
+    return hooks;
   }
 
   // ---------------------------------------------------------------- expressions
@@ -583,7 +839,8 @@ export class Parser {
       else if (t.t === 'id') { op = t.v.toLowerCase(); if (!(op === 'or' || op === 'xor' || op === 'and' || op === 'instanceof')) break; }
       else break;
       if (ASSIGN_OPS.has(op)) {
-        if (!LVAL_KINDS.has(left.k) && left.k !== 'Arr') break;
+        // a call is parsed as a target too, for the compile error ("Can't use function return value in write context")
+        if (!LVAL_KINDS.has(left.k) && left.k !== 'Arr' && !CALL_TARGETS.has(left.k)) break;
         if (minBp > 5 && !(left.k === 'Var' || left.k === 'Index' || left.k === 'Prop' || left.k === 'SProp' || left.k === 'VarVar')) break;
         this.p++;
         const l = t.l;
@@ -620,16 +877,25 @@ export class Parser {
       this.p++;
       if (op === 'instanceof') {
         let cls;
-        if (this.tok.t === 'id') { cls = this.resolveClass(this.next().v); }
+        let rawCls;
+        if (this.tok.t === 'id') { rawCls = this.next().v; cls = this.resolveClass(rawCls); }
         else cls = this.parseUnary();
-        left = { k: 'Instanceof', e: left, cls, l: t.l };
+        left = { k: 'Instanceof', e: left, cls, l: t.l, rawCls };
         continue;
       }
-      const right = this.parseExpr(assoc === 'R' ? bp : bp + 1);
-      if (op === '&&' || op === 'and') left = { k: 'And', a: left, b: right, l: t.l };
-      else if (op === '||' || op === 'or') left = { k: 'Or', a: left, b: right, l: t.l };
+      const right = this.parseExpr(assoc === 'R' ? bp : bp + 0.5);
+      if (op === '&&' || op === 'and' || op === '||' || op === 'or') {
+        const and = op === '&&' || op === 'and';
+        // `false && ...`: PHP doesn't compile the right side, nor report what's in it
+        if (left.k === 'Lit' && and !== !!(left.v !== null && left.v !== false && left.v !== 0 && left.v !== '' && left.v !== '0')) (this.st.deadRanges || (this.st.deadRanges = [])).push([t.l, this.toks[this.p - 1].l]);
+        left = { k: and ? 'And' : 'Or', a: left, b: right, l: t.l };
+      }
       else if (op === 'xor') left = { k: 'Xor', a: left, b: right, l: t.l };
       else if (op === '??') left = { k: 'Coalesce', a: left, b: right, l: t.l };
+      else if (op === '|>') {
+        if (right.k === 'Closure' && right.fn.arrow && !right.inParens) this.fatal('Arrow functions on the right hand side of |> must be parenthesized', right);
+        left = { k: 'Pipe', a: left, b: right, l: t.l };
+      }
       else left = { k: 'Bin', op: op === '<>' ? '!=' : op, a: left, b: right, l: t.l };
     }
     return left;
@@ -640,7 +906,7 @@ export class Parser {
       if (!it) return null;
       let v = it.v;
       if (v.k === 'Arr') v = this.toList(v);
-      return { key: it.key, v, byRef: it.byRef };
+      return { key: it.key, v, byRef: it.byRef, spread: it.spread };
     });
     return { k: 'List', items, l: arr.l };
   }
@@ -670,17 +936,35 @@ export class Parser {
         case '&': this.error('syntax error, unexpected token "&"');
       }
     }
-    if (t.t === 'cast') { this.p++; return { k: 'Cast', t: t.v, e: this.parseExpr(20), l }; }
+    if (t.t === 'cast') {
+      if (t.v === 'unset') this.fatal('The (unset) cast is no longer supported');
+      if (t.v === 'void') this.unexpected(t); // (a statement only)
+      this.p++; return { k: 'Cast', t: t.v, e: this.parseExpr(20), l };
+    }
     if (t.t === 'id') {
       const kw = t.v.toLowerCase();
       switch (kw) {
-        case 'new': return this.parsePostfix(this.parseNew());
-        case 'clone': this.p++; return { k: 'Clone', e: this.parseUnary(), l };
+        case 'new': return this.parsePostfix(this.newExpr());
+        case 'clone': {
+          this.p++;
+          // PHP 8.5: clone() is also a function: clone($o, [...]), clone(...), clone(object: $o);
+          // clone($o) alone is the operator applied to ($o)
+          if (rt.phpVersion >= 80500 && this.isOp('(')) {
+            const save = this.p, anon = this.st.anonCount, nWarn = (this.st.compileWarnings || []).length; // (undone when backtracking)
+            const back = () => { this.p = save; this.st.anonCount = anon; if (this.st.compileWarnings) this.st.compileWarnings.length = nWarn; };
+            this.p++;
+            const callForm = this.isOp(')') || this.isOp('...') || (this.tok.t === 'id' && this.isOp(':', 1) && !this.isOp('::', 1));
+            if (!callForm) { this.parseExpr(); if (this.isOp(',')) { back(); return { k: 'Call', f: 'clone', fb: null, args: this.parseArgs(), l, raw: '\\clone' }; } }
+            back();
+            if (callForm) return { k: 'Call', f: 'clone', fb: null, args: this.parseArgs(), l, raw: '\\clone' };
+          }
+          return { k: 'Clone', e: this.parseExpr(23), l }; // (binds tighter than any binary operator; `clone $a = new C` clones the assignment)
+        }
         case 'print': this.p++; return { k: 'Print', e: this.parseExpr(4), l };
         case 'yield': {
           this.p++;
           const fn = this.st.fnStack[this.st.fnStack.length - 1];
-          if (fn) fn.isGen = true; else this.error('The "yield" expression can only be used inside a function');
+          if (fn) fn.isGen = true; else this.fatal('The "yield" expression can only be used inside a function');
           if (this.isOp(';') || this.isOp(')') || this.isOp(',') || this.isOp(']') || this.tok.t === 'eof') return { k: 'Yield', key: null, v: null, l };
           let v = this.parseExpr(4), key = null;
           if (this.accept('=>')) { key = v; v = this.parseExpr(4); }
@@ -689,7 +973,7 @@ export class Parser {
         case 'yield from': {
           this.p++;
           const fn = this.st.fnStack[this.st.fnStack.length - 1];
-          if (fn) fn.isGen = true; else this.error('The "yield" expression can only be used inside a function');
+          if (fn) fn.isGen = true; else this.fatal('The "yield" expression can only be used inside a function');
           return { k: 'YieldFrom', e: this.parseExpr(4), l };
         }
         case 'throw': this.p++; return { k: 'Throw', e: this.parseExpr(0), l };
@@ -700,9 +984,30 @@ export class Parser {
     return this.parsePostfix(this.parsePrimary());
   }
 
+  // `new` dereferenced without parentheses: new C()->m(), new class {}::C (PHP 8.4)
+  newExpr() {
+    const n = this.parseNew();
+    if (!(rt.phpVersion >= 80400 && (n.parens || (n.cls && n.cls.k === 'ClassDecl')))) n.noDeref = true;
+    return n;
+  }
+
   parseNew() {
     const l = this.next().l;
     let cls;
+    const attrs = this.parseAttributes();
+    // modifiers of an anonymous class: only readonly
+    let k = this.p;
+    while (this.toks[k].t === 'id' && /^(readonly|abstract|final)$/i.test(this.toks[k].v)) k++;
+    const anonFlags = { abstract: false, final: false, readonly: false };
+    if (k > this.p && this.toks[k].t === 'id' && this.toks[k].v.toLowerCase() === 'class') {
+      while (this.p < k) {
+        const tk = this.next(), m = tk.v.toLowerCase();
+        if (m !== 'readonly') this.fatal(`Cannot use the ${m} modifier on an anonymous class`, tk);
+        if (anonFlags.readonly) this.fatal('Multiple readonly modifiers are not allowed', tk);
+        anonFlags.readonly = true;
+      }
+    }
+    if (attrs && !this.isId('class')) this.unexpected();
     if (this.isId('class')) {
       // anonymous class
       this.p++;
@@ -710,13 +1015,21 @@ export class Parser {
       if (this.isOp('(')) args = this.parseArgs();
       this.p--; // re-point at 'class' keyword for parseClass
       this.toks[this.p] = { t: 'id', v: 'class', l };
-      const cd = this.parseClass(args);
+      const cd = this.parseClass(args, anonFlags);
+      cd.attrs = attrs;
       cd.name = 'class@anonymous' + (++this.st.anonCount);
-      return { k: 'New', cls: cd, args, l };
+      return { k: 'New', cls: cd, args, l, parens: true };
     }
+    let rawCls;
     if (this.tok.t === 'id') {
       const name = this.next().v;
-      cls = this.resolveClass(name);
+      cls = this.resolveClass(name); rawCls = name;
+      // new A::$prop: the class named by a static property
+      while (this.isOp('::')) {
+        this.p++;
+        if (this.tok.t !== 'var') this.unexpected(this.tok, 'variable or "$"');
+        cls = { k: 'SProp', cls, name: this.next().v, l };
+      }
     } else if (this.tok.t === 'var') {
       cls = { k: 'Var', name: this.next().v, l };
       // allow $obj->prop / $a['x'] / Foo::$x as class name expression
@@ -730,9 +1043,9 @@ export class Parser {
       cls = this.parseExpr(); this.expect(')');
     } else if (this.isId('static')) { this.p++; cls = 'static'; }
     else this.unexpected();
-    let args = [];
-    if (this.isOp('(')) args = this.parseArgs();
-    return { k: 'New', cls, args, l };
+    let args = [], parens = false;
+    if (this.isOp('(')) { args = this.parseArgs(); parens = true; }
+    return { k: 'New', cls, args, l, parens, rawCls };
   }
 
   parseArgs() {
@@ -746,6 +1059,7 @@ export class Parser {
         args.push({ e: this.parseExpr(), name });
       } else args.push({ e: this.parseExpr() });
       if (!this.accept(',')) break;
+      if (this.isOp(',')) this.unexpected(this.tok, '")"'); // f($a,,$b)
     }
     this.expect(')');
     return args;
@@ -770,21 +1084,27 @@ export class Parser {
 
   parseClosure(isStatic) {
     const l = this.tok.l;
+    const doc = this.takeDoc(this.peek(0)) || this.takeDoc(this.peek(1));
     if (this.acceptId('fn')) {
       const byRef = this.accept('&');
-      const fn = { name: '{closure}', byRef, params: this.parseParams(), ret: null, body: null, isGen: false, l, file: this.file, arrow: true, static: isStatic, strict: this.st.strict };
+      const fn = { name: this.closureName(l), byRef, params: this.parseParams(), ret: null, body: null, isGen: false, l, file: this.file, arrow: true, static: isStatic, strict: this.st.strict };
       if (this.accept(':')) fn.ret = this.parseType();
       this.expect('=>');
       this.st.fnStack.push(fn);
       const e = this.parseExpr(5);
       this.st.fnStack.pop();
-      fn.body = [{ k: 'Return', e, l: e.l }];
+      // (returning never: the expression is only evaluated, zend_compile_func_decl)
+      const never = fn.ret && !fn.ret.q && fn.ret.raw.length === 1 && typeof fn.ret.raw[0] === 'string' && fn.ret.raw[0].toLowerCase() === 'never';
+      fn.body = [never ? { k: 'ExprStmt', e, l: e.l } : { k: 'Return', e, l: e.l }];
       fn.arrowExpr = e;
+      fn.endLine = this.toks[this.p - 1].l;
+      fn.doc = doc;
       return { k: 'Closure', fn, l };
     }
     this.expectId('function');
     const byRef = this.accept('&');
-    const fn = this.parseFunctionRest('{closure}', byRef, l, { closure: true, static: isStatic });
+    const fn = this.parseFunctionRest(this.closureName(l), byRef, l, { closure: true, static: isStatic });
+    fn.doc = doc;
     return { k: 'Closure', fn, l };
   }
 
@@ -798,7 +1118,14 @@ export class Parser {
       case 'tpl': this.p++; return { k: 'Interp', parts: this.interpParts(t.v), l };
       case 'shell': this.p++; return { k: 'Shell', parts: this.interpParts(t.v), l };
       case 'op':
-        if (t.v === '(') { this.p++; const e = this.parseExpr(); this.expect(')'); return e; }
+        if (t.v === '#[') { // attributes on a closure or arrow function
+          const attrs = this.parseAttributes();
+          const e = this.parsePrimary();
+          if (e.k !== 'Closure') this.unexpected();
+          e.fn.attrs = attrs;
+          return e;
+        }
+        if (t.v === '(') { this.p++; const e = this.parseExpr(); this.expect(')'); if (e.noDeref) e.noDeref = false; e.inParens = true; return e; }
         if (t.v === '[') { this.p++; return { k: 'Arr', items: this.parseArrayItems(']'), l }; }
         if (t.v === '$') {
           this.p++;
@@ -832,6 +1159,8 @@ export class Parser {
           case 'empty': { this.p++; this.expect('('); const e = this.parseExpr(); this.expect(')'); return { k: 'Empty', e, l }; }
           case 'exit': case 'die': {
             this.p++;
+            // (PHP 8.4: exit() is a function)
+            if (rt.phpVersion >= 80400 && this.isOp('(')) return { k: 'Call', f: 'exit', fb: null, args: this.parseArgs(), l, raw: '\\exit' };
             let e = null;
             if (this.accept('(')) { if (!this.isOp(')')) e = this.parseExpr(); this.expect(')'); }
             return { k: 'Exit', e, l };
@@ -841,9 +1170,9 @@ export class Parser {
             if (nx.t === 'id' && (nx.v.toLowerCase() === 'function' || nx.v.toLowerCase() === 'fn')) { this.p++; return this.parseClosure(true); }
             break;
           case 'match': if (nxOp === '(') return this.parseMatch(); break;
-          case 'new': return this.parseNew();
+          case 'new': return this.newExpr();
         }
-        if (MAGIC.has(kw) && nxOp !== '(' && nxOp !== '::') {
+        if ((MAGIC.has(kw) || (kw === '__property__' && rt.phpVersion >= 80400)) && nxOp !== '(' && nxOp !== '::') {
           this.p++;
           return this.magic(kw, l);
         }
@@ -852,11 +1181,11 @@ export class Parser {
         if (nxOp === '(') {
           const [fname, fb] = this.resolveFn(name);
           const args = this.parseArgs();
-          return { k: 'Call', f: fname, fb, args, l };
+          return { k: 'Call', f: fname, fb, args, l, raw: name };
         }
-        if (nxOp === '::') return { k: 'Name', name: this.resolveClass(name), l };
+        if (nxOp === '::') return { k: 'Name', name: this.resolveClass(name), l, raw: name };
         const [cname, fb] = this.resolveConst(name);
-        return { k: 'Const', name: cname, fb, l };
+        return { k: 'Const', name: cname, fb, l, raw: name };
       }
       case 'cast': return this.parseUnary();
     }
@@ -869,6 +1198,11 @@ export class Parser {
     this.unexpected();
   }
   magic(kw, l) {
+    const e = this.magicValue(kw, l);
+    if (e) e.magic = kw.toUpperCase(); // (assert() messages print the constant's name)
+    return e;
+  }
+  magicValue(kw, l) {
     const fn = this.st.fnStack[this.st.fnStack.length - 1];
     const cd = this.st.clsStack[this.st.clsStack.length - 1];
     switch (kw) {
@@ -876,12 +1210,14 @@ export class Parser {
       case '__file__': return { k: 'Lit', v: this.file, l };
       case '__dir__': return { k: 'Lit', v: pathMod.dirname(this.file), l };
       case '__namespace__': return { k: 'Lit', v: this.st.ns, l };
-      case '__function__': return { k: 'Lit', v: fn ? (fn.name === '{closure}' ? '{closure}' : fn.name) : '', l };
-      case '__class__': return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
+      case '__function__': return { k: 'Lit', v: fn ? fn.name : '', l };
+      case '__class__': if (fn && fn.cls === undefined && !fn.closure && !fn.arrow) return { k: 'Lit', v: '', l }; // (a function declared in a method)
+        return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
       case '__trait__': return { k: 'Lit', v: cd && cd.kind === 'trait' ? cd.name : '', l };
+      case '__property__': return { k: 'Lit', v: (fn && fn.hookProp) || '', l }; // (PHP 8.4) the property of the enclosing hook
       case '__method__': {
         if (!fn) return { k: 'Lit', v: '', l };
-        if (cd && fn.cls !== undefined) return cd.kind === 'trait' ? { k: 'MagicMethod', name: fn.name, l } : { k: 'Lit', v: (cd.anon ? 'class@anonymous' : cd.name) + '::' + fn.name, l };
+        if (cd && fn.cls !== undefined) return { k: 'Lit', v: (cd.anon ? 'class@anonymous' : cd.name) + '::' + fn.name, l }; // (a trait's name in a trait)
         return { k: 'Lit', v: fn.name, l };
       }
     }
@@ -904,10 +1240,25 @@ export class Parser {
   }
 
   parsePostfix(e) {
+    if (e.noDeref) return e;
+    const top = this.postfixChain(e);
+    // a nullsafe operator short-circuits the rest of its chain: mark the inner ones and the top
+    if (top !== e) {
+      let short = false;
+      const inner = (x) => x.o || x.f || (x.cls && typeof x.cls === 'object' ? x.cls : null);
+      for (let x = inner(top); x && x !== e; x = inner(x)) if (x.nullsafe) { x.short = true; short = true; }
+      if (e.nullsafe && e !== top) { e.short = true; short = true; }
+      if (short) top.chainTop = true;
+    }
+    return top;
+  }
+
+  postfixChain(e) {
     for (;;) {
       const t = this.tok;
       if (t.t !== 'op') break;
       const l = t.l;
+      if (t.v === '{' && (e.k === 'Var' || e.k === 'Index' || e.k === 'Prop' || e.k === 'SProp')) this.fatal('Array and string offset access syntax with curly braces is no longer supported');
       switch (t.v) {
         case '[': {
           this.p++;
@@ -936,30 +1287,44 @@ export class Parser {
         case '::': {
           this.p++;
           const cls = e.k === 'Name' ? e.name : e;
+          const rawCls = e.k === 'Name' ? e.raw : undefined;
           const nt = this.tok;
           if (nt.t === 'var') {
             this.p++;
             if (this.isOp('(')) { // A::$fn() calls the static method named by $fn
               const args = this.parseArgs();
-              e = { k: 'SCall', cls, name: { k: 'Var', name: nt.v, l }, args, l };
-            } else e = { k: 'SProp', cls, name: nt.v, l };
+              e = { k: 'SCall', cls, rawCls, name: { k: 'Var', name: nt.v, l }, args, l };
+            } else e = { k: 'SProp', cls, rawCls, name: nt.v, l };
             continue;
           }
           if (nt.t === 'op' && nt.v === '$') {
             const ne = this.parsePrimaryVarOnly();
-            if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, name: ne, args, l }; continue; }
-            e = { k: 'SProp', cls, name: ne.k === 'VarVar' ? ne.e : ne, l }; continue;
+            if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, rawCls, name: ne, args, l }; continue; }
+            e = { k: 'SProp', cls, rawCls, name: ne.k === 'VarVar' ? ne.e : ne, l }; continue;
           }
-          if (nt.t === 'op' && nt.v === '{') { this.p++; const ne = this.parseExpr(); this.expect('}'); const args = this.parseArgs(); e = { k: 'SCall', cls, name: ne, args, l }; continue; }
+          if (nt.t === 'op' && nt.v === '{') {
+            this.p++; const ne = this.parseExpr(); this.expect('}');
+            if (!this.isOp('(')) { e = { k: 'CConst', cls, rawCls, name: ne, l }; continue; } // C::{expr} (PHP 8.3)
+            const args = this.parseArgs(); e = { k: 'SCall', cls, rawCls, name: ne, args, l }; continue;
+          }
           if (nt.t !== 'id') this.unexpected();
           this.p++;
-          if (this.isOp('(')) { const args = this.parseArgs(); e = { k: 'SCall', cls, name: nt.v, args, l }; continue; }
-          if (nt.v.toLowerCase() === 'class') { e = { k: 'ClassName', cls, l }; continue; }
-          e = { k: 'CConst', cls, name: nt.v, l };
+          if (this.isOp('(')) {
+            const args = this.parseArgs();
+            // parent::$prop::get() / ::set($v): the parent's hook (PHP 8.4)
+            if (cls && typeof cls === 'object' && cls.k === 'SProp' && !cls.inParens && cls.cls === 'parent' && typeof cls.name === 'string' && /^(get|set)$/i.test(nt.v) && rt.phpVersion >= 80400) {
+              if (args === 'fcc') this.fatal('Cannot create Closure for parent property hook call');
+              e = { k: 'ParentHook', prop: cls.name, hook: nt.v.toLowerCase(), args, l }; continue;
+            }
+            e = { k: 'SCall', cls, rawCls, name: nt.v, args, l }; continue;
+          }
+          if (nt.v.toLowerCase() === 'class') { e = { k: 'ClassName', cls, rawCls, l }; continue; }
+          e = { k: 'CConst', cls, rawCls, name: nt.v, l };
           continue;
         }
         case '(': {
-          if (e.k === 'Lit' || e.k === 'Name') return e;
+          // (strings and array literals can be called: "strlen"('x'), [$obj, 'm']())
+          if ((e.k === 'Lit' && (typeof e.v !== 'string' || e.magic)) || e.k === 'Name') return e;
           const args = this.parseArgs();
           e = { k: 'Call', f: e, args, l };
           continue;
@@ -978,6 +1343,8 @@ export class Parser {
       if (typeof p === 'string') return p;
       const toks = lex('<?php ' + p.code + ';', this.file);
       for (const tk of toks) tk.l += p.line - 1;
+      // (diagnostics of the lexer for nested strings)
+      if (toks.compileDeprecations) for (const d of toks.compileDeprecations) (this.st.compileWarnings || (this.st.compileWarnings = [])).push({ ...d, l: d.l + p.line - 1 });
       const sub = new Parser(toks, this.file, this.st);
       const e = sub.parseExpr();
       if (!sub.isOp(';')) sub.unexpected();
@@ -986,8 +1353,26 @@ export class Parser {
   }
 }
 
+// reserved words, which the lexer turns into tokens of their own
+const PHP_KEYWORDS = new Set(['abstract', 'and', 'array', 'as', 'break', 'callable', 'case', 'catch', 'class', 'clone', 'const', 'continue',
+  'declare', 'default', 'die', 'do', 'echo', 'else', 'elseif', 'empty', 'enddeclare', 'endfor', 'endforeach', 'endif', 'endswitch',
+  'endwhile', 'eval', 'exit', 'extends', 'final', 'finally', 'fn', 'for', 'foreach', 'function', 'global', 'goto', 'if', 'implements',
+  'include', 'include_once', 'instanceof', 'insteadof', 'interface', 'isset', 'list', 'match', 'namespace', 'new', 'or', 'print',
+  'private', 'protected', 'public', 'readonly', 'require', 'require_once', 'return', 'static', 'switch', 'throw', 'trait', 'try',
+  'unset', 'use', 'var', 'while', 'xor', 'yield', 'yield from', '__class__', '__dir__', '__file__', '__function__', '__line__',
+  '__method__', '__namespace__', '__trait__', '__halt_compiler']);
+// the lexer's and the parser's compile-time diagnostics, in source order
+export function mergeCompileWarnings(toks, p) {
+  const dead = p.st.deadRanges || [];
+  const all = [...(toks.compileDeprecations || []), ...(p.st.compileWarnings || [])].filter((w) => !(w.deprecated && dead.some(([a, b]) => w.l >= a && w.l <= b)));
+  return all.length ? all.sort((a, b) => a.l - b.l) : null;
+}
+const CONFUSABLE_TYPES = { boolean: 'bool', integer: 'int', double: 'float', resource: null };
 export function parsePHP(src, file) {
   const toks = lex(src, file);
   const p = new Parser(toks, file);
-  return p.parseProgram();
+  const ast = p.parseProgram();
+  ast.strict = !!p.st.strict; // declare(strict_types=1): applies to calls from the file's top-level code
+  ast.compileWarnings = mergeCompileWarnings(toks, p);
+  return ast;
 }

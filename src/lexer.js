@@ -6,7 +6,7 @@ import { rt } from './runtime/state.js';
 const OPS3 = ['<<=', '>>=', '**=', '...', '<=>', '===', '!==', '??=', '?->'];
 const OPS2 = ['++', '--', '->', '=>', '::', '==', '!=', '<>', '<=', '>=', '&&', '||', '??', '+=', '-=', '*=', '/=', '.=', '%=', '&=', '|=', '^=', '<<', '>>', '**'];
 const OPS1 = '+-*/%=<>!.()[]{},;?:&|^~@$`\\';
-const CAST_RE = /^\(\s*(int|integer|bool|boolean|float|double|real|string|binary|array|object|unset)\s*\)/i;
+const CAST_RE = /^\(\s*(int|integer|bool|boolean|float|double|real|string|binary|array|object|unset|void)\s*\)/i;
 const isIdStart = (c) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c >= 128;
 const isIdChar = (c) => isIdStart(c) || (c >= 48 && c <= 57);
 
@@ -22,7 +22,30 @@ export function lex(src, file) {
   const n = src.length;
   const shortTags = typeof rt !== 'undefined' && rt.ini && /^(1|on|true)$/i.test(String(rt.ini.get('short_open_tag') || ''));
   const err = (m) => { throw new ParseErr(m, line); };
-  const push = (t, v, extra) => { const tk = { t, v, l: line }; if (extra) Object.assign(tk, extra); toks.push(tk); return tk; };
+  // The last /** doc comment */ stays pending (as in PHP) until a declaration takes it or a "}"
+  // ends it; tokens lexed meanwhile share one slot object, see Parser.takeDoc
+  let doc = null;
+  // brackets are matched here, as PHP's lexer does: the first mismatch becomes an error token,
+  // reported when the parser gets to it (so earlier syntax errors win)
+  const brackets = [];
+  let bracketError = false;
+  const bracketErr = (msg) => { bracketError = true; toks.push({ t: 'error', v: msg, l: line }); };
+  const unclosed = (b) => `Unclosed '${b.c}'${b.l !== line ? ` on line ${b.l}` : ''}`;
+  const push = (t, v, extra) => {
+    if (t === 'op' && !bracketError) {
+      if (v === '(' || v === '[' || v === '{' || v === '#[') brackets.push({ c: v === '#[' ? '[' : v, l: line });
+      else if (v === ')' || v === ']' || v === '}') {
+        const b = brackets.pop();
+        if (!b) bracketErr(`Unmatched '${v}'`);
+        else if ({ '(': ')', '[': ']', '{': '}' }[b.c] !== v) bracketErr(`${unclosed(b)} does not match '${v}'`);
+      }
+    }
+    const tk = { t, v, l: line };
+    if (extra) Object.assign(tk, extra);
+    if (doc !== null) { tk.doc = doc; if (t === 'op' && v === '}') doc = null; }
+    toks.push(tk);
+    return tk;
+  };
   const countNl = (s) => { let c = 0; for (let j = 0; j < s.length; j++) if (s.charCodeAt(j) === 10) c++; return c; };
 
   function htmlMode() {
@@ -51,7 +74,8 @@ export function lex(src, file) {
     return false;
   }
   if (src.startsWith('#!')) { const e = src.indexOf('\n'); i = e < 0 ? n : e + 1; line = 2; }
-  if (!htmlMode()) { push('eof', null); return toks; }
+  const end = () => { if (!bracketError && brackets.length) bracketErr(unclosed(brackets[brackets.length - 1])); push('eof', null); return toks; };
+  if (!htmlMode()) return end();
 
   while (i < n) {
     const c = src.charCodeAt(i);
@@ -60,18 +84,7 @@ export function lex(src, file) {
     if (c === 10) { line++; i++; continue; }
     const ch = src[i];
     // comments
-    if (ch === '#' && src[i + 1] === '[') { // attribute: skip
-      let depth = 0;
-      while (i < n) {
-        const d = src[i];
-        if (d === '[') depth++;
-        else if (d === ']') { depth--; if (depth === 0) { i++; break; } }
-        else if (d === '\n') line++;
-        else if (d === '"' || d === "'") { const q = d; i++; while (i < n && src[i] !== q) { if (src[i] === '\\') i++; if (src[i] === '\n') line++; i++; } }
-        i++;
-      }
-      continue;
-    }
+    if (ch === '#' && src[i + 1] === '[') { push('op', '#['); i += 2; continue; } // attribute group
     if (ch === '#' || (ch === '/' && src[i + 1] === '/')) {
       while (i < n && src[i] !== '\n') {
         if (src[i] === '?' && src[i + 1] === '>') break;
@@ -82,6 +95,7 @@ export function lex(src, file) {
     if (ch === '/' && src[i + 1] === '*') {
       const e = src.indexOf('*/', i + 2);
       const end = e < 0 ? n : e + 2;
+      if (src[i + 2] === '*' && end - i > 4 && /\s/.test(src[i + 3])) doc = { text: src.slice(i, end), used: false };
       line += countNl(src.slice(i, end));
       i = end; continue;
     }
@@ -89,7 +103,8 @@ export function lex(src, file) {
     if (ch === '?' && src[i + 1] === '>') {
       push('op', ';', { close: true });
       i += 2;
-      if (src[i] === '\n') { i++; line++; } else if (src[i] === '\r' && src[i + 1] === '\n') { i += 2; line++; }
+      // one newline after ?> belongs to the tag: \n, \r\n or \r
+      if (src[i] === '\n') { i++; line++; } else if (src[i] === '\r') { i += src[i + 1] === '\n' ? 2 : 1; line++; }
       if (!htmlMode()) break;
       continue;
     }
@@ -121,9 +136,9 @@ export function lex(src, file) {
     if ((c >= 48 && c <= 57) || (ch === '.' && i + 1 < n && src.charCodeAt(i + 1) >= 48 && src.charCodeAt(i + 1) <= 57)) {
       let m;
       const stick = (re) => { re.lastIndex = i; return re.exec(src); };
-      if ((m = stick(/0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 16); continue; }
-      if ((m = stick(/0[bB][01]+(?:_[01]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 2); continue; }
-      if ((m = stick(/0[oO][0-7]+(?:_[0-7]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 8); continue; }
+      if ((m = stick(/0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 16, m[0]); continue; }
+      if ((m = stick(/0[bB][01]+(?:_[01]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 2, m[0]); continue; }
+      if ((m = stick(/0[oO][0-7]+(?:_[0-7]+)*/y))) { i += m[0].length; pushInt(m[0].slice(2).replace(/_/g, ''), 8, m[0]); continue; }
       m = stick(/(\d+(?:_\d+)*)?(\.\d+(?:_\d+)*|\.)?([eE][+-]?\d+(?:_\d+)*)?/y);
       let txt = m[0];
       if (txt.endsWith('.') && src[i + txt.length] === '.') txt = txt.slice(0, -1); // 1..2
@@ -132,9 +147,9 @@ export function lex(src, file) {
       if (m[2] === undefined && m[3] === undefined || (txt === m[1])) {
         if (clean.length > 1 && clean[0] === '0') {
           if (!/^[0-7]+$/.test(clean)) err('Invalid numeric literal');
-          pushInt(clean.slice(1), 8);
-        } else pushInt(clean, 10);
-      } else push('float', Number(clean));
+          pushInt(clean.slice(1), 8, txt);
+        } else pushInt(clean, 10, txt);
+      } else push('float', Number(clean), { raw: txt });
       continue;
     }
     // strings
@@ -145,11 +160,16 @@ export function lex(src, file) {
         s += src[j]; j++;
       }
       if (j >= n) err('syntax error, unexpected end of file');
-      push('str', s); line += countNl(s); i = j + 1; continue;
+      push('str', s, { sq: true }); line += countNl(s); i = j + 1; continue;
     }
     if (ch === '"' || ch === '`') {
       let j = i + 1;
-      while (j < n && src[j] !== ch) { if (src[j] === '\\') j++; j++; }
+      while (j < n && src[j] !== ch) {
+        if (src[j] === '\\') { j += 2; continue; }
+        // {$...} and ${...} hold code, which may contain quotes
+        if ((src[j] === '{' && src[j + 1] === '$') || (src[j] === '$' && src[j + 1] === '{')) { j = matchBrace(src, src[j] === '{' ? j : j + 1) + 1; continue; }
+        j++;
+      }
       if (j >= n) err('syntax error, unexpected end of file');
       const raw = src.slice(i + 1, j);
       const startLine = line;
@@ -171,12 +191,21 @@ export function lex(src, file) {
         const startLine = line;
         line++;
         // find closing marker: a line consisting of optional whitespace + id, followed by non-id char
-        let p = bodyStart, found = -1, indent = '';
-        const re = new RegExp('^([ \\t]*)' + id.replace(/[^\w]/g, '\\$&') + '(?![A-Za-z0-9_\\x80-\\xff])', 'gm');
-        re.lastIndex = bodyStart;
-        let mm;
-        while ((mm = re.exec(src))) {
-          if (mm.index === 0 || src[mm.index - 1] === '\n') { found = mm.index; indent = mm[1]; break; }
+        let found = -1, indent = '';
+        const inCode = new Set(); // lines of the body that start inside an interpolated expression
+        const marker = new RegExp('([ \\t]*)' + id.replace(/[^\w]/g, '\\$&') + '(?![A-Za-z0-9_\\x80-\\xff])', 'y');
+        // (in a heredoc, the marker isn't looked for inside {$...} and ${...})
+        for (let k = bodyStart, lineNo = 0, atStart = true; k < src.length;) {
+          if (atStart) { marker.lastIndex = k; const mm = marker.exec(src); if (mm) { found = k; indent = mm[1]; break; } atStart = false; }
+          const c = src[k];
+          if (c === '\n') { lineNo++; atStart = true; k++; }
+          else if (nowdoc) k++;
+          else if (c === '\\') { if (src[k + 1] === '\n') { lineNo++; atStart = true; } k += 2; }
+          else if ((c === '{' && src[k + 1] === '$') || (c === '$' && src[k + 1] === '{')) {
+            const end = matchBrace(src, c === '{' ? k : k + 1);
+            for (let q = k; q < end; q++) if (src[q] === '\n') inCode.add(++lineNo);
+            k = end + 1;
+          } else k++;
         }
         if (found < 0) err('syntax error, unexpected end of file');
         let body = found > bodyStart ? src.slice(bodyStart, found - 1) : '';
@@ -185,18 +214,28 @@ export function lex(src, file) {
         line += countNl(src.slice(bodyStart, found));
         i = found + indent.length + id.length;
         if (indent.length) {
-          body = body.split('\n').map((ln) => {
-            if (ln.startsWith(indent)) return ln.slice(indent.length);
-            if (/^[ \t]*$/.test(ln)) return '';
-            throw new ParseErr('Invalid body indentation level (expecting an indentation level of at least ' + indent.length + ')', startLine);
+          // the closing marker's indentation is removed from every line (it may not mix tabs and
+          // spaces, and neither may the lines); errors are reported at the line they're found on
+          if (indent.includes(' ') && indent.includes('\t')) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine + 1);
+          const ch = indent[0];
+          body = body.split('\n').map((ln, idx) => {
+            if (inCode.has(idx)) return ln;
+            let k = 0;
+            while (k < indent.length && (ln[k] === ' ' || ln[k] === '\t')) {
+              if (ln[k] !== ch) throw new ParseErr('Invalid indentation - tabs and spaces cannot be mixed', startLine + 1 + idx);
+              k++;
+            }
+            if (k < indent.length && k < ln.length && ln.slice(k) !== '\r') throw new ParseErr('Invalid body indentation level (expecting an indentation level of at least ' + indent.length + ')', startLine + 1 + idx);
+            return ln.slice(k);
           }).join('\n');
         }
-        if (nowdoc) push('str', body, { l: startLine });
+        const heredoc = '<<<' + (m[1] ? m[1] : '') + id; // as PHP shows it in syntax errors
+        if (nowdoc) push('str', body, { l: startLine, heredoc });
         else {
           const parts = interp(body, 'h', startLine + 1);
-          if (parts.length === 0) push('str', '', { l: startLine });
-          else if (parts.length === 1 && typeof parts[0] === 'string') push('str', parts[0], { l: startLine });
-          else push('tpl', parts, { l: startLine });
+          if (parts.length === 0) push('str', '', { l: startLine, heredoc });
+          else if (parts.length === 1 && typeof parts[0] === 'string') push('str', parts[0], { l: startLine, heredoc });
+          else push('tpl', parts, { l: startLine, heredoc });
         }
         continue;
       }
@@ -204,8 +243,11 @@ export function lex(src, file) {
     // casts
     if (ch === '(') {
       const m = CAST_RE.exec(src.slice(i, i + 30));
-      if (m) {
+      if (m && !(m[1].toLowerCase() === 'void' && rt.phpVersion < 80500)) { // ((void) is PHP 8.5's)
         let t = m[1].toLowerCase();
+        if (t === 'real') err('The (real) cast has been removed, use (float) instead');
+        const canon = { integer: 'int', double: 'float', binary: 'string', boolean: 'bool' }[t];
+        if (canon && rt.phpVersion >= 80500) deprecation(`Non-canonical cast (${t}) is deprecated, use the (${canon}) cast instead`, line);
         t = { integer: 'int', boolean: 'bool', double: 'float', real: 'float', binary: 'string' }[t] || t;
         push('cast', t); i += m[0].length; continue;
       }
@@ -214,26 +256,28 @@ export function lex(src, file) {
     const s3 = src.substr(i, 3);
     if (OPS3.includes(s3)) { push('op', s3); i += 3; continue; }
     const s2 = src.substr(i, 2);
-    if (OPS2.includes(s2)) { push('op', s2); i += 2; continue; }
+    if (OPS2.includes(s2) || (s2 === '|>' && rt.phpVersion >= 80500)) { push('op', s2); i += 2; continue; } // (the pipe operator is PHP 8.5's)
     if (OPS1.includes(ch)) { push('op', ch); i++; continue; }
     err(`syntax error, unexpected character 0x${c.toString(16).toUpperCase().padStart(2, '0')}`);
   }
-  push('eof', null);
-  return toks;
+  return end();
 
-  function pushInt(digits, base) {
+  function pushInt(digits, base, raw) { // raw: the source text, for syntax errors
     if (digits === '') digits = '0';
     let b;
     if (base === 10) b = BigInt(digits);
     else b = BigInt((base === 16 ? '0x' : base === 8 ? '0o' : '0b') + digits);
-    if (b > I64MAX) push('float', Number(b));
-    else push('int', normBig(b));
+    if (b > I64MAX) push('float', Number(b), { raw });
+    else push('int', normBig(b), { raw });
   }
 
   // process escapes and interpolation; returns array of string | {code, line}
   function interp(raw, mode, startLine) {
     const parts = [];
     let cur = '', j = 0, ln = startLine;
+    // the line PHP is compiling at when it reaches a ${...}: the string's, then that of the last
+    // embedded expression
+    let compLine = startLine;
     const m = raw.length;
     const flush = () => { if (cur) { parts.push(cur); cur = ''; } };
     while (j < m) {
@@ -284,33 +328,51 @@ export function lex(src, file) {
             else if (mm[2] !== undefined) code += /^-?(0|[1-9]\d*)$/.test(mm[2]) ? '[' + mm[2] + ']' : "['" + mm[2] + "']";
             else code += "['" + mm[3] + "']";
             k += mm[0].length;
+          } else {
+            // what PHP's lexer accepts after "$var[" in a string: a name, a number, a variable, then "]"
+            const key = /^\[(\$[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*|-?\d+|[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*)/.exec(raw.slice(k, k + 200));
+            const expect = '"-" or identifier or variable or number';
+            if (key) {
+              const after = raw[k + key[0].length];
+              err(`syntax error, unexpected ${after === undefined ? (mode === '"' ? 'double-quote mark' : 'string content ""') : after === '-' || after === '[' ? `token "${after}"` : 'string content ""'}, expecting "]"`);
+            }
+            if (raw[k + 1] === ']') err(`syntax error, unexpected token "]", expecting ${expect}`);
+            if (raw[k + 1] === '-') { const id = /^[A-Za-z_]\w*/.exec(raw.slice(k + 2)); err(id ? `syntax error, unexpected identifier "${id[0]}", expecting number` : 'syntax error, unexpected string content "", expecting number'); }
+            err(`syntax error, unexpected string content "", expecting ${expect}`);
           }
         } else if ((raw[k] === '-' && raw[k + 1] === '>' && isIdStart(raw.charCodeAt(k + 2))) || (raw[k] === '?' && raw[k + 1] === '-' && raw[k + 2] === '>' && isIdStart(raw.charCodeAt(k + 3)))) {
           const opLen = raw[k] === '?' ? 3 : 2;
           let q = k + opLen; while (q < m && isIdChar(raw.charCodeAt(q))) q++;
           code += raw.slice(k, q); k = q;
         }
-        flush(); parts.push({ code, line: ln }); j = k; continue;
+        flush(); parts.push({ code, line: ln }); compLine = ln; j = k; continue;
       }
       if (d === '{' && raw[j + 1] === '$') {
         const end = matchBrace(raw, j);
-        flush(); parts.push({ code: raw.slice(j + 1, end), line: ln });
+        flush(); parts.push({ code: raw.slice(j + 1, end), line: ln }); compLine = ln;
         ln += countNl(raw.slice(j, end)); j = end + 1; continue;
       }
       if (d === '$' && raw[j + 1] === '{') {
         const end = matchBrace(raw, j + 1);
         const inner = raw.slice(j + 2, end);
         let code;
-        if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$/.test(inner)) code = '$' + inner;
-        else if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*\[/.test(inner)) code = '$' + inner;
-        else code = '${' + inner + '}';
-        flush(); parts.push({ code, line: ln }); j = end + 1; continue;
+        if (/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*(\[|$)/.test(inner)) {
+          code = '$' + inner;
+          deprecation('Using ${var} in strings is deprecated, use {$var} instead', compLine);
+        } else {
+          code = '${' + inner + '}';
+          deprecation('Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead', compLine);
+        }
+        flush(); parts.push({ code, line: ln }); compLine = ln;
+        ln += countNl(raw.slice(j, end)); j = end + 1; continue;
       }
       cur += d; j++;
     }
     flush();
     return parts;
   }
+  // deprecations PHP raises while compiling (checkProgram() reports them)
+  function deprecation(msg, l) { (toks.compileDeprecations || (toks.compileDeprecations = [])).push({ msg, l, deprecated: true }); }
   function matchBrace(s, start) {
     let depth = 0;
     for (let k = start; k < s.length; k++) {

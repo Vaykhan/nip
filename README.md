@@ -8,7 +8,8 @@ node bin/nip.js -l script.php             # syntax check
 node bin/nip.js -d precision=17 file.php  # set ini values
 ```
 
-Once installed as a package (`npm install github:Vaykhan/nip`), the command is `nip`.
+Installed as a package (`npm install -g @vaykhan/nip`, or `npm install github:Vaykhan/nip` for the latest
+code), the command is `nip`.
 
 NIP is written in pure JavaScript, with no PHP binary, WebAssembly or dependencies. It checks
 its behaviour against the real `php` binary and aims for identical output, including
@@ -19,13 +20,13 @@ plan to get there.
 ## Embedding
 
 ```js
-import { run, runFile } from 'nip';
+import { run, runFile } from '@vaykhan/nip';
 
 const { output, exitCode } = run('<?php echo "hi";');   // output is captured by default
 runFile('script.php', { argv: ['script.php', 'x'] });   // output goes to stdout
 ```
 
-From CommonJS, `require('nip')` loads the single-file build (`dist/nip.cjs`, created by
+From CommonJS, `require('@vaykhan/nip')` loads the single-file build (`dist/nip.cjs`, created by
 `npm run build` or on install). Options: `file`, `argv`, `capture`, `ini` (an object of ini settings).
 
 ## What's supported
@@ -34,15 +35,23 @@ From CommonJS, `require('nip')` loads the single-file build (`dist/nip.cjs`, cre
   (`insteadof`/`as`), abstract/final, readonly properties and classes, constructor promotion,
   enums (pure and backed, with methods, constants and interfaces), `match`, closures and arrow
   functions, first-class callables (`strlen(...)`), named arguments, spread/unpacking, nullsafe
-  `?->`, and generators (keys, `send`, `throw`, `yield from`, return values). Also references
+  `?->`, generators (keys, `send`, `throw`, `yield from`, return values), Fibers, `goto` and
+  `declare(ticks)`. Also references
   (including return-by-reference), static variables, late static binding, all magic methods,
   and destructors with PHP-like timing. Typed parameters, returns and properties work in
   coercive and strict mode, with union, intersection and nullable types. Plus exceptions with
   `finally`, namespaces, `include`/`require`, `eval`, heredoc/nowdoc, alternative syntax and
   inline HTML.
+- **Reflection and attributes:** the `Reflection*` classes (classes, objects, methods,
+  functions, properties, parameters, constants, enums, types, attributes, doc comments) and
+  the engine attributes `#[\Attribute]`, `#[\Override]`, `#[\AllowDynamicProperties]` and
+  `#[\SensitiveParameter]`.
+- **Compile-time errors:** PHP's checks on a whole file before it runs (invalid modifiers,
+  interface and enum rules, `readonly` rules, type declarations, `goto` targets, ...).
 - **Library:** about 600 functions:
   - strings, `mb_*`, arrays and sorting, math, the `sprintf` family
-  - PCRE (`preg_*`), JSON, `serialize`, `var_dump`/`print_r`/`var_export`
+  - PCRE (`preg_*`) on NIP's own PCRE2-compatible engine (recursion, conditionals, `\K`,
+    backtracking verbs, atomic groups, UTF-8 mode), JSON, `serialize`, `var_dump`/`print_r`
   - dates (`date`, `strtotime`, time zones, `DateTime` and friends)
   - files and streams, output buffering, error handlers, `filter_var`
   - hashing, `password_hash`/`crypt` (real bcrypt, compatible with PHP), `mt_rand` matching
@@ -58,25 +67,35 @@ skipped.
 
 | Suite | Identical output |
 |---|---|
-| `tests/lang` | 255 / 278 (92%) |
+| `tests/lang` | 256 / 278 (92%) |
+| `tests` (all: lang, basic, func, output, ...) | 585 / 722 (81%) |
 | `ext/standard/tests/math` | 121 / 148 (82%) |
-| `ext/standard/tests/array` | 598 / 795 (75%) |
+| `ext/standard/tests/array` | 596 / 795 (75%) |
 | `ext/json/tests` | 62 / 85 (73%) |
-| `ext/standard/tests/strings` | 441 / 634 (70%) |
+| `ext/standard/tests/strings` | 441 / 635 (69%) |
+| `ext/reflection/tests` | 265 / 413 (64%) |
+| `Zend/tests` (engine edge cases) | 2449 / 3941 (62%) |
 | `ext/pcre/tests` | 90 / 148 (61%) |
-| `Zend/tests` (engine edge cases) | 2019 / 3774 (53%) |
+| `ext/standard/tests` (all) | 1809 / 3127 (58%) |
+| `ext/spl/tests` | 238 / 710 (34%) |
+| `ext/date/tests` | 218 / 655 (33%) |
+
+CI fails when a test listed in `tests/phpt/baseline/` stops passing.
 
 ### Known limitations
 
 - **Not implemented:**
-  - `goto`, Fibers, Reflection, `declare(ticks)`
   - network streams and sockets (HTTP URLs in `file_get_contents` shell out to `curl`)
   - `ext/intl`, PDO/mysqli, GD, sessions
   - a web server interface
-- Many compile-time errors PHP reports for *invalid* code (duplicate modifiers, incompatible
-  method signatures, ...) are not detected. Valid programs are unaffected.
-- Regex: recursion `(?R)`, conditionals, `\K` and `(?J)` are unsupported. Possessive
-  quantifiers and atomic groups are approximated.
+- Some rarer compile-time errors PHP reports for *invalid* code are not detected yet. Valid
+  programs are unaffected.
+- Fibers can't suspend from callbacks called by builtin functions (`array_map`, `usort`, ...)
+  or from inside generators. Code running inside a fiber is about 4× slower.
+- Builtin functions have no parameter or return types in Reflection.
+- Regex: NIP has its own PCRE2-compatible engine. It approximates PCRE2's JIT stack and match
+  limits rather than counting them exactly, and patterns in UTF-8 mode run about 2× slower than
+  in the earlier JS RegExp translation (byte-mode patterns use V8's RegExp when that's exact).
 - Object handle numbers (`#N` in `var_dump`) are never reused; PHP reuses freed ones.
 - Performance: about 1.5× slower than PHP 8.3 on array/string/object-heavy loops and about 5×
   slower on call-heavy recursion. Startup takes about 110 ms (PHP: about 20 ms).
@@ -91,10 +110,13 @@ src/                interpreter sources, one ES module per area
   compiler/                     AST → JS closures
   runtime/                      calls, classes, errors, generators, boot, ...
   lib/                          builtin functions (string.js, array.js, pcre.js, ...)
-  prelude/*.php                 standard library parts written in PHP (exceptions, SPL, DateTime)
+  prelude/*.php                 standard library parts written in PHP (exceptions, SPL,
+                                DateTime, Reflection)
 scripts/build.js    builds dist/nip.cjs, the whole interpreter as one file
 tests/cases/        test scripts with expected output from PHP 8.3
-tests/phpt/         runner for php-src's .phpt test suite
+tests/unit/         unit tests (node:test) for the lexer, parser, values and API
+tests/phpt/         runner for php-src's .phpt test suite and the enforced baselines
+scripts/fuzz.js     mutation fuzzer
 bench/              benchmark scripts
 ```
 
@@ -103,7 +125,8 @@ bench/              benchmark scripts
 ## Development
 
 ```sh
-npm test               # test cases vs expected output (no PHP needed)
+npm test               # unit tests and test cases vs expected output (no PHP needed)
+npm run lint           # ESLint
 npm run test:bundle    # same, against the single-file build
 npm run test:php       # compare directly with your local php
 node tests/phpt/runner.js /path/to/php-src/tests/lang   # php-src compatibility run

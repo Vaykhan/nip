@@ -1,0 +1,17 @@
+begin
+start
+looped to 3
+found 1,2
+inside if
+inside else
+inside try
+caught boom
+inside catch, $e is set
+finally after catch
+finally on the way out
+second label
+first label
+sum 10
+0,1,2,fin,done
+closure label
+[exit 0]
