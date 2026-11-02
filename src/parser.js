@@ -24,7 +24,7 @@ const MAGIC = new Set(['__line__', '__file__', '__dir__', '__function__', '__cla
 // statements PHP doesn't tick after (zend_is_unticked_stmt, plus if and switch which don't in practice)
 const UNTICKED = new Set(['Block', 'Label', 'FuncDecl', 'ClassDecl', 'If', 'Switch']);
 // keywords that can't be goto labels where a statement starts
-const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare']);
+const LABEL_RESERVED = new Set(['default', 'case', 'else', 'endif', 'endwhile', 'endfor', 'endforeach', 'endswitch', 'enddeclare', 'exit', 'die']);
 
 export const LVAL_KINDS = new Set(['Var', 'VarVar', 'Index', 'Prop', 'SProp', 'List']);
 const CALL_TARGETS = new Set(['Call', 'MCall', 'NullsafeMCall', 'SCall']);
@@ -71,7 +71,7 @@ export class Parser {
         if (v[0] === '\\') d = `fully qualified name "${v}"`;
         else if (/^namespace\\/i.test(v)) d = `namespace-relative name "${v}"`;
         else if (v.includes('\\')) d = `namespaced name "${v}"`;
-        else d = PHP_KEYWORDS.has(v.toLowerCase()) ? `token "${v}"` : `identifier "${v}"`;
+        else d = PHP_KEYWORDS.has(v.toLowerCase()) ? `token "${v.toLowerCase() === 'die' ? 'exit' : v}"` : `identifier "${v}"`; // (die is T_EXIT)
         break;
       }
       case 'str': d = tk.heredoc ? `heredoc start "${tk.heredoc}"` : `${tk.sq ? 'single' : 'double'}-quoted string "${tk.v}"`; break;
@@ -92,6 +92,12 @@ export class Parser {
   expect(v) { if (!this.isOp(v)) this.unexpected(); return this.next(); }
   expectId(v) { if (!this.isId(v)) this.unexpected(); return this.next(); }
   ident() { const t = this.tok; if (t.t !== 'id') this.unexpected(); this.p++; return t.v; }
+  // a name that must not be a keyword (constants, functions and goto labels; functions may be called readonly)
+  plainIdent(expecting) {
+    const t = this.tok;
+    if (t.t === 'id' && PHP_KEYWORDS.has(t.v.toLowerCase()) && t.v.toLowerCase() !== 'readonly') this.unexpected(t, expecting);
+    return this.ident();
+  }
   semi() { if (this.accept(';')) return; if (this.tok.t === 'eof') return; this.unexpected(); }
 
   // ---------------------------------------------------------------- names
@@ -125,7 +131,7 @@ export class Parser {
   classRefName(kind, name) {
     const tk = this.tok;
     if (name === undefined) name = this.ident();
-    if (/^(self|parent|static)$/i.test(name)) this.fatal(`Cannot use '${name}' as ${kind} name, as it is reserved`, tk);
+    if (/^(self|parent|static)$/i.test(name)) this.fatal(rt.phpVersion >= 80400 ? `Cannot use "${name}" as ${kind} name, as it is reserved` : `Cannot use '${name}' as ${kind} name, as it is reserved`, tk);
     return this.resolveClass(name);
   }
   nsName(name) { return this.st.ns ? this.st.ns + '\\' + name : name; }
@@ -294,7 +300,7 @@ export class Parser {
             this.p++;
             const byRef = this.accept('&');
             const doc = this.takeDoc(this.tok);
-            const name = this.ident();
+            const name = this.plainIdent('"("');
             this.declareSymbol('function', name);
             const fn = this.parseFunctionRest(this.nsName(name), byRef, l);
             fn.doc = doc;
@@ -414,7 +420,7 @@ export class Parser {
         case 'const': {
           this.p++;
           const items = [];
-          do { const name = this.ident(); this.declareSymbol('const', name); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
+          do { const name = this.plainIdent('identifier'); this.declareSymbol('const', name); this.expect('='); items.push({ name: this.nsName(name), e: this.parseExpr() }); } while (this.accept(','));
           this.semi();
           return { k: 'ConstDecl', items, l };
         }
@@ -448,7 +454,7 @@ export class Parser {
         }
         case 'goto': {
           this.p++;
-          const label = this.ident();
+          const label = this.plainIdent('identifier');
           this.semi();
           return { k: 'Goto', label, l };
         }
@@ -1153,6 +1159,8 @@ export class Parser {
           case 'empty': { this.p++; this.expect('('); const e = this.parseExpr(); this.expect(')'); return { k: 'Empty', e, l }; }
           case 'exit': case 'die': {
             this.p++;
+            // (PHP 8.4: exit() is a function)
+            if (rt.phpVersion >= 80400 && this.isOp('(')) return { k: 'Call', f: 'exit', fb: null, args: this.parseArgs(), l, raw: '\\exit' };
             let e = null;
             if (this.accept('(')) { if (!this.isOp(')')) e = this.parseExpr(); this.expect(')'); }
             return { k: 'Exit', e, l };
@@ -1206,17 +1214,10 @@ export class Parser {
       case '__class__': if (fn && fn.cls === undefined && !fn.closure && !fn.arrow) return { k: 'Lit', v: '', l }; // (a function declared in a method)
         return cd && cd.kind !== 'trait' && !cd.anon ? { k: 'Lit', v: cd.name, l } : { k: 'MagicClass', l };
       case '__trait__': return { k: 'Lit', v: cd && cd.kind === 'trait' ? cd.name : '', l };
-      case '__property__': { // (PHP 8.4) the property of the enclosing hook
-        for (let i = this.st.fnStack.length - 1; i >= 0; i--) {
-          const g = this.st.fnStack[i];
-          if (g.hookProp) return { k: 'Lit', v: g.hookProp, l };
-          if (!g.closure && !g.arrow) break;
-        }
-        return { k: 'Lit', v: '', l };
-      }
+      case '__property__': return { k: 'Lit', v: (fn && fn.hookProp) || '', l }; // (PHP 8.4) the property of the enclosing hook
       case '__method__': {
         if (!fn) return { k: 'Lit', v: '', l };
-        if (cd && fn.cls !== undefined) return cd.kind === 'trait' ? { k: 'MagicMethod', name: fn.name, l } : { k: 'Lit', v: (cd.anon ? 'class@anonymous' : cd.name) + '::' + fn.name, l };
+        if (cd && fn.cls !== undefined) return { k: 'Lit', v: (cd.anon ? 'class@anonymous' : cd.name) + '::' + fn.name, l }; // (a trait's name in a trait)
         return { k: 'Lit', v: fn.name, l };
       }
     }
@@ -1311,7 +1312,7 @@ export class Parser {
           if (this.isOp('(')) {
             const args = this.parseArgs();
             // parent::$prop::get() / ::set($v): the parent's hook (PHP 8.4)
-            if (cls && typeof cls === 'object' && cls.k === 'SProp' && cls.cls === 'parent' && typeof cls.name === 'string' && /^(get|set)$/i.test(nt.v) && rt.phpVersion >= 80400) {
+            if (cls && typeof cls === 'object' && cls.k === 'SProp' && !cls.inParens && cls.cls === 'parent' && typeof cls.name === 'string' && /^(get|set)$/i.test(nt.v) && rt.phpVersion >= 80400) {
               if (args === 'fcc') this.fatal('Cannot create Closure for parent property hook call');
               e = { k: 'ParentHook', prop: cls.name, hook: nt.v.toLowerCase(), args, l }; continue;
             }

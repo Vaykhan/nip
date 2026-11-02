@@ -212,7 +212,10 @@ ext/standard/tests/array/array_merge_variation6.phpt
 ext/standard/tests/array/array_merge_variation7.phpt
 ext/standard/tests/array/array_merge_variation8.phpt
 ext/standard/tests/array/array_merge_variation9.phpt
+ext/standard/tests/array/array_multisort_case.phpt
 ext/standard/tests/array/array_multisort_stability.phpt
+ext/standard/tests/array/array_multisort_variation10.phpt
+ext/standard/tests/array/array_multisort_variation11.phpt
 ext/standard/tests/array/array_next_error1.phpt
 ext/standard/tests/array/array_next_error2.phpt
 ext/standard/tests/array/array_pad.phpt

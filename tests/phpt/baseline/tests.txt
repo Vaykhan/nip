@@ -30,6 +30,8 @@ tests/classes/abstract_final.phpt
 tests/classes/abstract_inherit.phpt
 tests/classes/abstract_not_declared.phpt
 tests/classes/abstract_static.phpt
+tests/classes/array_access_001.phpt
+tests/classes/array_access_002.phpt
 tests/classes/array_access_005.phpt
 tests/classes/array_access_006.phpt
 tests/classes/array_access_007.phpt

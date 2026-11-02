@@ -59,3 +59,25 @@ test('disable_functions removes builtins for that run only', () => {
   assert.equal(run('<?php echo strlen("abc");').output, '3');
 });
 
+
+test('run() switches PHP versions, members of shared classes included', () => {
+  const code = '<?php var_dump(method_exists("ReflectionClass", "newLazyGhost"), defined("ReflectionClass::SKIP_DESTRUCTOR"), Attribute::TARGET_ALL);';
+  const v84 = { ini: { 'nip.php_version': '8.4' } };
+  assert.equal(run(code, v84).output, 'bool(true)\nbool(true)\nint(63)\n');
+  assert.equal(run(code).output, 'bool(false)\nbool(false)\nint(63)\n');
+  assert.equal(run(code, { ini: { 'nip.php_version': '8.5' } }).output, 'bool(true)\nbool(true)\nint(127)\n');
+  assert.equal(run(code, v84).output, 'bool(true)\nbool(true)\nint(63)\n');
+});
+
+test('lazy objects (PHP 8.4)', () => {
+  const code = `<?php
+class C { public int $a = 1; public function __construct() { echo "init\\n"; $this->a = 2; } }
+$r = new ReflectionClass(C::class);
+$g = $r->newLazyGhost(function (C $o) { $o->__construct(); });
+var_dump($r->isUninitializedLazyObject($g));
+echo $g->a, "\\n";
+$p = $r->newLazyProxy(fn () => new C());
+echo $p->a, "\\n";
+var_dump($r->isUninitializedLazyObject($p));`;
+  assert.equal(run(code, { ini: { 'nip.php_version': '8.4' } }).output, 'bool(true)\ninit\n2\ninit\n2\nbool(false)\n');
+});

@@ -47,7 +47,7 @@ function gcTraverse(cands, extra, countMode) {
     else if (v instanceof PHPObject) {
       for (const x of v.props.values()) push(x);
       if (v.bound) for (const x of v.bound.values()) push(x);
-      if (v.thisObj) push(v.thisObj);
+      if (v.thisObj) push(v.thisObj); if (v.lazy !== undefined) { push(v.lazy.init); push(v.lazy.instance); }
       if (v.statics) push(v.statics);
       if (v.gen) push(v.gen.f);
     } else if (v instanceof Frame) {
@@ -88,6 +88,7 @@ export function refHolderCounts(extra) {
       if (v.bound) for (const x of v.bound.values()) holder(x);
       if (v.statics) stack.push(v.statics);
       if (v.gen) stack.push(v.gen.f);
+      if (v.lazy !== undefined && v.lazy.instance !== null) stack.push(v.lazy.instance);
     } else if (v instanceof Frame) { for (const k in v.vars) holder(v.vars[k]); if (v.this) stack.push(v.this); }
     else if (v instanceof Map) { for (const x of v.values()) holder(x); }
   }
@@ -102,16 +103,17 @@ export function containsRefSlot(v, seen) {
   if (v instanceof PHPObject) {
     if (seen.has(v)) return false; seen.add(v);
     for (const x of v.props.values()) { if (x instanceof Ref) return true; if ((x instanceof PHPArray || x instanceof PHPObject) && containsRefSlot(x, seen)) return true; }
+    if (v.lazy !== undefined && v.lazy.instance !== null) return containsRefSlot(v.lazy.instance, seen);
   }
   return false;
 }
 function runDestructor(o) {
-  if (o.destructed) return;
-  o.destructed = true;
   const i = rt.destructibles.indexOf(o);
   if (i >= 0) rt.destructibles.splice(i, 1);
+  if (o.destructed) return; // (e.g. by ReflectionClass::resetAsLazyGhost())
+  o.destructed = true;
   if (o.cls.nativeDestruct) { o.cls.nativeDestruct(o); return; } // internal classes (Fiber)
-  const m = o.cls.methods.get('__destruct');
+  const m = o.lazy === undefined ? o.cls.methods.get('__destruct') : null; // (not for lazy objects: a proxy's instance has its own)
   if (m) {
     rt.fiberSwitchBlocked++; // destructors can't switch fibers
     try { callFunction(m.fn, [], o, m.cls, o.cls, null); } finally { rt.fiberSwitchBlocked--; }
@@ -207,7 +209,7 @@ function reach(v) {
     let x = stack.pop();
     if (x instanceof Ref) x = x.v;
     if (x === null || typeof x !== 'object' || seen.has(x)) continue;
-    if (x instanceof PHPObject) { seen.add(x); for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); if (x.refl) stack.push(x.refl.obj); }
+    if (x instanceof PHPObject) { seen.add(x); for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); if (x.lazy !== undefined) { stack.push(x.lazy.init); stack.push(x.lazy.instance); } if (x.refl) stack.push(x.refl.obj); }
     else if (x instanceof PHPArray) { if (x.size > 64) continue; seen.add(x); for (let i = 0; i < x.v.length; i++) if (x.k[i] !== undefined) stack.push(x.v[i]); }
   }
   return seen;
@@ -283,7 +285,7 @@ function sweep(cands, ret, self) {
       work += v.props.size;
       for (const x of v.props.values()) push(x);
       if (v.bound) for (const x of v.bound.values()) push(x);
-      if (v.thisObj) push(v.thisObj);
+      if (v.thisObj) push(v.thisObj); if (v.lazy !== undefined) { push(v.lazy.init); push(v.lazy.instance); }
       if (v.statics) push(v.statics);
       if (v.gen) { push(v.gen.f); push(v.gen.cur); push(v.gen.key); push(v.gen.ret); push(v.gen.sent); }
       if (v.refl) push(v.refl.obj);
@@ -330,7 +332,7 @@ function sweep(cands, ret, self) {
     };
     for (const x of o.props.values()) add(x);
     if (o.bound) for (const x of o.bound.values()) add(x);
-    if (o.thisObj) add(o.thisObj);
+    if (o.thisObj) add(o.thisObj); if (o.lazy !== undefined) { add(o.lazy.init); add(o.lazy.instance); }
   }
   const order = [], visited = new Set();
   const held = (o) => {
@@ -338,7 +340,7 @@ function sweep(cands, ret, self) {
     const add = (x) => { if (x instanceof Ref) x = x.v; if (x instanceof PHPObject && gone.has(x)) out.push(x); else if (x instanceof PHPArray && x.size <= 64) for (const y of x.values()) add(y); };
     for (const x of o.props.values()) add(x);
     if (o.bound) for (const x of o.bound.values()) add(x);
-    if (o.thisObj) add(o.thisObj);
+    if (o.thisObj) add(o.thisObj); if (o.lazy !== undefined) { add(o.lazy.init); add(o.lazy.instance); }
     return out;
   };
   const visit = (o) => { if (visited.has(o)) return; visited.add(o); for (const c of held(o)) visit(c); order.push(o); };
@@ -362,7 +364,7 @@ function reachFrom(o) {
     if (x instanceof Ref) x = x.v;
     if (x === null || typeof x !== 'object' || seen.has(x)) continue;
     seen.add(x);
-    if (x instanceof PHPObject) { for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); }
+    if (x instanceof PHPObject) { for (const y of x.props.values()) stack.push(y); if (x.bound) for (const y of x.bound.values()) stack.push(y); if (x.thisObj) stack.push(x.thisObj); if (x.lazy !== undefined) { stack.push(x.lazy.init); stack.push(x.lazy.instance); } }
     else if (x instanceof PHPArray) { for (let i = 0; i < x.v.length; i++) if (x.k[i] !== undefined) stack.push(x.v[i]); }
   }
   return seen;

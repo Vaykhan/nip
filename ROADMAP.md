@@ -78,10 +78,10 @@ Everything a modern framework relies on in the language itself.
       type declarations, constant expression rules (`src/compiler/checks.js`,
       `src/runtime/inheritance.js`).
 - [x] `declare(ticks)`, `register_tick_function`.
-- [ ] Object handle reuse, so `#N` in `var_dump` and `spl_object_id()` match PHP after objects
-      are freed. Blocked on exact liveness: the cycle collector's roots don't include values
-      held only in JS temporaries, so reusing a handle could give two live objects the same
-      `spl_object_id()`. Needs reference counting for objects (or roots for temporaries) first.
+- [x] Object handle reuse, so `#N` in `var_dump` and `spl_object_id()` match PHP after objects
+      are freed: dropped values become candidates, and a reachability scan from the roots
+      (frames, temporaries in flight, statics, constants) decides which are gone; their handles
+      are reused most recently freed first (`src/runtime/gc.js`).
 - [x] **Own regex engine** (`src/lib/regex.js`): a backtracking matcher with PCRE2 semantics on
       byte strings: recursion, conditionals, `\K`, possessive quantifiers, atomic groups,
       backtracking verbs, branch reset, `(?J)`, exact offsets and PCRE2's error messages.
@@ -90,6 +90,13 @@ Everything a modern framework relies on in the language itself.
 - [ ] Then PHP 8.4 (property hooks, asymmetric visibility, `new` without parentheses,
       `array_find` and friends, lazy objects) and PHP 8.5 (pipe operator `|>`, clone with,
       `array_first`/`array_last`, `#[\NoDiscard]`), behind a `-d nip.php_version=` switch.
+      All of these are in (`src/runtime/version.js` gates syntax, functions, classes and class
+      members by version), together with `#[\Deprecated]`, `exit()` as a function,
+      `ReflectionConstant`, attributes on constants and the new warnings and messages. Against
+      php-src 8.5's own tests (`runner.js --expect`): `Zend/tests` ~79%, `Zend/tests/lazy_objects`
+      92%, `property_hooks` and `asymmetric_visibility` ~92%. Left: the 8.4/8.5 Reflection
+      additions (`ext/reflection` ~69%) and typed reference constraints (references bound to
+      typed properties).
 
 **Exit criteria:** `tests/lang` ≥ 99%, `Zend/tests` ≥ 80%, `ext/pcre/tests` ≥ 90%. Reflection
 passes the php-src `ext/reflection` suite at ≥ 70%.

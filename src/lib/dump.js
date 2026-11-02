@@ -5,7 +5,8 @@ import { toBool, toStr } from '../convert.js';
 import { rt } from '../runtime/state.js';
 import { warn } from '../runtime/errors.js';
 import { callFunction, typeStr } from '../runtime/functions.js';
-import { displayName, nipProps, objectProps } from '../runtime/classes.js';
+import { displayName, hasHookedProps, hookedProps, nipProps, objectProps, objectPropsRaw } from '../runtime/classes.js';
+import { lazyTarget } from '../runtime/lazy.js';
 import { containsRefSlot, refHolderCounts } from '../runtime/gc.js';
 import { def, deref } from './core.js';
 
@@ -38,7 +39,7 @@ function varDump0(v, ind, seen, rc) {
     if (seen.has(v)) return pad + '*RECURSION*\n';
     seen.add(v);
     const entries = debugProps(v);
-    let s = pad + `object(${v.cls.anon ? displayName(v.cls) : v.cls.name})#${v.id} (${entries.filter((e) => !e[2]).length}) {\n`;
+    let s = pad + (v.lazy === undefined ? '' : v.lazy.proxy ? 'lazy proxy ' : 'lazy ghost ') + `object(${v.cls.anon ? displayName(v.cls) : v.cls.name})#${v.id} (${entries.filter((e) => !e[2]).length}) {\n`;
     for (const [label, x, uninit] of entries) {
       s += pad + `  [${label}]=>\n`;
       s += uninit ? pad + `  uninitialized(${uninit})\n` : varDump(x, ind + 2, seen, rc);
@@ -59,29 +60,21 @@ function debugInfo(o) {
   return r;
 }
 function debugProps(o) {
+  if (o.lazy !== undefined && o.lazy.instance !== null) return [['"instance"', o.lazy.instance]]; // (an initialized proxy)
   if (o.cls.nativeDebug) return o.cls.nativeDebug(o).map(([k, v]) => [typeof k === 'string' ? `"${k}"` : String(k), v]);
   const di = debugInfo(o);
   if (di) return di.rawEntries().map(([k, v]) => [typeof k === 'string' ? propLabel(o, k, true) : String(k), v]);
   const np = nipProps(o);
   if (np) return np.rawEntries().map(([k, v]) => [typeof k === 'string' ? `"${k}"` : String(k), v]);
   const out = [];
-  const seenKeys = new Set();
   for (const [key, info] of o.cls.slots) {
-    if (!o.props.has(key) && info.type && !info.internal && !info.virtual) { out.push([propLabel(o, key, true), null, typeStr(info.type, info.cls)]); seenKeys.add(key); }
+    if (info.internal || info.virtual) continue;
+    const sl = o.props.get(key);
+    if (sl !== undefined) out.push([propLabel(o, key, true), sl]);
+    else if (info.type) out.push([propLabel(o, key, true), null, typeStr(info.type, info.cls)]);
   }
-  const res = [];
-  for (const [k, s] of objectProps(o)) res.push([propLabel(o, k, true), s]);
-  // order: declared slots first in declaration order, uninitialized shown in place
-  if (out.length) {
-    const ordered = [];
-    for (const [key] of o.cls.slots) {
-      if (o.props.has(key)) ordered.push([propLabel(o, key, true), o.props.get(key)]);
-      else if (seenKeys.has(key)) ordered.push(out.find((x) => x[0] === propLabel(o, key, true)));
-    }
-    for (const [k, s] of o.props) if (!o.cls.slots.has(k)) ordered.push([propLabel(o, k, true), s]);
-    return ordered;
-  }
-  return res;
+  for (const [k, sl] of o.props) if (!o.cls.slots.has(k)) out.push([propLabel(o, k, true), sl]);
+  return out;
 }
 function propLabel(o, key, dump) {
   if (key.charCodeAt(0) === 0) {
@@ -110,7 +103,7 @@ function printR(v, ind, seen) {
       const di = v.cls.nativeDebug ? null : debugInfo(v);
       if (v.cls.nativeDebug) entries = v.cls.nativeDebug(v).map(([k, x]) => [String(k), x]);
       else if (di) entries = di.entries().map(([k, x]) => [typeof k === 'string' ? propLabel(v, k, false) : String(k), x]);
-      else { const np = nipProps(v); entries = np ? np.entries().map(([k, x]) => [String(k), x]) : objectProps(v).map(([k, x]) => [propLabel(v, k, false), deref(x)]); }
+      else { const np = nipProps(v); entries = np ? np.entries().map(([k, x]) => [String(k), x]) : objectPropsRaw(v).map(([k, x]) => [propLabel(v, k, false), deref(x)]); }
     }
     s += pad + '(\n';
     for (const [k, x] of entries) s += pad + `    [${k}] => ` + printR(x, ind + 8, seen) + '\n';
@@ -156,7 +149,9 @@ function varExport(v, ind, seen) {
     const isStd = v.cls.lname === 'stdclass';
     let s = isStd ? '(object) array(\n' : '\\' + v.cls.name + '::__set_state(array(\n';
     const np = nipProps(v);
-    for (const [k, x0] of np ? np.entries().map(([k, x]) => [String(k), x]) : objectProps(v)) {
+    // (with hooked properties, PHP 8.4: their get hooks give the values)
+    const pairs = np ? np.entries().map(([k, x]) => [String(k), x]) : hasHookedProps(v.cls) ? hookedProps(lazyTarget(v), null, true) : objectProps(v);
+    for (const [k, x0] of pairs) {
       const x = deref(x0);
       const name = k.charCodeAt(0) === 0 ? k.slice(k.indexOf('\0', 1) + 1) : k;
       s += pad + '   ' + exportStr(name) + ' => ';

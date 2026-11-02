@@ -13,6 +13,7 @@ import { dropRef, gcCheck, gcCollect } from './gc.js';
 import { closureClass, generatorClass } from './native-classes.js';
 import { lazyClass, lazyClassSrc } from './boot.js';
 import { checkDelayed, checkInheritance } from './inheritance.js';
+import { lazyInit } from './lazy.js';
 
 export class PHPClass {
   constructor(name) {
@@ -37,12 +38,30 @@ export function isInternalName(owner, name) {
   return name.charCodeAt(0) === 95 && name.charCodeAt(1) === 95 && !!owner.decl && owner.decl.file === PRELUDE_FILE && !MAGIC_METHODS.has(name.toLowerCase());
 }
 export function isInternalSlot(cls, key) { if (!cls.hasInternal) return false; const s = cls.slots.get(key); return s !== undefined && s.internal === true; }
-// [key, value-or-Ref] pairs of an object's properties without the internal ones
-export function objectProps(o) {
-  if (!o.cls.hasInternal) return [...o.props];
+// [key, value-or-Ref] pairs of an object's properties without the internal ones (initializing a
+// lazy object; objectPropsRaw() doesn't)
+export function objectProps(o) { return objectPropsRaw(o.lazy === undefined ? o : lazyInit(o)); }
+export function objectPropsRaw(o) {
+  const cls = o.cls;
+  if (!cls.hasInternal && !slotsReordered(o)) return [...o.props];
+  // (declared properties in declaration order, also when one was unset and assigned again)
   const out = [];
-  for (const e of o.props) if (!isInternalSlot(o.cls, e[0])) out.push(e);
+  for (const [key, info] of cls.slots) { if (info.internal) continue; const sl = o.props.get(key); if (sl !== undefined) out.push([key, sl]); }
+  for (const e of o.props) if (!cls.slots.has(e[0])) out.push(e);
   return out;
+}
+// whether the declared properties don't come first in declaration order in the props map
+function slotsReordered(o) {
+  if (o.cls.slots.size === 0) return false;
+  const it = o.cls.slots.keys();
+  let want = it.next();
+  for (const k of o.props.keys()) {
+    while (!want.done && !o.props.has(want.value)) want = it.next();
+    if (want.done) return o.cls.slots.has(k);
+    if (k !== want.value) return true;
+    want = it.next();
+  }
+  return false;
 }
 // The properties PHP shows for an internal class in var_dump/print_r/var_export, (array) casts and
 // json_encode, which a prelude class can compute with __nipProps(). null when it doesn't.
@@ -289,7 +308,7 @@ function setupHooks(cls, info, p, owner) {
       if (!h) continue;
       // (a get hook returns the property's type)
       const fn = compileFunction(kind === 'get' && p.type && !h.ret ? { ...h, ret: p.type } : h, { method: true, cls: owner });
-      fn.hookProp = p.name; fn.hookKind = kind; fn.abstractHook = !!h.abstract;
+      fn.hookProp = p.name; fn.hookKind = kind; fn.abstractHook = !!h.abstract; fn.hookType = p.type || null;
       hooks[kind] = fn;
       if (h.body && (kind === 'set' && h.shortExpr ? true : hookUsesProp(h.body, p.name))) virtual = false;
     }
@@ -304,13 +323,18 @@ function setupHooks(cls, info, p, owner) {
       }
     }
     if (!parent.virtual) virtual = false;
+    // (a backed property implements the parent's abstract hooks)
+    if (!virtual || !p.hooks) for (const kind of ['get', 'set']) if (hooks[kind] && hooks[kind].abstractHook && hooks[kind].cls !== owner && !(kind === 'set' && p.readonly)) hooks[kind] = null;
+    if (!p.hooks) virtual = false;
   }
   info.hooks = hooks.get || hooks.set ? hooks : null;
   info.virtual = virtual && !!info.hooks;
   if (info.virtual && p.hasDef) throw new FatalSig(`Cannot specify default value for virtual hooked property ${owner.name}::$${p.name}`, p.l, owner.decl ? owner.decl.file : undefined);
+  if (info.virtual && p.setVis && !owner.isInterface && (!hooks.set || !hooks.get)) throw new FatalSig(`${hooks.set ? 'Write' : 'Read'}-only virtual property ${owner.name}::$${p.name} must not specify asymmetric visibility`, p.l, owner.decl ? owner.decl.file : undefined);
 }
 // inside a hook of the property, running on the object itself: $this->prop is the stored value
-const inHook = (info, obj, f) => !!f && f.this === obj && !!f.fn && f.fn.hookProp === info.name;
+// (a hook of an initialized lazy proxy accesses the real instance's backing value)
+const inHook = (info, obj, f) => !!f && (f.this === obj || (!!f.this && f.this.lazy !== undefined && f.this.lazy.instance === obj)) && !!f.fn && f.fn.hookProp === info.name;
 function hookedRead(obj, info, name, f) {
   if (inHook(info, obj, f)) { if (info.virtual) throwError('Error', `Must not read from virtual property ${obj.cls.name}::$${name}`); return NO_HOOK; }
   if (info.hooks.get) return callFunction(info.hooks.get, [], obj, info.hooks.get.cls, obj.cls, null);
@@ -326,10 +350,12 @@ export function parentHook(f, prop, hook, args) {
   if (!cls.parent) throwError('Error', 'Cannot use "parent" when current class scope has no parent');
   const pinfo = cls.parent.props.get(prop);
   if (!pinfo) throwError('Error', `Undefined property ${cls.parent.name}::$${prop}`);
-  const want = hook === 'get' ? 0 : 1;
-  if (args.length > want) throwError('ArgumentCountError', `${pinfo.cls.name}::$${prop}::${hook}() expects exactly ${want} argument${want === 1 ? '' : 's'}, ${args.length} given`);
+  if (pinfo.vis === 'private' && pinfo.cls !== cls) throwError('Error', `Cannot access private property ${pinfo.cls.name}::$${prop}`);
   const h = pinfo.hooks && pinfo.hooks[hook];
   if (h) return callFunction(h, args, obj, h.cls, obj.cls, null);
+  // (the implicit hook of a plain property is an internal function: no extra arguments)
+  const want = hook === 'get' ? 0 : 1;
+  if (args.length > want) throwError('ArgumentCountError', `${pinfo.cls.name}::$${prop}::${hook}() expects exactly ${want} argument${want === 1 ? '' : 's'}, ${args.length} given`);
   if (hook === 'get') {
     const sl = obj.props.get(pinfo.key);
     if (sl === undefined) {
@@ -365,7 +391,7 @@ function addProp(cls, p, owner) {
     info.setVis = sv;
     if (sv === 'private') info.final = true;
   }
-  if (p.hooks || p.abstract) setupHooks(cls, info, p, owner);
+  if (p.hooks || p.abstract || (rt.phpVersion >= 80400 && !p.static && cls.props.has(p.name) && cls.props.get(p.name).hooks)) setupHooks(cls, info, p, owner); // (a plain redeclaration keeps the parent's hooks)
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
     const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
@@ -669,7 +695,7 @@ export function instantiate(cls, A, f) {
   if (cls.hasDestructor && !rt.destructibles.includes(obj)) trackDestructible(obj);
   return obj;
 }
-function trackDestructible(obj) {
+export function trackDestructible(obj) {
   rt.destructibles.push(obj);
   const fr = rt.frame;
   if (fr && fr !== rt.globalFrame) (fr.destr || (fr.destr = [])).push(obj);
@@ -719,6 +745,26 @@ export function magicGet(obj, name) {
   try { return callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'g', name); }
 }
 
+// does accessing the property (missing from the props of lazy object `obj`) initialize the object?
+// A lazy slot does; an undefined property does unless the magic method handles it.
+function lazyMiss(obj, key, info, kind, magic, name) {
+  if (info !== undefined) return obj.lazy.keys.has(key);
+  return !(obj.cls.methods.has(magic) && guardFree(obj, kind, name));
+}
+// initializes a lazy object for an access of property `name`, made by fn(target); a proxy's magic
+// method that accesses the property accesses the real instance's without calling the magic method
+function lazyFwd(obj, kind, name, fn) {
+  const t = lazyInit(obj);
+  if (t === obj || guardFree(obj, kind, name) || !guardEnter(t, kind, name)) return fn(t);
+  try { return fn(t); } finally { guardLeave(t, kind, name); }
+}
+// the object an indirect access ($o->p[] = ..., &$o->p) of property `name` of a lazy object goes to
+function lazyFor(obj, name, f) {
+  const info = propInfoFor(obj, name, f ? f.cls : null);
+  if (info !== undefined && ((info.vis !== 'public' && !propAccessible(info, f ? f.cls : null)) || (info.hooks && !inHook(info, obj, f)))) return obj;
+  const key = info === undefined ? name : info.key;
+  return obj.props.has(key) || !lazyMiss(obj, key, info, 'g', '__get', name) ? obj : lazyInit(obj);
+}
 export function readProp(obj, name, f) {
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
@@ -734,6 +780,7 @@ export function readProp(obj, name, f) {
   } else if (obj.cls.sprops.size && obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
+  if (obj.lazy !== undefined && lazyMiss(obj, key, info, 'g', '__get', name)) return lazyFwd(obj, 'g', name, (t) => readProp(t, name, f));
   if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipget', [name]); if (r !== undefined) return r; }
   // (a typed property that was never initialized doesn't fall back to __get; an unset() one does)
   const r = info && info.type && !wasUnset(obj, key) ? undefined : magicGet(obj, name);
@@ -755,6 +802,7 @@ export function readPropQuiet(obj, name, f, issetOnly) {
   }
   const slot = obj.props.get(key);
   if (slot !== undefined) return slot instanceof Ref ? slot.v : slot;
+  if (obj.lazy !== undefined && lazyMiss(obj, key, info, 'i', '__isset', name)) return lazyFwd(obj, 'i', name, (t) => readPropQuiet(t, name, f, issetOnly));
   if (obj.cls.nipHooks && info === undefined) { const r = nipHook(obj, '__nipisset', [name]); if (r !== undefined) return r === null ? undefined : r; }
   return magicIsset(obj, name, issetOnly);
 }
@@ -784,6 +832,7 @@ export function writeProp(obj, name, v, f) {
       if (info.hooks.set) { callFunction(info.hooks.set, [v], obj, info.hooks.set.cls, obj.cls, null); return; }
       if (info.virtual) throwError('Error', `Property ${obj.cls.name}::$${name} is read-only`);
     } else if (info.hooks && info.virtual) throwError('Error', `Must not write to virtual property ${obj.cls.name}::$${name}`);
+    if (obj.lazy !== undefined && !obj.props.has(key) && obj.lazy.keys.has(key)) return writeProp(lazyInit(obj), name, v, f);
     if (info.readonly && !consumeReinit(obj, key)) {
       // (named after the declaring class)
       if (obj.props.has(key)) throwError('Error', `Cannot modify readonly property ${info.cls.name}::$${name}`);
@@ -795,6 +844,7 @@ export function writeProp(obj, name, v, f) {
     }
     if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
   } else if (!obj.props.has(name)) {
+    if (obj.lazy !== undefined && lazyMiss(obj, name, undefined, 's', '__set', name)) return lazyFwd(obj, 's', name, (t) => writeProp(t, name, v, f));
     if (obj.cls.nipHooks && nipHook(obj, '__nipset', [name, v]) !== undefined) return;
     if (magicSet(obj, name, v)) return;
     if (obj.cls.sprops.has(name)) notice(`Accessing static property ${obj.cls.name}::$${name} as non static`);
@@ -829,6 +879,15 @@ function magicSet(obj, name, v) {
 function hookedIndirect(obj, info, name) {
   throwError('Error', `Indirect modification of ${obj.cls.name}::$${name} is not allowed`);
 }
+// the reference a &get hook returns (null: the hook doesn't return by reference)
+function hookRef(obj, info) {
+  const g = info.hooks.get;
+  if (!g || !g.byRef) return null;
+  rt.lastRetRef = null;
+  const v = callFunction(g, [], obj, g.cls, obj.cls, null);
+  const rr = rt.lastRetRef; rt.lastRetRef = null;
+  return rr !== null && rr !== NOREF ? rr : new Ref(v);
+}
 // asymmetric visibility (PHP 8.4): may the scope write the property?
 export function setAccessible(info, scope) {
   if (!info.setVis || info.cls === scope) return true;
@@ -849,10 +908,12 @@ function consumeReinit(obj, key) {
 // a readonly property modified other than by assignment
 function readonlyIndirect(obj, key, info, name) {
   if (consumeReinit(obj, key)) return;
-  throwError('Error', `Cannot ${obj.props.has(key) ? '' : 'indirectly '}modify readonly property ${info.cls.name}::$${name}`);
+  throwError('Error', `Cannot ${obj.props.has(key) && rt.phpVersion < 80400 ? '' : 'indirectly '}modify readonly property ${info.cls.name}::$${name}`); // (PHP 8.4: always "indirectly")
 }
 // an inaccessible property handled by __get: a key no slot has, so callers take the magic path
 const MAGIC_KEY = '\0\0magic';
+// a hooked property whose &get hook gives the reference
+const HOOK_REF = '\0\0hookref';
 function resolvePropKey(obj, name, f, forWrite) {
   const scope = f ? f.cls : null;
   const info = propInfoFor(obj, name, scope);
@@ -861,17 +922,22 @@ function resolvePropKey(obj, name, f, forWrite) {
     if (obj.cls.methods.has('__get') && guardFree(obj, 'g', name)) return [MAGIC_KEY, null];
     throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
   }
-  if (forWrite && info.hooks && !inHook(info, obj, f)) hookedIndirect(obj, info, name);
+  if (forWrite && info.hooks && !inHook(info, obj, f)) {
+    if (forWrite === 'bind') throwError('Error', 'Cannot assign by reference to overloaded object');
+    if (info.hooks.get && info.hooks.get.byRef) return [HOOK_REF, info];
+    hookedIndirect(obj, info, name);
+  }
   if (forWrite && info.setVis && !info.readonly && !setAccessible(info, scope)) {
     const sl = obj.props.get(info.key);
     if (!((sl instanceof Ref ? sl.v : sl) instanceof PHPObject)) asymError(info, 'indirectly modify', f); // (objects can be modified)
   }
-  if (forWrite && info.readonly && obj.props.has(info.key) && !(obj.reinit !== undefined && obj.reinit.has(info.key))) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${name}`);
+  if (forWrite && info.readonly && obj.props.has(info.key) && !(obj.reinit !== undefined && obj.reinit.has(info.key))) throwError('Error', `Cannot ${rt.phpVersion >= 80400 ? 'indirectly ' : ''}modify readonly property ${obj.cls.name}::$${name}`);
   return [info.key, info];
 }
 export function bindProp(obj, name, ref, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
-  const [key, info] = resolvePropKey(obj, name, f, true);
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return bindProp(t, name, ref, f); }
+  const [key, info] = resolvePropKey(obj, name, f, 'bind');
   if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   if (!info && !obj.props.has(key)) {
     // a property __get handles can't be bound to a reference
@@ -895,10 +961,14 @@ function newDynamicProp(obj, name) {
 }
 export function propRef(obj, name, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return propRef(t, name, f); }
   const [key, info] = resolvePropKey(obj, name, f, true);
+  if (key === HOOK_REF) return hookRef(obj, info);
   if (info && info.readonly) readonlyIndirect(obj, key, info, name);
   const slot = obj.props.get(key);
   if (slot instanceof Ref) return slot;
+  // (an object in a property the scope may not write: a reference to a copy of the handle)
+  if (info && info.setVis && slot instanceof PHPObject && !setAccessible(info, f ? f.cls : null)) return new Ref(slot);
   if (slot === undefined && !info) {
     rt.lastRetRef = null;
     const r = magicGet(obj, name);
@@ -912,6 +982,7 @@ export function propRef(obj, name, f) {
 }
 export function propArr(obj, name, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
+  if (obj.lazy !== undefined) { const t = lazyFor(obj, name, f); if (t !== obj) return propArr(t, name, f); }
   const [key, info] = resolvePropKey(obj, name, f, false);
   let slot = obj.props.get(key);
   if (slot === undefined && !info) {
@@ -929,6 +1000,8 @@ export function propArr(obj, name, f) {
   let v = isRef ? slot.v : slot;
   if (v instanceof PHPObject) return v;
   if (info && info.hooks && !inHook(info, obj, f)) {
+    const rr = hookRef(obj, info);
+    if (rr !== null) return rr.v instanceof PHPObject ? rr.v : writableArrIn(rr);
     const r = hookedRead(obj, info, name, f);
     if (r instanceof PHPObject) return r;
     hookedIndirect(obj, info, name);
@@ -958,16 +1031,24 @@ export function unsetProp(obj, name, f) {
       if (m) { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); return; }
       throwError('Error', `Cannot access ${info.vis} property ${obj.cls.name}::$${name}`);
     }
-    if (info.readonly) throwError('Error', `Cannot unset readonly property ${obj.cls.name}::$${name}`);
     if (info.hooks && !inHook(info, obj, f)) throwError('Error', `Cannot unset hooked property ${obj.cls.name}::$${name}`);
     key = info.key;
-    if (info.setVis && !setAccessible(info, scope)) {
+    const has = obj.props.has(key);
+    if (info.readonly || info.setVis) {
+      // (an unset() property that __unset() handles is no error)
       const m = obj.cls.methods.get('__unset');
-      if (!obj.props.has(key) && wasUnset(obj, key) && m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
-      asymError(info, 'unset', f);
+      if (!has && wasUnset(obj, key) && m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }
+      if (info.readonly && has && !consumeReinit(obj, key)) throwError('Error', `Cannot unset readonly property ${info.cls.name}::$${name}`);
+      if (info.setVis && !setAccessible(info, scope)) asymError(info, 'unset', f);
+      // (PHP 8.3: an uninitialized readonly property may be unset from its class only)
+      if (info.readonly && !has && !info.setVis && scope !== info.cls && !(scope && obj.cls.ancestors.has(scope.lname) && scope.props.get(name) && scope.props.get(name).cls === scope)) {
+        throwError('Error', `Cannot unset readonly property ${info.cls.name}::$${name} from ${scope ? 'scope ' + scope.name : 'global scope'}`);
+      }
     }
+    if (obj.lazy !== undefined && !obj.props.has(key) && obj.lazy.keys.has(key)) return unsetProp(lazyInit(obj), name, f);
+    if (!obj.props.has(key) && !wasUnset(obj, key)) { (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key); return; } // (an uninitialized one: no __unset())
     (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key);
-  }
+  } else if (obj.lazy !== undefined && !obj.props.has(key) && lazyMiss(obj, key, info, 'u', '__unset', name)) return lazyFwd(obj, 'u', name, (t) => unsetProp(t, name, f));
   if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
   if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
@@ -988,6 +1069,15 @@ export function cloneObject(o, f) {
   }
   if (o.cls.isEnum) throwError('Error', `Trying to clone an uncloneable object of class ${o.cls.name}`);
   if (o.cls === generatorClass) throwError('Error', 'Trying to clone an uncloneable object of class Generator');
+  if (o.lazy !== undefined) {
+    const t = lazyInit(o);
+    if (o.lazy !== undefined) { // a proxy: the clone is a proxy for a clone of the real instance
+      const c = new PHPObject(o.cls);
+      for (const [k, v] of o.props) c.props.set(k, cp(v instanceof Ref ? v.v : v));
+      c.lazy = { ...o.lazy, keys: new Set(o.lazy.keys), instance: cloneObject(t, f) };
+      return c;
+    }
+  }
   const c = new PHPObject(o.cls);
   for (const [k, v] of o.props) c.props.set(k, cp(v instanceof Ref ? v.v : v));
   for (const key of ['fn', 'bound', 'thisObj', 'scope', 'sc', 'trace', 'native']) if (o[key] !== undefined) c[key] = o[key];
@@ -1004,8 +1094,31 @@ export function cloneObject(o, f) {
   return c;
 }
 
+// whether a class's objects have hooked properties (PHP 8.4), which enumerations read with their get
+// hooks
+export const hasHookedProps = (cls) => cls.hookedProps ?? (cls.hookedProps = [...cls.slots.values()].some((i) => !!i.hooks));
+// is a declared property slot (a parent's private one included) visible in the scope?
+export const slotVisible = (info, scope) => (info.vis === 'private' ? info.cls === scope : info.vis === 'public' || propAccessible(info, scope));
+// [name, value] pairs of the properties of an object with hooked properties that are visible in the
+// scope (with all: all of them), in declaration order, the hooked ones read with their get hooks
+// (virtual ones without one left out), then the dynamic ones
+export function hookedProps(obj, scope, all) {
+  const out = [], names = new Set();
+  for (const [key, info] of obj.cls.slots) {
+    if (info.internal || (!all && (!slotVisible(info, scope) || names.has(info.name)))) continue;
+    const g = info.hooks && info.hooks.get;
+    if (g) out.push([info.name, callFunction(g, [], obj, g.cls, obj.cls, null)]);
+    else if (info.virtual || !obj.props.has(key)) continue;
+    else { const sl = obj.props.get(key); out.push([info.name, sl instanceof Ref ? sl.v : sl]); }
+    names.add(info.name);
+  }
+  for (const [k, sl] of obj.props) if (!obj.cls.slots.has(k) && !names.has(k)) out.push([k, sl instanceof Ref ? sl.v : sl]);
+  return out;
+}
 // visible props as [name, value] pairs for a given scope
 export function objVisibleProps(obj, scope) {
+  if (obj.lazy !== undefined) obj = lazyInit(obj);
+  if (hasHookedProps(obj.cls)) return hookedProps(obj, scope, false);
   const out = [];
   for (const [k, s] of obj.props) {
     const v = s instanceof Ref ? s.v : s;
@@ -1032,7 +1145,8 @@ export function toArrayCast(v) {
     const np = nipProps(v);
     if (np) return np;
     const a = new PHPArray();
-    for (const [k, s] of objectProps(v)) {
+    if (v.lazy !== undefined && v.lazy.instance !== null) v = v.lazy.instance; // (an initialized proxy; a lazy object isn't initialized)
+    for (const [k, s] of objectPropsRaw(v)) {
       const val = s instanceof Ref ? s.v : s;
       const info = v.cls.props.get(k);
       let key = k;

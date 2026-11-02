@@ -4,7 +4,7 @@ import {
   bigOrFloat, cp, Flt, fmtRepr, intAdd, intMul, intSub, isInt, MAXS, mkf, normBig, NUM_FULL, NUM_LEAD,
   numericStr, numFromText, PHPArray, PHPObject, Ref
 } from './values.js';
-import { floatToInt, toDbl, toStr, typeOf, valueName } from './convert.js';
+import { floatToInt, oobWarn, toDbl, toStr, typeOf, valueName } from './convert.js';
 import { deprecated, throwError, warn } from './runtime/errors.js';
 
 function arithOperand(v, op, a, b) {
@@ -70,7 +70,8 @@ export function mod(a, b) {
 function toIntOp(v, op, a, b) {
   const n = arithOperand(v, op, a, b);
   if (n instanceof Flt) {
-    if (!isFinite(n.v) || Math.trunc(n.v) !== n.v || n.v >= 9223372036854775808 || n.v < -9223372036854775808) {
+    // (a float-string that doesn't fit gets both the warning and the deprecation)
+    if ((!oobWarn(n.v, typeof v === 'string' ? v : undefined) || typeof v === 'string') && (!isFinite(n.v) || Math.trunc(n.v) !== n.v || n.v >= 9223372036854775808 || n.v < -9223372036854775808)) {
       if (typeof v === 'string') deprecated(`Implicit conversion from float-string "${v}" to int loses precision`);
       else deprecated(`Implicit conversion from float ${fmtRepr(n.v)} to int loses precision`);
     }
@@ -128,7 +129,7 @@ export function bitXor(a, b) {
 }
 export function bitNot(a) {
   if (typeof a === 'string') { let r = ''; for (let i = 0; i < a.length; i++) r += String.fromCharCode(~a.charCodeAt(i) & 255); return r; }
-  if (a instanceof Flt) { if (!Number.isInteger(a.v) || a.v >= 9223372036854775808 || a.v < -9223372036854775808) deprecated(`Implicit conversion from float ${fmtRepr(a.v)} to int loses precision`); a = floatToInt(a.v); }
+  if (a instanceof Flt) { if (!oobWarn(a.v) && (!Number.isInteger(a.v) || a.v >= 9223372036854775808 || a.v < -9223372036854775808)) deprecated(`Implicit conversion from float ${fmtRepr(a.v)} to int loses precision`); a = floatToInt(a.v); }
   else if (!isInt(a)) throwError('TypeError', `Cannot perform bitwise not on ${valueName(a)}`);
   if (typeof a === 'number' && a >= -2147483648 && a <= 2147483647) return ~a;
   return normBig(BigInt.asIntN(64, ~BigInt(a)));

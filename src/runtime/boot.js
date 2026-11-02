@@ -57,7 +57,7 @@ export function boot() {
 export function resetRuntime() {
   rt.epoch++;
   rt.tickFns = []; rt.tickCount = 0; rt.fiberSwitchBlocked = 0; rt.inflight = []; rt.currentFiber = null; rt.suspendedFibers = new Set();
-  rt.fns = new Map(snapshot.fns); rt.classes = new Map(snapshot.classes); rt.consts = new Map(snapshot.consts); rt.deprecatedConsts = new Map();
+  rt.fns = new Map(snapshot.fns); rt.classes = new Map(snapshot.classes); rt.consts = new Map(snapshot.consts); rt.deprecatedConsts = new Map(); rt.userConsts = new Map();
   rt.userFnNames = new Set(); rt.globals = Object.create(null); rt.stack = []; rt.depth = 0; rt.silence = 0;
   rt.errorHandlers = []; rt.exceptionHandlers = []; rt.shutdownFns = []; rt.autoloaders = []; rt.included = new Set();
   rt.obStack = []; rt.outBuf = ''; rt.destructibles = []; rt.inShutdown = false; rt.lastRetRef = null; rt.lastError = null; rt.ini = new Map(); rt.mainStatics = null;

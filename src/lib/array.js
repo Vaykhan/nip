@@ -8,7 +8,7 @@ import { iterateObject } from '../compiler/stmt.js';
 import { rt } from '../runtime/state.js';
 import { throwError, warn } from '../runtime/errors.js';
 import { callableFn, callValue, findMethod } from '../runtime/callables.js';
-import { callMethodName, magicGet, magicIsset, objVisibleProps, writeProp } from '../runtime/classes.js';
+import { callMethodName, magicGet, magicIsset, objVisibleProps, toArrayCast, writeProp } from '../runtime/classes.js';
 import { A, alias, def, deref, I, R1, refArr, slotCp } from './core.js';
 import { since } from '../runtime/version.js';
 import { lower, natCmp, sgn, upper } from './string.js';
@@ -161,7 +161,7 @@ def('array_splice', (array, offset, length = null, replacement = null) => {
   let end = len < 0 ? Math.max(off, n + len) : Math.min(n, off + len);
   const removed = new PHPArray();
   for (let i = off; i < end; i++) { const [k, v] = ent[i]; if (typeof k === 'string') removed.set(k, deref(v)); else removed.push(deref(v)); }
-  const rep = replacement === null ? [] : replacement instanceof PHPArray ? replacement.values() : [replacement];
+  const rep = replacement === null ? [] : replacement instanceof PHPArray ? replacement.values() : toArrayCast(replacement).values(); // (converted like an (array) cast)
   const out = new PHPArray();
   const add = ([k, v]) => { if (typeof k === 'string') out.setRaw(k, v); else out.push(v); };
   for (let i = 0; i < off; i++) add(ent[i]);

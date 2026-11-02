@@ -5,6 +5,7 @@ import { toBool, toInt, toNumber, toStr } from './convert.js';
 import { findMethod } from './runtime/callables.js';
 import { closureClass } from './runtime/native-classes.js';
 import { callFunction } from './runtime/functions.js';
+import { lazyInit } from './runtime/lazy.js';
 
 export function numCmp(a, b) { // a, b are int or Flt
   if (typeof a === 'number' && typeof b === 'number') return a < b ? -1 : a > b ? 1 : 0;
@@ -61,6 +62,8 @@ export function looseEq(a, b) {
     if (a === b) return true;
     const h = nipCompare(a, b);
     if (h !== undefined) return h === 0;
+    if (a.lazy !== undefined) a = lazyInit(a);
+    if (b.lazy !== undefined) b = lazyInit(b);
     if (a.cls !== b.cls) return false;
     if (a.cls.isEnum || a.cls === closureClass) return false;
     if (a.props.size !== b.props.size) return false;
@@ -123,6 +126,8 @@ export function cmp(a, b) { // <=> : -1 0 1
     if (a === b) return 0;
     const h = nipCompare(a, b);
     if (h !== undefined) return h === null ? 1 : h;
+    if (a.lazy !== undefined) a = lazyInit(a);
+    if (b.lazy !== undefined) b = lazyInit(b);
     if (a.cls !== b.cls) return 1;
     for (const [k, v] of a.props) { if (!b.props.has(k)) return 1; const w = b.props.get(k); const c = cmp(v instanceof Ref ? v.v : v, w instanceof Ref ? w.v : w); if (c) return c; }
     return 0;

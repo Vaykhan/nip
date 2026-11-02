@@ -8,11 +8,12 @@ import { cLval } from './lvalue.js';
 import { cExpr, cValue } from './expr.js';
 import { rt } from '../runtime/state.js';
 import { checkTimeLimit, notice, setPrevious, throwError, toThrowSig, warn } from '../runtime/errors.js';
-import { compilingByRef, declareFunction } from '../runtime/functions.js';
-import { callMethodName, canAccessMember, declareClass, objectProps, propAccessible } from '../runtime/classes.js';
+import { callFunction, compilingByRef, declareFunction } from '../runtime/functions.js';
+import { callMethodName, canAccessMember, declareClass, hasHookedProps, objectProps, propAccessible, slotVisible } from '../runtime/classes.js';
 import { caughtTemps, dropRef, feSubjects, gcCheck, idq, idSafePoint } from '../runtime/gc.js';
 import { callValue } from '../runtime/callables.js';
 import { generatorClass } from '../runtime/native-classes.js';
+import { lazyInit } from '../runtime/lazy.js';
 
 export function cStmts(list) {
   const fns = [], nodes = [];
@@ -449,10 +450,11 @@ const STMT = {
     return (f) => {
       rt.line = l;
       for (const it of items) {
-        if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined`); continue; }
+        if (rt.consts.has(it.name)) { warn(`Constant ${it.name} already defined${rt.phpVersion >= 80500 ? ', this will be an error in PHP 9' : ''}`); continue; }
         const v = it.E(f);
         if (dep) rt.deprecatedConsts.set(it.name, dep); // (#[\Deprecated] const, PHP 8.5)
         rt.consts.set(it.name, v);
+        rt.userConsts.set(it.name, { file: rt.file, attrs: n.attrs || null }); // (for ReflectionConstant)
         if (v !== null && typeof v === 'object') rt.constRoots.push(v);
       }
     };
@@ -519,6 +521,8 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     }
     return;
   }
+  if (obj.lazy !== undefined) obj = lazyInit(obj);
+  if (hasHookedProps(obj.cls)) return foreachHooked(f, obj, K, V, byRef, assignV, run, handle);
   // plain object: visible properties, from the live property table (properties added meanwhile
   // are visited too, as in PHP)
   const keys = obj.props.keys();
@@ -542,6 +546,44 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
     } else { const s = obj.props.get(k); assignV(s instanceof Ref ? s.v : s); }
     if (K) K.set(f, normKey(name));
     const h = handle(run());
+    if (h === 1) return; if (h !== 0) return h;
+  }
+}
+
+// foreach over an object with hooked properties (PHP 8.4): the declared properties visible here in
+// declaration order, the hooked ones read with their get hooks (by reference: only with a &get
+// hook), then the dynamic ones (live: those added meanwhile are visited too)
+function foreachHooked(f, obj, K, V, byRef, assignV, run, handle) {
+  const names = new Set();
+  const refTo = (k, name, info) => {
+    if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
+    let slot = obj.props.get(k);
+    if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
+    return slot;
+  };
+  const visit = (name) => { if (K) K.set(f, normKey(name)); return handle(run()); };
+  for (const [k, info] of obj.cls.slots) {
+    if (info.internal || !slotVisible(info, f.cls) || names.has(info.name)) continue;
+    const g = info.hooks && info.hooks.get;
+    if (!g && (info.virtual || !obj.props.has(k))) continue;
+    names.add(info.name);
+    if (g) {
+      if (byRef && !g.byRef) throwError('Error', `Cannot create reference to property ${obj.cls.name}::$${info.name}`);
+      rt.lastRetRef = null;
+      const v = callFunction(g, [], obj, g.cls, obj.cls, null);
+      const rr = rt.lastRetRef; rt.lastRetRef = null;
+      if (byRef) V.bind(f, rr !== null && rr !== NOREF ? rr : new Ref(v)); else assignV(v);
+    } else if (byRef) {
+      if (info.hooks) throwError('Error', `Cannot create reference to property ${obj.cls.name}::$${info.name}`);
+      V.bind(f, refTo(k, info.name, info));
+    } else { const sl = obj.props.get(k); assignV(sl instanceof Ref ? sl.v : sl); }
+    const h = visit(info.name);
+    if (h === 1) return; if (h !== 0) return h;
+  }
+  for (const k of obj.props.keys()) {
+    if (obj.cls.slots.has(k) || names.has(k) || !obj.props.has(k)) continue;
+    if (byRef) V.bind(f, refTo(k, k, null)); else { const sl = obj.props.get(k); assignV(sl instanceof Ref ? sl.v : sl); }
+    const h = visit(k);
     if (h === 1) return; if (h !== 0) return h;
   }
 }

@@ -19,6 +19,7 @@ ext/reflection/tests/ReflectionClass_CannotClone_basic.phpt
 ext/reflection/tests/ReflectionClass_FileInfo_basic.phpt
 ext/reflection/tests/ReflectionClass_constructor_001.phpt
 ext/reflection/tests/ReflectionClass_export_array_bug72222.phpt
+ext/reflection/tests/ReflectionClass_export_basic2.phpt
 ext/reflection/tests/ReflectionClass_getConstant_basic.phpt
 ext/reflection/tests/ReflectionClass_getConstant_error.phpt
 ext/reflection/tests/ReflectionClass_getConstant_typed.phpt
@@ -80,6 +81,7 @@ ext/reflection/tests/ReflectionClass_isUserDefined_basic.phpt
 ext/reflection/tests/ReflectionClass_modifiers_001.phpt
 ext/reflection/tests/ReflectionClass_newInstanceArgs_002.phpt
 ext/reflection/tests/ReflectionClass_setStaticPropertyValue_001.phpt
+ext/reflection/tests/ReflectionClass_toString_005.phpt
 ext/reflection/tests/ReflectionClass_toString_006.phpt
 ext/reflection/tests/ReflectionClass_toString_007.phpt
 ext/reflection/tests/ReflectionEnumBackedCase_getBackingValue.phpt
@@ -165,6 +167,7 @@ ext/reflection/tests/ReflectionParameter_getPosition_basic.phpt
 ext/reflection/tests/ReflectionParameter_isDefault.phpt
 ext/reflection/tests/ReflectionParameter_isVariadic_basic.phpt
 ext/reflection/tests/ReflectionParameter_toString_basic.phpt
+ext/reflection/tests/ReflectionProperty_basic1.phpt
 ext/reflection/tests/ReflectionProperty_basic2.phpt
 ext/reflection/tests/ReflectionProperty_constructor_error.phpt
 ext/reflection/tests/ReflectionProperty_constructor_variation1.phpt
@@ -211,6 +214,7 @@ ext/reflection/tests/bug41061.phpt
 ext/reflection/tests/bug41884.phpt
 ext/reflection/tests/bug43926.phpt
 ext/reflection/tests/bug45139.phpt
+ext/reflection/tests/bug45571.phpt
 ext/reflection/tests/bug46064.phpt
 ext/reflection/tests/bug46064_2.phpt
 ext/reflection/tests/bug46103.phpt
@@ -254,6 +258,7 @@ ext/reflection/tests/bug79683.phpt
 ext/reflection/tests/bug79820.phpt
 ext/reflection/tests/bug80190.phpt
 ext/reflection/tests/bug80370.phpt
+ext/reflection/tests/bug80564.phpt
 ext/reflection/tests/bug80821.phpt
 ext/reflection/tests/bug81208.phpt
 ext/reflection/tests/bug81681.phpt
@@ -266,6 +271,7 @@ ext/reflection/tests/gh10623.phpt
 ext/reflection/tests/gh11937_1.phpt
 ext/reflection/tests/gh11937_2.phpt
 ext/reflection/tests/gh8080.phpt
+ext/reflection/tests/gh8444.phpt
 ext/reflection/tests/gh9409.phpt
 ext/reflection/tests/gh9470.phpt
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_getDefaultValue_Internal.phpt
@@ -277,6 +283,7 @@ ext/reflection/tests/iterable_Reflection.phpt
 ext/reflection/tests/new_in_attributes.phpt
 ext/reflection/tests/parameters_002.phpt
 ext/reflection/tests/readonly_class.phpt
+ext/reflection/tests/readonly_properties.phpt
 ext/reflection/tests/reflectionclass_for_traits.phpt
 ext/reflection/tests/request38992.phpt
 ext/reflection/tests/static_properties_002.phpt

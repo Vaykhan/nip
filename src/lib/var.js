@@ -3,7 +3,7 @@
 import {
   Flt, I64MAX, I64MIN, isInt, mkf, normBig, NUM_FULL, PHPArray, PHPObject, PHPResource, Ref
 } from '../values.js';
-import { gettype, toBool, toDbl, toInt, toStr, typeOf } from '../convert.js';
+import { castInt, gettype, nanWarn, toBool, toDbl, toStr, typeOf } from '../convert.js';
 import { isNum } from '../compare.js';
 import { rt } from '../runtime/state.js';
 import { throwError } from '../runtime/errors.js';
@@ -34,7 +34,7 @@ def('is_callable', (value, syntax_only = false, callable_name = undefined) => {
 }, { refs: [false, false, true] });
 def('intval', (value, base = 10) => {
   const b = I(base);
-  if (typeof value !== 'string' || b === 10) return toInt(value);
+  if (typeof value !== 'string' || b === 10) return castInt(value);
   let s = value.trim().toLowerCase(); let neg = false;
   if (s[0] === '-' || s[0] === '+') { neg = s[0] === '-'; s = s.slice(1); }
   let bb = b;
@@ -55,13 +55,13 @@ def('settype', (_var, type) => {
   const t = S(type).toLowerCase();
   const v = _var.v;
   switch (t) {
-    case 'int': case 'integer': _var.v = toInt(v); break;
+    case 'int': case 'integer': _var.v = castInt(v); break;
     case 'float': case 'double': _var.v = mkf(toDbl(v)); break;
     case 'string': _var.v = toStr(v); break;
     case 'bool': case 'boolean': _var.v = toBool(v); break;
-    case 'array': _var.v = toArrayCast(v); break;
-    case 'object': _var.v = toObjectCast(v); break;
-    case 'null': _var.v = null; break;
+    case 'array': nanWarn(v, 'array'); _var.v = toArrayCast(v); break;
+    case 'object': nanWarn(v, 'object'); _var.v = toObjectCast(v); break;
+    case 'null': nanWarn(v, 'null'); _var.v = null; break;
     default: throwError('ValueError', 'settype(): Argument #2 ($type) must be a valid type');
   }
   return true;

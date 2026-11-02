@@ -3,7 +3,7 @@
 //   float (Flt box), string (JS byte string), PHPArray, PHPObject, PHPResource,
 //   plus references (Ref) and the control-flow signals used by the runtime.
 
-import { floatToInt } from './convert.js';
+import { floatToInt, oobWarn } from './convert.js';
 import { rt } from './runtime/state.js';
 import { deprecated, throwError, warn } from './runtime/errors.js';
 
@@ -242,7 +242,7 @@ export function normKey(k, ctx) {
       if (k === null) return '';
       if (k instanceof Flt) {
         const x = k.v, r = floatToInt(x);
-        if (Number(r) !== x) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
+        if (Number(r) !== x && !oobWarn(x)) deprecated(`Implicit conversion from float ${fmtRepr(x)} to int loses precision`);
         return r;
       }
       if (k instanceof PHPResource) { warn(`Resource ID#${k.id} used as offset, casting to integer (${k.id})`); return k.id; }

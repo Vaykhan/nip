@@ -8,9 +8,9 @@ import { toBool, toInt, toStr } from '../convert.js';
 import { strInc } from '../arith.js';
 import { bytes } from '../utf8.js';
 import { rt } from '../runtime/state.js';
-import { throwError, warn } from '../runtime/errors.js';
+import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callNative } from '../runtime/functions.js';
-import { lookupClass, objectProps, redeclareMsg } from '../runtime/classes.js';
+import { lookupClass, objectPropsRaw, redeclareMsg } from '../runtime/classes.js';
 import { def, deref, S } from './core.js';
 import { getStream, streamReadLine } from './file.js';
 
@@ -263,11 +263,12 @@ def('highlight_string', (string, _return = false) => { const s = '<code>' + call
 def('php_strip_whitespace', (filename) => { try { return fs.readFileSync(S(filename), 'latin1'); } catch (e) { return ''; } });
 def('token_get_all', (code) => { throwError('Error', 'token_get_all() is not supported'); });
 def('spl_classes', () => new PHPArray());
-def('class_alias', (_class, alias, autoload = true) => { const c = lookupClass(S(_class)); const ln = S(alias).replace(/^\\/, '').toLowerCase(); if (RESERVED_CLASS_NAMES.has(ln.slice(ln.lastIndexOf('\\') + 1))) throw new FatalSig(`Cannot use '${S(alias)}' as class name as it is reserved`, rt.line, rt.file); if (rt.classes.has(ln)) { warn(rt.phpVersion >= 80400 ? redeclareMsg(c, S(alias)) : `Cannot declare class ${S(alias)}, because the name is already in use`); return false; } rt.classes.set(ln, c); return true; });
+def('class_alias', (_class, alias, autoload = true) => { const c = lookupClass(S(_class)); const ln = S(alias).replace(/^\\/, '').toLowerCase(); const short = ln.slice(ln.lastIndexOf('\\') + 1); if (rt.phpVersion >= 80400 && short === '_') deprecated('Using "_" as a class alias is deprecated since 8.4'); if (RESERVED_CLASS_NAMES.has(short) || (rt.phpVersion >= 80500 && (short === 'array' || short === 'callable'))) throw new FatalSig(rt.phpVersion >= 80400 ? `Cannot use "${S(alias)}" as a class alias as it is reserved` : `Cannot use '${S(alias)}' as class name as it is reserved`, rt.line, rt.file); if (rt.classes.has(ln)) { warn(rt.phpVersion >= 80400 ? redeclareMsg(c, S(alias)) : `Cannot declare class ${S(alias)}, because the name is already in use`); return false; } rt.classes.set(ln, c); return true; });
 def('array_key_exists_dummy', () => 0); rt.fns.delete('array_key_exists_dummy');
 def('get_resource_type', (resource) => (deref(resource) instanceof PHPResource ? (deref(resource).closed ? 'Unknown' : deref(resource).type) : false));
 def('get_resource_id', (resource) => deref(resource).id);
-def('get_mangled_object_vars', (object) => { const a = new PHPArray(); for (const [k, v] of objectProps(object)) a.set(normKey(k), cp(deref(v))); return a; });
+// (like an (array) cast: a lazy object isn't initialized)
+def('get_mangled_object_vars', (object) => { const a = new PHPArray(); for (const [k, v] of objectPropsRaw(object.lazy !== undefined && object.lazy.instance !== null ? object.lazy.instance : object)) a.set(normKey(k), cp(deref(v))); return a; });
 def('get_object_vars_all', (object) => 0); rt.fns.delete('get_object_vars_all');
 def('mb_http_output', () => 'UTF-8');
 def('lcg', () => 0); rt.fns.delete('lcg');

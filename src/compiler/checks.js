@@ -118,7 +118,14 @@ export function checkProgram(ast, file) {
         break;
       case 'Throw': break;
       case 'ClassDecl': {
-        if (!n.anon) { const short = n.name.slice(n.name.lastIndexOf('\\') + 1); if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n); }
+        if (!n.anon) {
+          const short = n.name.slice(n.name.lastIndexOf('\\') + 1);
+          if (rt.phpVersion >= 80400) { // (PHP 8.4 names the kind of declaration)
+            const what = n.kind === 'enum' ? 'an enum name' : n.kind === 'interface' ? 'an interface name' : n.kind === 'trait' ? 'a trait name' : 'a class name';
+            if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use "${short}" as ${what} as it is reserved`, n);
+            if (short === '_') compileDeprecated(`Using "_" as ${what} is deprecated since 8.4`, n);
+          } else if (RESERVED_CLASS_NAMES.has(short.toLowerCase())) fail(`Cannot use '${short}' as class name as it is reserved`, n);
+        }
         checkClass(n);
         checkAttrs(n.attrs, T_CLASS, n);
         for (const m of n.methods) {
@@ -252,7 +259,13 @@ export function checkProgram(ast, file) {
       case 'SCall': case 'New':
         if (n.k === 'New' && n.args === 'fcc') fail('Cannot create Closure for new expression', n);
         visit(n.cls, READ); if (typeof n.name === 'object') visit(n.name, READ); visitArgs(n.args, null, n); return;
-      case 'ConstDecl': for (const it of n.items) checkConstExpr(it.e, true); break;
+      case 'ConstDecl':
+        for (const it of n.items) checkConstExpr(it.e, true);
+        if (n.attrs) { // (PHP 8.5)
+          if (n.items.length > 1) fail('Cannot apply attributes to multiple constants at once', n);
+          checkAttrs(n.attrs, T_CONSTANT, n);
+        }
+        break;
       case 'Global':
         for (const x of n.names) if (x === 'this') fail('Cannot use $this as global variable', n);
         break;
@@ -370,8 +383,12 @@ export function checkProgram(ast, file) {
   // declaration rules PHP checks when compiling a class
   function checkClass(n) {
     const name = n.anon ? 'class@anonymous' : n.name, kind = n.kind;
-    if (kind !== 'class' && kind !== 'enum' && hasAttrName(n.attrs, 'allowdynamicproperties')) fail(`Cannot apply #[AllowDynamicProperties] to ${kind}`, n);
-    if (n.flags.readonly && hasAttrName(n.attrs, 'allowdynamicproperties')) fail(`Cannot apply #[AllowDynamicProperties] to readonly class ${name}`, n);
+    if (hasAttrName(n.attrs, 'allowdynamicproperties')) {
+      // (PHP 8.4 names the class and rejects enums; 8.5 writes the attribute's name with a \)
+      const adp = rt.phpVersion >= 80500 ? '#[\\AllowDynamicProperties]' : '#[AllowDynamicProperties]';
+      if (kind !== 'class' && (kind !== 'enum' || rt.phpVersion >= 80400)) fail(`Cannot apply ${adp} to ${kind}${rt.phpVersion >= 80400 ? ' ' + name : ''}`, n);
+      if (n.flags.readonly) fail(`Cannot apply ${adp} to readonly class ${name}`, n);
+    }
     if (kind === 'interface' && n.traits.length) fail(`Cannot use traits inside of interfaces. ${n.traits[0].names[0]} is used in ${name}`, n.traits[0].l ? n.traits[0] : n);
     if (kind === 'enum' && n.enumType) {
       const bt = n.enumType.raw && n.enumType.raw.length === 1 ? String(n.enumType.raw[0]).toLowerCase() : 'mixed';
@@ -593,8 +610,9 @@ export function checkProgram(ast, file) {
         if (owner.kind === 'trait') continue;
         fail(`Cannot apply #[\\Deprecated] to ${owner.kind} ${owner.name}`, a);
       }
-      if (!(known.flags & target)) {
-        const allowed = TARGET_NAMES.filter(([b]) => known.flags & b).map(([, t]) => t).join(', ');
+      const kflags = rt.phpVersion >= 80500 && known.flags85 ? known.flags85 : known.flags;
+      if (!(kflags & target)) {
+        const allowed = TARGET_NAMES.filter(([b]) => kflags & b).map(([, t]) => t).join(', ');
         fail(`Attribute "${known.name}" cannot target ${TARGET_NAMES.find(([b]) => b === target)[1]} (allowed targets: ${allowed})`, a);
       }
       if (seen.has(ln)) fail(`Attribute "${known.name}" must not be repeated`, a);
@@ -690,10 +708,15 @@ export function checkProgram(ast, file) {
     // an optional parameter before a required one is required (except PHP 5 style `T $x = null`)
     let lastRequired = -1;
     fn.params.forEach((p, i) => { if (!p.def && !p.variadic) lastRequired = i; });
+    // (PHP 8.4 names the function, and deprecates `T $x = null` without ?T)
+    const v84 = rt.phpVersion >= 80400;
+    const fpre = !v84 ? '' : (methods.has(fn) && curClass ? `${curClass.anon ? 'class@anonymous' : curClass.name}::${fn.name}` : fn.name) + '(): ';
     fn.params.forEach((p, i) => {
-      if (!p.def || i >= lastRequired) return;
-      const implicitNullable = p.type && !p.type.nullable && p.def.k === 'Lit' && p.def.v === null;
-      if (!implicitNullable) compileDeprecated(`Optional parameter $${p.name} declared before required parameter $${fn.params[lastRequired].name} is implicitly treated as a required parameter`, p.def.l ? p.def : fn);
+      if (!p.def) return;
+      const implicitNullable = p.type && !p.type.nullable && isNullLit(p.def) && (!v84 || (!p.promote && !p.type.alts.some((a) => typeof a === 'string' && /^(null|mixed)$/i.test(a))));
+      if (v84 && implicitNullable) compileDeprecated(`${fpre}Implicitly marking parameter $${p.name} as nullable is deprecated, the explicit nullable type must be used instead`, p.def.l ? p.def : fn);
+      if (i >= lastRequired) return;
+      if (!implicitNullable) compileDeprecated(`${fpre}Optional parameter $${p.name} declared before required parameter $${fn.params[lastRequired].name} is implicitly treated as a required parameter`, p.def.l ? p.def : fn);
     });
     if (!methods.has(fn)) checkAttrs(fn.attrs, T_FUNCTION, fn);
     for (const p of fn.params) {
@@ -780,15 +803,16 @@ function newScope() { return { labels: new Map(), gotos: [] }; }
 const BUILTIN_TYPES = new Set(['int', 'float', 'string', 'bool', 'array', 'object', 'callable', 'iterable', 'mixed', 'void', 'never', 'null', 'false', 'true', 'static', 'self', 'parent']);
 const ENUM_MAGIC = new Set(['__construct', '__destruct', '__clone', '__get', '__set', '__unset', '__isset', '__tostring', '__debuginfo', '__serialize', '__unserialize', '__sleep', '__wakeup', '__set_state']);
 function hasAttrName(attrs, lname) { return !!attrs && attrs.some((a) => (a.name[0] === '\\' ? a.name.slice(1) : a.name).toLowerCase() === lname); }
+const isNullLit = (e) => (e.k === 'Lit' && e.v === null) || (e.k === 'Const' && /^\\?null$/i.test(e.name));
 const CLASS_REF_NODES = new Set(['CConst', 'ClassName', 'New', 'SCall', 'SProp', 'Instanceof']);
-const T_CLASS = 1, T_FUNCTION = 2, T_METHOD = 4, T_PROPERTY = 8, T_CLASS_CONSTANT = 16, T_PARAMETER = 32;
-const TARGET_NAMES = [[T_CLASS, 'class'], [T_FUNCTION, 'function'], [T_METHOD, 'method'], [T_PROPERTY, 'property'], [T_CLASS_CONSTANT, 'class constant'], [T_PARAMETER, 'parameter']];
+const T_CLASS = 1, T_FUNCTION = 2, T_METHOD = 4, T_PROPERTY = 8, T_CLASS_CONSTANT = 16, T_PARAMETER = 32, T_CONSTANT = 64; // (constants: PHP 8.5)
+const TARGET_NAMES = [[T_CLASS, 'class'], [T_FUNCTION, 'function'], [T_METHOD, 'method'], [T_PROPERTY, 'property'], [T_CLASS_CONSTANT, 'class constant'], [T_PARAMETER, 'parameter'], [T_CONSTANT, 'constant']];
 const ENGINE_ATTRS = {
   attribute: { name: 'Attribute', flags: T_CLASS },
   override: { name: 'Override', flags: T_METHOD },
   allowdynamicproperties: { name: 'AllowDynamicProperties', flags: T_CLASS },
   returntypewillchange: { name: 'ReturnTypeWillChange', flags: T_METHOD },
   sensitiveparameter: { name: 'SensitiveParameter', flags: T_PARAMETER },
-  deprecated: { name: 'Deprecated', flags: T_METHOD | T_FUNCTION | T_CLASS_CONSTANT, since: 80400 },
+  deprecated: { name: 'Deprecated', flags: T_METHOD | T_FUNCTION | T_CLASS_CONSTANT, flags85: T_CLASS | T_METHOD | T_FUNCTION | T_CLASS_CONSTANT | T_CONSTANT, since: 80400 },
   nodiscard: { name: 'NoDiscard', flags: T_METHOD | T_FUNCTION, since: 80500 },
 };

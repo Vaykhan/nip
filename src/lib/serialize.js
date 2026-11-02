@@ -4,7 +4,8 @@ import { Flt, fmtRepr, mkf, normKey, numFromText, PHPArray, PHPObject, Ref } fro
 import { toStr } from '../convert.js';
 import { rt } from '../runtime/state.js';
 import { throwError, warn } from '../runtime/errors.js';
-import { callMethodName, classConst, classExists, initProps, lookupClass, objectProps } from '../runtime/classes.js';
+import { callMethodName, classConst, classExists, initProps, lookupClass, objectProps, objectPropsRaw } from '../runtime/classes.js';
+import { LAZY_SKIP_SERIALIZE } from '../runtime/lazy.js';
 import { def, S } from './core.js';
 import { JsonErr } from './json.js';
 import { closureClass } from '../runtime/native-classes.js';
@@ -49,7 +50,9 @@ function serializeVal(v, seen) {
       keys = r instanceof PHPArray ? r.values().map(toStr) : [];
     }
     const entries = [];
-    for (const [k, x] of objectProps(v)) {
+    // (a lazy object created with ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE stays lazy)
+    const raw = v.lazy !== undefined && v.lazy.instance === null && (v.lazy.options & LAZY_SKIP_SERIALIZE) !== 0;
+    for (const [k, x] of raw ? objectPropsRaw(v) : objectProps(v)) {
       let sk = k;
       const plain = k.charCodeAt(0) === 0 ? k.slice(k.indexOf('\0', 1) + 1) : k;
       if (keys && !keys.includes(plain)) continue;

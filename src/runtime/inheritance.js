@@ -125,13 +125,15 @@ function defaultStr(n, scope) {
 // where def is the default value as PHP prints it.
 // `scope` resolves self (in a trait: the class using it); types print as declared in traits
 // owner: the class the method is named after in messages
+const VOID_TYPE = { alts: ['void'], nullable: false };
 function userSig(m, scope = m.cls, owner = m.cls) {
   const fn = m.fn;
   let required = 0;
   fn.params.forEach((p, i) => { if (!p.defNode && !p.variadic) required = i + 1; });
   return {
-    owner: inhClsName(owner), name: m.name, byRef: !!fn.decl.byRef, scope, printScope: m.origin || m.cls.isTrait ? null : m.cls, ret: fn.ret || null, tentative: false,
-    params: fn.params.map((p, i) => ({ type: p.type, name: p.name, byRef: !!p.byRef, variadic: !!p.variadic, optional: i >= required, def: p.defNode && !p.variadic ? defaultStr(p.defNode, m.cls) : null })),
+    owner: inhClsName(owner), name: m.name, byRef: !!fn.decl.byRef, scope, printScope: m.origin || m.cls.isTrait ? null : m.cls, ret: fn.ret || (fn.hookKind === 'set' ? VOID_TYPE : null), tentative: false,
+    // (a set hook's implicit $value has the property's type)
+    params: fn.params.map((p, i) => ({ type: p.type || (fn.hookKind === 'set' && i === 0 ? fn.hookType || null : null), name: p.name, byRef: !!p.byRef, variadic: !!p.variadic, optional: i >= required, def: p.defNode && !p.variadic ? defaultStr(p.defNode, m.cls) : null })),
   };
 }
 function parseTypeStr(str) {
@@ -230,7 +232,7 @@ function checkProps(cls, decl, resolve) {
   const own = new Set(ownPropNames(cls));
   const P = cls.parent, at = (msg) => new FatalSig(msg, decl.l, decl.file);
   const ctx = { resolve: (n) => (lcName(n) === cls.lname ? cls : resolve(n)) };
-  for (const n of propTableOrder(P)) {
+  for (const n of P ? propTableOrder(P) : []) {
     if (!own.has(n)) continue;
     const pi = P.sprops.get(n) || P.props.get(n);
     if (!pi || pi.vis === 'private') continue;
@@ -240,7 +242,7 @@ function checkProps(cls, decl, resolve) {
     if (!ci || ci.cls !== cls) continue;
     const pn = `${inhClsName(pi.cls)}::$${n}`, cn = `${inhClsName(cls)}::$${n}`;
     if (pStatic !== cStatic) throw at(`Cannot redeclare ${pStatic ? '' : 'non '}static ${pn} as ${cStatic ? '' : 'non '}static ${cn}`);
-    if (!!pi.readonly !== !!ci.readonly) throw at(`Cannot redeclare ${pi.readonly ? '' : 'non-'}readonly property ${pn} as ${ci.readonly ? '' : 'non-'}readonly ${cn}`);
+    if (!!pi.readonly !== !!ci.readonly && !pi.virtual) throw at(`Cannot redeclare ${pi.readonly ? '' : 'non-'}readonly property ${pn} as ${ci.readonly ? '' : 'non-'}readonly ${cn}`);
     if (pi.final) throw at(`Cannot override final property ${pn}`);
     // set visibility (PHP 8.4): the same or weaker than the parent's (its visibility when it has none)
     if (ci.setVis && !(pi.hooks && pi.virtual && !pi.hooks.set) && VIS_RANK[ci.setVis] > VIS_RANK[pi.setVis || pi.vis]) throw at(`Set access level of ${cn} must be ${pi.setVis ? pi.setVis + '(set)' : 'omitted'} (as in class ${inhClsName(pi.cls)})${pi.setVis ? ' or weaker' : ''}`);
@@ -254,6 +256,16 @@ function checkProps(cls, decl, resolve) {
       if (ct && ((getOnly && a !== false) || (setOnly && b !== false))) continue;
       if (a === false || b === false || !ct) throw at(`Type of ${cn} must be ${typeStr(pt, null)} (as in class ${inhClsName(pi.cls)})`);
     } else if (ct) throw at(`Type of ${cn} must not be defined (as in class ${inhClsName(pi.cls)})`);
+  }
+  // an interface's hooked properties (PHP 8.4): a set hook needs a public set visibility
+  for (const iname of decl.interfaces || []) {
+    const ic = resolve(iname);
+    if (!ic) continue;
+    for (const [n, pi] of ic.props) {
+      const ci = cls.props.get(n);
+      if (!ci || ci.cls !== cls || !pi.hooks || !pi.hooks.set || !ci.setVis) continue;
+      if (VIS_RANK[ci.setVis] > VIS_RANK[pi.setVis || pi.vis]) throw at(`Set access level of ${inhClsName(cls)}::$${n} must be omitted (as in class ${inhClsName(ic)})`);
+    }
   }
 }
 // do_inherit_constant_check: visibility and (covariant) type of redeclared constants
@@ -290,11 +302,18 @@ function checkHooks(cls, decl, resolve) {
         throw new FatalSig(`Type of parameter $${set.params[0].name} of hook ${cls.name}::$${info.name}::set must be compatible with property type`, info.decl.l, decl.file);
       }
     }
+    const g = info.hooks.get;
+    if (g && g.byRef && info.hooks.set && !info.virtual) throw new FatalSig(`Get hook of backed property ${cls.name}::${info.name} with set hook may not return by reference`, info.decl.l, decl.file);
     const parent = cls.parent && cls.parent.props.get(info.name);
-    if (parent && parent.hooks) {
+    const protos = parent && parent.hooks ? [[parent, 'parent']] : [];
+    for (const iname of decl.interfaces) {
+      const ic = resolve(iname), ip = ic && ic.props.get(info.name);
+      if (ip && ip.hooks && ip !== parent) protos.push([ip, 'iface']);
+    }
+    for (const [proto, how] of protos) {
       for (const kind of ['get', 'set']) {
-        const ch = info.hooks[kind], ph = parent.hooks[kind];
-        if (ch && ph && ch !== ph && ch.cls === cls) checkOverride(cls, asMethod(ch), asMethod(ph), resolve, 'parent');
+        const ch = info.hooks[kind], ph = proto.hooks[kind];
+        if (ch && ph && ch !== ph && ch.cls === cls) checkOverride(cls, asMethod(ch), asMethod(ph), resolve, how);
       }
     }
   }
@@ -302,7 +321,7 @@ function checkHooks(cls, decl, resolve) {
 const asMethod = (fn) => ({ name: fn.name, fn, cls: fn.cls, vis: 'public', static: false, abstract: !!fn.abstractHook, final: false });
 export function checkInheritance(cls, decl, resolve) {
   if (decl.file !== PRELUDE_FILE && rt.phpVersion >= 80400) checkHooks(cls, decl, resolve);
-  if (cls.parent && decl.file !== PRELUDE_FILE) checkProps(cls, decl, resolve);
+  if ((cls.parent || (rt.phpVersion >= 80400 && decl.interfaces && decl.interfaces.length)) && decl.file !== PRELUDE_FILE) checkProps(cls, decl, resolve);
   if ((cls.parent || cls.ifaceList.length) && decl.file !== PRELUDE_FILE) checkConsts(cls, decl, resolve);
   if (cls.parent) {
     for (const k of methodTableOrder(cls.parent)) {

@@ -401,7 +401,7 @@ function spropOps(C, N, sname) {
     get: (f) => info(f).ref.v,
     getq: (f) => { const cls = C(f); const i = lookupStaticProp(cls, nm(f)); return i ? i.ref.v : undefined; },
     set: (f, v) => { const i = winfo(f, 'modify'); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
-    bind: (f, r) => { winfo(f, 'modify').ref = r; },
+    bind: (f, r) => { winfo(f, 'indirectly modify').ref = r; },
     ref: (f) => winfo(f, 'indirectly modify').ref,
     arr: (f) => writableArrIn(winfo(f, 'indirectly modify').ref),
     unset: () => throwError('Error', 'Attempt to unset static property'),

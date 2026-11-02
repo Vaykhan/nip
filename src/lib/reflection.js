@@ -9,12 +9,13 @@ import { Frame } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, PRELUDE_FILE, throwError } from '../runtime/errors.js';
-import { callFunction, typeParts, typeStr } from '../runtime/functions.js';
+import { callFunction, coercePropType, typeParts, typeStr } from '../runtime/functions.js';
 import { makeClosure } from '../runtime/callables.js';
 import {
-  classConst, initProps, instantiate, isInternalName, lookupClass, lookupStaticProp, readProp,
-  writeProp,
+  classConst, initProps, instantiate, isInternalName, lookupClass, lookupStaticProp, propDefault, readProp,
+  trackDestructible, writeProp,
 } from '../runtime/classes.js';
+import { LAZY_SKIP_DESTRUCTOR, LAZY_SKIP_SERIALIZE, lazyInit, lazyRealize, lazyRunning, makeLazy } from '../runtime/lazy.js';
 import { initThrowable } from '../runtime/errors.js';
 import { closureClass } from '../runtime/native-classes.js';
 import { lazyFn } from '../runtime/boot.js';
@@ -22,12 +23,16 @@ import { def, deref, pnamesOf } from './core.js';
 import { internalMethodSig } from '../runtime/inheritance.js';
 import { CLASS_ARGINFO } from '../runtime/arginfo.js';
 import { parsePHP } from '../parser.js';
+import { dropRef, gcCheck } from '../runtime/gc.js';
 
 const IS_STATIC = 16, IS_PUBLIC = 1, IS_PROTECTED = 2, IS_PRIVATE = 4, IS_ABSTRACT = 64, IS_FINAL = 32;
 const IS_READONLY = 128, IS_READONLY_CLASS = 65536, IS_EXPLICIT_ABSTRACT = 64;
 const VIS_BITS = { public: IS_PUBLIC, protected: IS_PROTECTED, private: IS_PRIVATE };
-export const ATTR_TARGET = { class: 1, function: 2, method: 4, property: 8, 'class constant': 16, parameter: 32 };
-const ATTR_ALL = 63, ATTR_REPEATABLE = 64, ATTR_IS_INSTANCEOF = 2;
+export const ATTR_TARGET = { class: 1, function: 2, method: 4, property: 8, 'class constant': 16, parameter: 32, constant: 64 };
+// (PHP 8.5 added Attribute::TARGET_CONSTANT, which moved IS_REPEATABLE)
+const attrAll = () => (rt.phpVersion >= 80500 ? 127 : 63), attrRepeatable = () => (rt.phpVersion >= 80500 ? 128 : 64);
+const targetNames = () => Object.entries(ATTR_TARGET).filter(([, b]) => b !== 64 || rt.phpVersion >= 80500);
+const ATTR_IS_INSTANCEOF = 2;
 
 const reflErr = (msg) => throwError('ReflectionException', msg);
 const lc = (s) => s.toLowerCase();
@@ -117,7 +122,8 @@ function attrList(attrs, target, scope, name, flags, who) {
   }
   const counts = new Map();
   for (const a of attrs) counts.set(lc(a.name), (counts.get(lc(a.name)) || 0) + 1);
-  return list(attrs.filter((a) => !filter || filter(a)).map((a) => mk('ReflectionAttribute', { k: 'attr', a, target, scope, repeated: counts.get(lc(a.name)) > 1 }, {})));
+  // (PHP 8.4: with a public $name)
+  return list(attrs.filter((a) => !filter || filter(a)).map((a) => mk('ReflectionAttribute', { k: 'attr', a, target, scope, repeated: counts.get(lc(a.name)) > 1 }, rt.phpVersion >= 80400 ? { name: ATTR_OPS.getName({ a }) } : {})));
 }
 function attrArgs(r) {
   const out = new PHPArray();
@@ -128,13 +134,16 @@ function attrArgs(r) {
   }
   return out;
 }
-const INTERNAL_ATTRS = { attribute: 1, returntypewillchange: 4, allowdynamicproperties: 1, sensitiveparameter: 32, override: 4 };
+const INTERNAL_ATTRS = { attribute: 1, returntypewillchange: 4, allowdynamicproperties: 1, sensitiveparameter: 32, override: 4, nodiscard: 6 };
 // the Attribute flags of an attribute class, or null if it isn't one
 export function attributeFlags(cls) {
-  if (INTERNAL_ATTRS[cls.lname] !== undefined && !isUserClass(cls)) return INTERNAL_ATTRS[cls.lname];
+  if (!isUserClass(cls)) {
+    if (INTERNAL_ATTRS[cls.lname] !== undefined) return INTERNAL_ATTRS[cls.lname];
+    if (cls.lname === 'deprecated') return rt.phpVersion >= 80500 ? 87 : 22; // (PHP 8.5: also constants and traits)
+  }
   const a = cls.decl && cls.decl.attrs && cls.decl.attrs.find((x) => lc(strip(x.name)) === 'attribute');
   if (!a) return null;
-  if (!a.args.length) return ATTR_ALL;
+  if (!a.args.length) return attrAll();
   return Number(cExpr(a.args[0].e)(scopeFrame(cls)));
 }
 const ATTR_OPS = {
@@ -148,11 +157,11 @@ const ATTR_OPS = {
     const flags = attributeFlags(cls);
     if (flags === null) throwError('Error', `Attempting to use non-attribute class "${cls.name}" as attribute`);
     if (!(flags & r.target)) {
-      const allowed = Object.entries(ATTR_TARGET).filter(([, b]) => flags & b).map(([n]) => n).join(', ');
-      const tname = Object.entries(ATTR_TARGET).find(([, b]) => b === r.target)[0];
+      const allowed = targetNames().filter(([, b]) => flags & b).map(([n]) => n).join(', ');
+      const tname = targetNames().find(([, b]) => b === r.target)[0];
       throwError('Error', `Attribute "${cls.name}" cannot target ${tname} (allowed targets: ${allowed})`);
     }
-    if (r.repeated && !(flags & ATTR_REPEATABLE)) throwError('Error', `Attribute "${cls.name}" must not be repeated`);
+    if (r.repeated && !(flags & attrRepeatable())) throwError('Error', `Attribute "${cls.name}" must not be repeated`);
     return instantiate(cls, () => callArgs(attrArgs(r)), null);
   },
   __toString(r) {
@@ -340,7 +349,7 @@ const METHOD_OPS = Object.assign(Object.create(FN_OPS), {
     if (!pm) reflErr(`Method ${r.via.name}::${r.m.name} does not have a prototype`);
     return methodObj(p, pm);
   },
-  setAccessible: () => null,
+  setAccessible: () => { if (rt.phpVersion >= 80500) deprecated('Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect'); return null; },
 });
 function methodModifiers(m) {
   return VIS_BITS[m.vis] | (m.static ? IS_STATIC : 0) | (m.abstract ? IS_ABSTRACT : 0) | (m.final ? IS_FINAL : 0);
@@ -593,6 +602,21 @@ const CLASS_OPS = {
     if (c.ancestors.has('throwable')) initThrowable(o);
     return o;
   },
+  newLazyGhost: (r, init, options) => newLazy(r, init, options, false),
+  newLazyProxy: (r, init, options) => newLazy(r, init, options, true),
+  resetAsLazyGhost: (r, obj, init, options) => resetAsLazy(r, obj, init, options, false),
+  resetAsLazyProxy: (r, obj, init, options) => resetAsLazy(r, obj, init, options, true),
+  initializeLazyObject: (r, obj) => { lazyArg(r, obj, 'initializeLazyObject'); return obj.lazy === undefined ? obj : lazyInit(obj); },
+  isUninitializedLazyObject: (r, obj) => { lazyArg(r, obj, 'isUninitializedLazyObject'); return obj.lazy !== undefined && obj.lazy.instance === null; },
+  markLazyObjectAsInitialized(r, obj) {
+    lazyArg(r, obj, 'markLazyObjectAsInitialized');
+    const lz = obj.lazy;
+    if (lz === undefined || lz.instance !== null) return obj;
+    for (const key of [...lz.keys]) lazySkip(obj, obj.cls.slots.get(key));
+    obj.lazy = undefined;
+    return obj;
+  },
+  getLazyInitializer: (r, obj) => { lazyArg(r, obj, 'getLazyInitializer'); return obj.lazy !== undefined && obj.lazy.instance === null ? obj.lazy.init : null; },
   getParentClass: (r) => (r.cls.parent ? classObj(r.cls.parent) : false),
   isSubclassOf(r, other) {
     const c = resolveClassArg(other);
@@ -677,10 +701,101 @@ function newInstance(cls, args) {
   return instantiate(cls, () => args, null);
 }
 
+// ---------------------------------------------------------------- lazy objects (PHP 8.4)
+function lazyOptions(options, method, argNo, reset) {
+  if (options & ~(LAZY_SKIP_SERIALIZE | LAZY_SKIP_DESTRUCTOR)) reflErr(`ReflectionClass::${method}(): Argument #${argNo} ($options) contains invalid flags`);
+  if (!reset && options & LAZY_SKIP_DESTRUCTOR) reflErr(`ReflectionClass::${method}(): Argument #${argNo} ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR`);
+}
+// internal classes (other than stdClass) and their subclasses can't be lazy
+function lazyCheckClass(c) {
+  for (let p = c; p; p = p.parent) {
+    if (isUserClass(p) || p.lname === 'stdclass') continue;
+    throwError('Error', `Cannot make instance of internal class lazy: ${p === c ? c.name + ' is internal' : c.name + ' inherits internal class ' + p.name}`);
+  }
+}
+function lazyArg(r, obj, method) {
+  if (!obj.cls.ancestors.has(r.cls.lname)) throwError('TypeError', `ReflectionClass::${method}(): Argument #1 ($object) must be of type ${r.cls.name}, ${obj.cls.name} given`);
+}
+function newLazy(r, init, options, proxy) {
+  const c = r.cls;
+  lazyOptions(options, proxy ? 'newLazyProxy' : 'newLazyGhost', 2, false);
+  lazyCheckClass(c);
+  if (c.abstract || c.isInterface || c.isTrait || c.isEnum) {
+    const what = c.isInterface ? 'interface' : c.isTrait ? 'trait' : c.isEnum ? 'enum' : 'abstract class';
+    throwError('Error', `Cannot instantiate ${what} ${c.name}`);
+  }
+  const o = new PHPObject(c);
+  makeLazy(o, c, proxy, init, options);
+  if (o.lazy === undefined) initProps(o);
+  if (c.hasDestructor) trackDestructible(o);
+  return o;
+}
+function resetAsLazy(r, obj, init, options, proxy) {
+  const method = proxy ? 'resetAsLazyProxy' : 'resetAsLazyGhost';
+  lazyArg(r, obj, method);
+  lazyOptions(options, method, 3, true);
+  lazyCheckClass(obj.cls);
+  if (lazyRunning.has(obj)) throwError('Error', 'Can not reset an object while it is being initialized');
+  if (obj.lazy !== undefined && obj.lazy.instance === null) reflErr('Object is already lazy');
+  if (obj.lazy !== undefined) { const inst = obj.lazy.instance; obj.lazy = undefined; gcCheck(inst); } // (an initialized proxy lets go of its instance)
+  if (!(options & LAZY_SKIP_DESTRUCTOR) && obj.lazy === undefined && !obj.destructed) {
+    const m = obj.cls.methods.get('__destruct');
+    if (m) { obj.destructed = true; callFunction(m.fn, [], obj, m.cls, obj.cls, null); }
+  }
+  obj.destructed = false;
+  // the dynamic properties and the class's are reset (a subclass's are kept), except initialized
+  // readonly ones of a final class or final readonly ones
+  const keep = new Set();
+  for (const key of [...obj.props.keys()]) {
+    const info = obj.cls.slots.get(key);
+    if (info !== undefined && !r.cls.slots.has(key)) continue;
+    if (info !== undefined && info.readonly && (obj.cls.final || info.final)) { keep.add(key); continue; }
+    obj.props.delete(key);
+  }
+  obj.lazy = undefined;
+  makeLazy(obj, r.cls, proxy, init, options, keep);
+  if (obj.lazy !== undefined) for (const key of [...obj.lazy.keys]) if (!obj.cls.slots.has(key)) obj.lazy.keys.delete(key);
+}
+// a lazy property gets its default value (or stays uninitialized when typed without one)
+function lazySkip(obj, info) {
+  if (!obj.props.has(info.key)) {
+    if (info.hasDef) { const v = propDefault(info); if (v instanceof PHPArray) v.cow = true; obj.props.set(info.key, v); }
+    else if (!info.type) obj.props.set(info.key, null);
+  }
+  lazyRealize(obj, info.key);
+}
+function lazyPropCheck(r, obj, method) {
+  r = objProp(r, obj);
+  const name = r.dyn ? r.cls.name : r.info.cls.name;
+  if (r.isStatic) reflErr(`Can not use ${method} on static property ${name}::$${r.name}`);
+  if (r.dyn) reflErr(`Can not use ${method} on dynamic property ${name}::$${r.name}`);
+  if (r.info.virtual) reflErr(`Can not use ${method} on virtual property ${name}::$${r.name}`);
+  if (!obj.cls.ancestors.has(r.cls.lname)) throwError('TypeError', `ReflectionProperty::${method}(): Argument #1 ($object) must be of type ${r.cls.name}, ${obj.cls.name} given`);
+  return r;
+}
+// the property r names as the object's class declares it (a subclass may redeclare it, with or
+// without hooks, or as a static property)
+function objProp(r, obj) {
+  if (r.isStatic || (!r.dyn && r.info.vis === 'private') || obj.cls === r.cls) return r;
+  const i = obj.cls.props.get(r.name);
+  if (i !== undefined) return i === r.info ? r : { ...r, info: i, dyn: false };
+  const si = obj.cls.sprops.get(r.name);
+  return si !== undefined ? { ...r, info: si, isStatic: true, dyn: false } : r;
+}
+// a frame in which property accesses of r bypass its hooks, as inside them
+function rawFrame(r, obj) { return new Frame({ hookProp: r.name }, obj, r.cls, r.cls); }
+// a property hook as a ReflectionMethod
+const hookMethod = (r, fn) => methodObj(fn.cls, { name: fn.name, fn, cls: fn.cls, vis: 'public', static: false, abstract: !!fn.abstractHook, final: !!(fn.decl && fn.decl.final) });
+// the slot a lazy-object operation on property r of obj works on: the object's own (a subclass may
+// redeclare the property)
+const lazyInfo = (r, obj) => obj.cls.slots.get(r.info.key) || r.info;
+
 // ---------------------------------------------------------------- properties
 function propModifiers(p) {
   if (p.dyn) return IS_PUBLIC;
-  return VIS_BITS[p.info.vis] | (p.isStatic ? IS_STATIC : 0) | (p.info.readonly ? IS_READONLY : 0);
+  const i = p.info;
+  return VIS_BITS[i.vis] | (p.isStatic ? IS_STATIC : 0) | (i.readonly ? IS_READONLY : 0) | (PROP_OPS.isAbstract(p) ? IS_ABSTRACT : 0) | (i.final ? IS_FINAL : 0)
+    | (i.virtual ? 512 : 0) | (i.setVis === 'protected' ? 2048 : i.setVis === 'private' ? 4096 : 0);
 }
 function propDefaultValue(info, isStatic) {
   if (!info.hasDef) return null;
@@ -717,6 +832,62 @@ const PROP_OPS = {
     if (!(obj instanceof PHPObject)) throwError('TypeError', 'ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties');
     return obj.props.has(r.dyn ? r.name : r.info.key);
   },
+  skipLazyInitialization(r, obj) {
+    r = lazyPropCheck(r, obj, 'skipLazyInitialization');
+    if (obj.lazy !== undefined && obj.lazy.instance === null && obj.lazy.keys.has(r.info.key)) lazySkip(obj, lazyInfo(r, obj));
+    return null;
+  },
+  setRawValueWithoutLazyInitialization(r, obj, v) {
+    r = lazyPropCheck(r, obj, 'setRawValueWithoutLazyInitialization');
+    while (obj.lazy !== undefined && obj.lazy.instance !== null) obj = obj.lazy.instance; // (initialized proxies)
+    const info = lazyInfo(r, obj);
+    if (info.readonly && obj.props.has(info.key)) throwError('Error', `Cannot modify readonly property ${obj.cls.name}::$${r.name}`);
+    if (info.type !== null) v = coercePropType(info, v, info.cls.name, r.name);
+    const slot = obj.props.get(info.key);
+    const old = slot instanceof Ref ? slot.v : slot;
+    if (slot instanceof Ref) slot.v = v; else obj.props.set(info.key, v);
+    lazyRealize(obj, info.key);
+    if (old !== v && old instanceof PHPObject) { dropRef(old); gcCheck(old); }
+    return null;
+  },
+  isLazy(r, obj) {
+    while (obj.lazy !== undefined && obj.lazy.instance !== null) obj = obj.lazy.instance; // (initialized proxies)
+    return !r.dyn && !r.isStatic && obj.lazy !== undefined && obj.lazy.keys.has(r.info.key) && !obj.props.has(r.info.key);
+  },
+  getMangledName: (r) => (r.dyn ? r.name : r.info.vis === 'protected' ? '\0*\0' + r.name : r.info.key),
+  getRawValue(r, obj) {
+    r = objProp(r, obj);
+    if (r.isStatic) reflErr('May not use getRawValue on static properties');
+    if (!r.dyn && !obj.cls.ancestors.has(r.cls.lname)) reflErr('Given object is not an instance of the class this property was declared in');
+    return readProp(obj, r.name, rawFrame(r, obj));
+  },
+  setRawValue(r, obj, v) {
+    r = objProp(r, obj);
+    if (r.isStatic) reflErr('May not use setRawValue on static properties');
+    writeProp(obj, r.name, v, rawFrame(r, obj));
+    return null;
+  },
+  isPrivateSet: (r) => !r.dyn && r.info.setVis === 'private',
+  isProtectedSet: (r) => !r.dyn && r.info.setVis === 'protected',
+  isDynamic: (r) => !!r.dyn,
+  isAbstract: (r) => !r.dyn && !!(r.info.decl && r.info.decl.abstract) || (!r.dyn && !!r.info.hooks && ['get', 'set'].some((k) => r.info.hooks[k] && r.info.hooks[k].abstractHook)),
+  isVirtual: (r) => !r.dyn && !!r.info.virtual,
+  isFinal: (r) => !r.dyn && !!r.info.final,
+  getSettableType(r) {
+    if (r.dyn) return null;
+    const set = r.info.hooks && r.info.hooks.set;
+    if (set && set.params && set.params[0] && set.params[0].type) return typeObj(set.params[0].type);
+    if (r.info.virtual && !set) return typeObj({ alts: ['never'], nullable: false }); // (can't be written)
+    return typeObj(r.info.type);
+  },
+  hasHooks: (r) => !r.dyn && !!r.info.hooks,
+  getHooks(r) {
+    const a = new PHPArray();
+    if (!r.dyn && r.info.hooks) for (const k of ['get', 'set']) if (r.info.hooks[k]) a.set(k, hookMethod(r, r.info.hooks[k]));
+    return a;
+  },
+  hasHook: (r, type) => !r.dyn && !!r.info.hooks && !!r.info.hooks[type.props.get('value')],
+  getHook: (r, type) => { const h = !r.dyn && r.info.hooks && r.info.hooks[type.props.get('value')]; return h ? hookMethod(r, h) : null; },
   isPublic: (r) => r.dyn || r.info.vis === 'public',
   isPrivate: (r) => !r.dyn && r.info.vis === 'private',
   isProtected: (r) => !r.dyn && r.info.vis === 'protected',
@@ -727,7 +898,7 @@ const PROP_OPS = {
   getModifiers: (r) => propModifiers(r),
   getDeclaringClass: (r) => classObj(r.cls),
   getDocComment: (r) => (!r.dyn && r.info.decl && r.info.decl.doc) || false,
-  setAccessible: () => null,
+  setAccessible: () => { if (rt.phpVersion >= 80500) deprecated('Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect'); return null; },
   getType: (r) => (r.dyn ? null : typeObj(r.info.type)),
   hasType: (r) => !r.dyn && !!r.info.type,
   hasDefaultValue: (r) => propHasDefault(r),
@@ -819,8 +990,20 @@ function fnToString(r) {
   return s + '}\n';
 }
 function propToString(r) {
-  const mods = r.dyn ? '<dynamic> public' : `<default> ${[r.info.vis, r.isStatic ? 'static' : '', r.info.readonly ? 'readonly' : ''].filter(Boolean).join(' ')}`;
-  return `Property [ ${mods} ${!r.dyn && r.info.type ? typeStr(r.info.type, null, true) + ' ' : ''}$${r.name} ]\n`;
+  if (r.dyn) return `Property [ <dynamic> public $${r.name} ]\n`;
+  const i = r.info, d = i.decl || {};
+  const mods = [d.abstract ? 'abstract' : '', i.final ? 'final' : '', i.vis, i.setVis ? i.setVis + '(set)' : '', r.isStatic ? 'static' : '', i.readonly ? 'readonly' : '', i.virtual ? 'virtual' : ''];
+  let s = `Property [ ${mods.filter(Boolean).join(' ')} ${i.type ? typeStr(i.type, null, true) + ' ' : ''}$${r.name}`;
+  if (i.hasDef) s += ' = ' + (!r.isStatic && i.evaluated ? fmtDefault(i.val) : d.def ? exprSource(d.def, i.cls) : 'NULL');
+  else if (!i.type && !i.virtual) s += ' = NULL';
+  if (i.hooks) s += ' {' + ['get', 'set'].map((k) => (i.hooks[k] ? (i.hooks[k].decl && i.hooks[k].decl.final ? ' final ' : ' ') + k + ';' : '')).join('') + ' }';
+  return s + ' ]\n';
+}
+// an evaluated default value as ReflectionProperty::__toString() shows it (format_default_value)
+function fmtDefault(v) {
+  if (v instanceof PHPObject) return v.cls.isEnum ? `${v.cls.name}::${v.props.get('name')}` : `object(${v.cls.name})`;
+  if (v instanceof PHPArray) return '[' + v.entries().map(([k, x]) => (v.isList && v.isList() ? '' : exportValue(k) + ' => ') + fmtDefault(x)).join(', ') + ']';
+  return exportValue(v);
 }
 function constToString(r) {
   const v = classConst(r.cls, r.name);
@@ -870,7 +1053,42 @@ function classToString(r) {
 }
 
 // ---------------------------------------------------------------- entry points
-const OPS = { class: CLASS_OPS, fn: FUNCTION_OPS, method: METHOD_OPS, param: PARAM_OPS, type: TYPE_OPS, prop: PROP_OPS, const: CONST_OPS, attr: ATTR_OPS };
+// ---------------------------------------------------------------- global constants (PHP 8.4)
+// the extension an internal constant belongs to
+function constExtension(name) {
+  if (/^(E_|PHP_|ZEND_|DEFAULT_INCLUDE_PATH|PEAR_|TRUE$|FALSE$|NULL$|DEBUG_BACKTRACE_|UPLOAD_ERR_|__COMPILER_HALT_OFFSET__)/.test(name)) return 'Core';
+  const m = /^(JSON|PREG|PCRE|DATE|MB|SPL|CAL|CTYPE|HASH|MHASH|FILTER|LIBXML|ZLIB|ICONV|PASSWORD)_/.exec(name);
+  if (m) return { JSON: 'json', PREG: 'pcre', PCRE: 'pcre', DATE: 'date', MB: 'mbstring', SPL: 'spl', CAL: 'calendar', CTYPE: 'ctype', HASH: 'hash', MHASH: 'hash', FILTER: 'filter', LIBXML: 'libxml', ZLIB: 'zlib', ICONV: 'iconv', PASSWORD: 'standard' }[m[1]];
+  return 'standard';
+}
+function findConst(name) {
+  const n = name[0] === '\\' ? name.slice(1) : name;
+  if (rt.consts.has(n)) return n;
+  const i = n.lastIndexOf('\\');
+  if (i < 0) return null;
+  // (the namespace part is case-insensitive)
+  const lns = n.slice(0, i).toLowerCase(), short = n.slice(i + 1);
+  for (const k of rt.consts.keys()) { const j = k.lastIndexOf('\\'); if (j === i && k.slice(j + 1) === short && k.slice(0, j).toLowerCase() === lns) return k; }
+  return null;
+}
+const RCONST_OPS = {
+  getName: (r) => r.name,
+  getNamespaceName: (r) => { const i = r.key.lastIndexOf('\\'); return i < 0 ? '' : r.key.slice(0, i); },
+  getShortName: (r) => r.key.slice(r.key.lastIndexOf('\\') + 1),
+  getValue: (r) => rt.consts.get(r.key),
+  isDeprecated: (r) => rt.deprecatedConsts.has(r.key),
+  getFileName: (r) => (rt.userConsts.has(r.key) ? rt.userConsts.get(r.key).file : false),
+  getExtension: (r) => (rt.userConsts.has(r.key) ? null : extensionObj(constExtension(r.key))),
+  getExtensionName: (r) => (rt.userConsts.has(r.key) ? false : constExtension(r.key)),
+  getAttributes: (r, name, flags) => attrList(rt.userConsts.has(r.key) ? rt.userConsts.get(r.key).attrs : null, 64, null, name, flags, 'ReflectionConstant'),
+  __toString(r) {
+    const v = rt.consts.get(r.key), user = rt.userConsts.has(r.key), dep = rt.deprecatedConsts.has(r.key);
+    const mods = [user ? '' : 'persistent', dep ? 'deprecated' : ''].filter(Boolean);
+    return `Constant [ ${mods.length ? '<' + mods.join(', ') + '> ' : ''}${typeName(v)} ${r.name} ] { ${constDisplay(v)} }\n`;
+  },
+};
+
+const OPS = { rconst: RCONST_OPS, class: CLASS_OPS, fn: FUNCTION_OPS, method: METHOD_OPS, param: PARAM_OPS, type: TYPE_OPS, prop: PROP_OPS, const: CONST_OPS, attr: ATTR_OPS };
 
 def('__refl', (self, op, ...args) => {
   const r = refl(self);
@@ -915,6 +1133,12 @@ def('__refl_init', (self, kind, a, b = null) => {
       const p = reflFindProp({ cls, obj: a instanceof PHPObject ? a : null }, name);
       if (!p) reflErr(`Property ${cls.name}::$${name} does not exist`);
       set(p, { name, class: p.cls.name });
+      return null;
+    }
+    case 'ReflectionConstant': {
+      const name = toStr(a), key = findConst(name);
+      if (key === null) reflErr(`Constant "${name}" does not exist`);
+      set({ k: 'rconst', name, key }, { name });
       return null;
     }
     case 'ReflectionClassConstant': case 'ReflectionEnumUnitCase': case 'ReflectionEnumBackedCase': {

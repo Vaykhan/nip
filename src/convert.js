@@ -1,7 +1,7 @@
 // Type juggling: PHP conversions between values (to string/int/float/bool, numeric strings).
 
 import {
-  Flt, fmtFloat, MAXS, normBig, NUM_LEAD, numFromText, PHPArray, PHPObject, PHPResource, Ref
+  Flt, fmtFloat, fmtRepr, MAXS, normBig, NUM_LEAD, numFromText, PHPArray, PHPObject, PHPResource, Ref
 } from './values.js';
 import { rt } from './runtime/state.js';
 import { throwError, warn } from './runtime/errors.js';
@@ -46,7 +46,7 @@ export function toBool(v) {
     case 'string': return v !== '' && v !== '0';
   }
   if (v === null || v === undefined) return false;
-  if (v instanceof Flt) return v.v !== 0;
+  if (v instanceof Flt) { if (v.v !== v.v) nanWarn(v, 'bool'); return v.v !== 0; }
   if (v instanceof PHPArray) return v.size > 0;
   if (v instanceof PHPObject && v.cls.toBoolHook) return v.cls.toBoolHook(v);
   return true;
@@ -63,6 +63,24 @@ export function floatToInt(x) {
   return normBig(BigInt(x));
 }
 
+// PHP 8.5 warns when a float that doesn't fit an int (zend_dval_to_lval: non-finite or out of
+// range) is converted to one. Returns whether it warned: implicit conversions then don't also
+// raise their "loses precision" deprecation.
+export function oobWarn(x, str) {
+  if (rt.phpVersion < 80500 || (x < 9223372036854775808 && x >= -9223372036854775808)) return false;
+  warn(str !== undefined ? `The float-string "${str}" is not representable as an int, cast occurred` : `The float ${fmtRepr(x)} is not representable as an int, cast occurred`);
+  return true;
+}
+// (int) casts, intval() and settype()
+export function castInt(v) {
+  if (rt.phpVersion >= 80500) {
+    if (v instanceof Flt) oobWarn(v.v);
+    else if (typeof v === 'string') { const m = NUM_LEAD.exec(v); if (m) { const n = numFromText(m[0]); if (n instanceof Flt) oobWarn(n.v, v); } }
+  }
+  return toInt(v);
+}
+// PHP 8.5: "unexpected NAN value was coerced to <type>"
+export function nanWarn(v, type) { if (rt.phpVersion >= 80500 && v instanceof Flt && v.v !== v.v) warn(`unexpected NAN value was coerced to ${type}`); }
 export function toInt(v) {
   switch (typeof v) {
     case 'number': case 'bigint': return v;
@@ -118,7 +136,7 @@ export function toStr(v) {
     case 'boolean': return v ? '1' : '';
   }
   if (v === null || v === undefined) return '';
-  if (v instanceof Flt) return fmtFloat(v.v, rt.precision);
+  if (v instanceof Flt) { if (v.v !== v.v) nanWarn(v, 'string'); return fmtFloat(v.v, rt.precision); }
   if (v instanceof PHPArray) { warn('Array to string conversion'); return 'Array'; }
   if (v instanceof PHPObject) return objToString(v);
   if (v instanceof PHPResource) return 'Resource id #' + v.id;

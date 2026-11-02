@@ -136,6 +136,8 @@ class ReflectionClass implements Reflector {
   const IS_EXPLICIT_ABSTRACT = 64;
   const IS_FINAL = 32;
   const IS_READONLY = 65536;
+  const SKIP_INITIALIZATION_ON_SERIALIZE = 8;
+  const SKIP_DESTRUCTOR = 16;
   public string $name;
   private function __clone(): void {}
   public function __construct(object|string $objectOrClass) { __refl_init($this, 'ReflectionClass', $objectOrClass); }
@@ -178,6 +180,14 @@ class ReflectionClass implements Reflector {
   public function newInstance(mixed ...$args): object { return __refl($this, 'newInstance', $args); }
   public function newInstanceWithoutConstructor(): object { return __refl($this, 'newInstanceWithoutConstructor'); }
   public function newInstanceArgs(array $args = []): ?object { return __refl($this, 'newInstanceArgs', $args); }
+  public function newLazyGhost(callable $initializer, int $options = 0): object { return __refl($this, 'newLazyGhost', $initializer, $options); }
+  public function newLazyProxy(callable $factory, int $options = 0): object { return __refl($this, 'newLazyProxy', $factory, $options); }
+  public function resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void { __refl($this, 'resetAsLazyGhost', $object, $initializer, $options); }
+  public function resetAsLazyProxy(object $object, callable $factory, int $options = 0): void { __refl($this, 'resetAsLazyProxy', $object, $factory, $options); }
+  public function initializeLazyObject(object $object): object { return __refl($this, 'initializeLazyObject', $object); }
+  public function isUninitializedLazyObject(object $object): bool { return __refl($this, 'isUninitializedLazyObject', $object); }
+  public function markLazyObjectAsInitialized(object $object): object { return __refl($this, 'markLazyObjectAsInitialized', $object); }
+  public function getLazyInitializer(object $object): ?callable { return __refl($this, 'getLazyInitializer', $object); }
   public function getParentClass(): ReflectionClass|false { return __refl($this, 'getParentClass'); }
   public function isSubclassOf(ReflectionClass|string $class): bool { return __refl($this, 'isSubclassOf', $class); }
   public function getStaticProperties(): array { return __refl($this, 'getStaticProperties'); }
@@ -203,31 +213,71 @@ class ReflectionProperty implements Reflector {
   const IS_PUBLIC = 1;
   const IS_PROTECTED = 2;
   const IS_PRIVATE = 4;
+  const IS_ABSTRACT = 64;
+  const IS_PROTECTED_SET = 2048;
+  const IS_PRIVATE_SET = 4096;
+  const IS_VIRTUAL = 512;
+  const IS_FINAL = 32;
   public string $name;
   public string $class;
   private function __clone(): void {}
   public function __construct(object|string $class, string $property) { __refl_init($this, 'ReflectionProperty', $class, $property); }
   public function __toString(): string { return __refl($this, '__toString'); }
   public function getName(): string { return __refl($this, 'getName'); }
+  public function getMangledName(): string { return __refl($this, 'getMangledName'); }
   public function getValue(?object $object = NULL): mixed { return __refl($this, 'getValue', $object); }
   public function setValue(mixed $objectOrValue, mixed $value = null): void { __refl($this, 'setValue', ...func_get_args()); }
+  public function getRawValue(object $object): mixed { return __refl($this, 'getRawValue', $object); }
+  public function setRawValue(object $object, mixed $value): void { __refl($this, 'setRawValue', $object, $value); }
+  public function setRawValueWithoutLazyInitialization(object $object, mixed $value): void { __refl($this, 'setRawValueWithoutLazyInitialization', $object, $value); }
+  public function skipLazyInitialization(object $object): void { __refl($this, 'skipLazyInitialization', $object); }
+  public function isLazy(object $object): bool { return __refl($this, 'isLazy', $object); }
   public function isInitialized(?object $object = NULL): bool { return __refl($this, 'isInitialized', $object); }
   public function isPublic(): bool { return __refl($this, 'isPublic'); }
   public function isPrivate(): bool { return __refl($this, 'isPrivate'); }
   public function isProtected(): bool { return __refl($this, 'isProtected'); }
+  public function isPrivateSet(): bool { return __refl($this, 'isPrivateSet'); }
+  public function isProtectedSet(): bool { return __refl($this, 'isProtectedSet'); }
   public function isStatic(): bool { return __refl($this, 'isStatic'); }
   public function isReadOnly(): bool { return __refl($this, 'isReadOnly'); }
   public function isDefault(): bool { return __refl($this, 'isDefault'); }
+  public function isDynamic(): bool { return __refl($this, 'isDynamic'); }
+  public function isAbstract(): bool { return __refl($this, 'isAbstract'); }
+  public function isVirtual(): bool { return __refl($this, 'isVirtual'); }
   public function isPromoted(): bool { return __refl($this, 'isPromoted'); }
   public function getModifiers(): int { return __refl($this, 'getModifiers'); }
   public function getDeclaringClass(): ReflectionClass { return __refl($this, 'getDeclaringClass'); }
   public function getDocComment(): string|false { return __refl($this, 'getDocComment'); }
   public function setAccessible(bool $accessible): void { __refl($this, 'setAccessible', $accessible); }
   public function getType(): ?ReflectionType { return __refl($this, 'getType'); }
+  public function getSettableType(): ?ReflectionType { return __refl($this, 'getSettableType'); }
   public function hasType(): bool { return __refl($this, 'hasType'); }
   public function hasDefaultValue(): bool { return __refl($this, 'hasDefaultValue'); }
   public function getDefaultValue(): mixed { return __refl($this, 'getDefaultValue'); }
   public function getAttributes(?string $name = NULL, int $flags = 0): array { return __refl($this, 'getAttributes', $name, $flags); }
+  public function hasHooks(): bool { return __refl($this, 'hasHooks'); }
+  public function getHooks(): array { return __refl($this, 'getHooks'); }
+  public function hasHook(PropertyHookType $type): bool { return __refl($this, 'hasHook', $type); }
+  public function getHook(PropertyHookType $type): ?ReflectionMethod { return __refl($this, 'getHook', $type); }
+  public function isFinal(): bool { return __refl($this, 'isFinal'); }
+}
+final class ReflectionConstant implements Reflector {
+  public string $name;
+  public function __construct(string $name) { __refl_init($this, 'ReflectionConstant', $name); }
+  public function getName(): string { return __refl($this, 'getName'); }
+  public function getNamespaceName(): string { return __refl($this, 'getNamespaceName'); }
+  public function getShortName(): string { return __refl($this, 'getShortName'); }
+  public function getValue(): mixed { return __refl($this, 'getValue'); }
+  public function isDeprecated(): bool { return __refl($this, 'isDeprecated'); }
+  public function getFileName(): string|false { return __refl($this, 'getFileName'); }
+  public function getExtension(): ?ReflectionExtension { return __refl($this, 'getExtension'); }
+  public function getExtensionName(): string|false { return __refl($this, 'getExtensionName'); }
+  public function __toString(): string { return __refl($this, '__toString'); }
+  public function getAttributes(?string $name = NULL, int $flags = 0): array { return __refl($this, 'getAttributes', $name, $flags); }
+}
+enum PropertyHookType: string {
+  case Get = 'get';
+  case Set = 'set';
 }
 class ReflectionClassConstant implements Reflector {
   const IS_PUBLIC = 1;
@@ -296,6 +346,7 @@ final class Attribute {
   const TARGET_PROPERTY = 8;
   const TARGET_CLASS_CONSTANT = 16;
   const TARGET_PARAMETER = 32;
+  const TARGET_CONSTANT = 64;
   const TARGET_ALL = 63;
   const IS_REPEATABLE = 64;
   public int $flags;

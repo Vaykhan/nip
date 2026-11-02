@@ -5,7 +5,7 @@ import {
   cp, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, normKey, PHPArray, PHPObject, Ref,
   ThrowSig
 } from '../values.js';
-import { toBool, toDbl, toInt, toStr, typeOf, valueName } from '../convert.js';
+import { castInt, nanWarn, toBool, toDbl, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { cmp, isNum, looseEq, strictEq } from '../compare.js';
 import {
   add, bitAnd, bitNot, bitOr, bitXor, concat, dec, div, inc, mod, mul, pow, shl, shr, sub
@@ -15,7 +15,7 @@ import { arrowFreeVars, CALL_KINDS, isFresh, isLvalNode, NULLSAFE_SHORT, SUPERGL
 import { cClassRef, cLval } from './lvalue.js';
 import { assertMessage } from './ast-export.js';
 import { iterateObject } from './stmt.js';
-import { E_USER_DEPRECATED, rt } from '../runtime/state.js';
+import { E_DEPRECATED, E_USER_DEPRECATED, rt } from '../runtime/state.js';
 import { deprecated, notice, PRELUDE_FILE, raise, setPrevious, throwError, warn } from '../runtime/errors.js';
 import {
   callFunction, callNative, compileFunction, deprecatedFn, deprecationSuffix, fnDisplayName, FRAME_FUNCS, noDiscardWarn
@@ -64,6 +64,7 @@ export function cExpr(n) {
 function deprecatedConst(name) {
   const a = rt.deprecatedConsts.get(name);
   if (a === undefined || a.showing) return;
+  if (a.msg !== undefined) { raise(E_DEPRECATED, a.msg); return; } // (an internal constant)
   a.showing = true; // (not again while evaluating its own message)
   try { raise(E_USER_DEPRECATED, `Constant ${name} is deprecated${deprecationSuffix(a, null)}`); } finally { a.showing = false; }
 }
@@ -385,12 +386,12 @@ const EXPR = {
   Cast(n) {
     const A = cExpr(n.e);
     switch (n.t) {
-      case 'int': return (f) => toInt(A(f));
+      case 'int': return (f) => castInt(A(f));
       case 'float': return (f) => mkf(toDbl(A(f)));
       case 'string': return (f) => toStr(A(f));
       case 'bool': return (f) => toBool(A(f));
-      case 'array': return (f) => toArrayCast(A(f));
-      case 'object': return (f) => toObjectCast(A(f));
+      case 'array': return (f) => { const v = A(f); nanWarn(v, 'array'); return toArrayCast(v); };
+      case 'object': return (f) => { const v = A(f); nanWarn(v, 'object'); return toObjectCast(v); };
       case 'unset': return (f) => { A(f); return null; };
     }
   },

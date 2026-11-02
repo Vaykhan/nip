@@ -1,7 +1,7 @@
 // Function and class introspection: function_exists, call_user_func, class_exists, get_object_vars, ...
 
-import { cp, normKey, PHPArray, PHPObject } from '../values.js';
-import { toBool, typeOf } from '../convert.js';
+import { cp, ExitSig, normKey, PHPArray, PHPObject, PHPResource } from '../values.js';
+import { toBool, toStr, typeOf } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { rt } from '../runtime/state.js';
 import { deprecated, PRELUDE_FILE, throwError, warn } from '../runtime/errors.js';
@@ -11,7 +11,7 @@ import {
   canAccessMember, classConst, classExists, cloneObject, lookupClass, lookupStaticProp, objVisibleProps,
   propAccessible, propDefault, readonlyKeys, writeProp
 } from '../runtime/classes.js';
-import { A, def, S } from './core.js';
+import { A, alias, def, I, S } from './core.js';
 import { since } from '../runtime/version.js';
 import { lazyFnSrc } from '../runtime/boot.js';
 
@@ -48,6 +48,19 @@ def('clone', (f, object, withProperties = null) => {
   return c;
 }, { frame: true });
 since(80500, 'fn', 'clone');
+// exit() and die() as functions (PHP 8.4): exit(string|int $status = 0): never
+def('exit', (status = 0) => {
+  let v = status;
+  if (v === null) { deprecated('exit(): Passing null to parameter #1 ($status) of type string|int is deprecated'); v = 0; }
+  if (v instanceof PHPObject && v.cls.methods.has('__tostring')) v = toStr(v);
+  if (typeof v === 'string') { rt.echo(v); throw new ExitSig(0); }
+  if (typeof v === 'boolean') v = v ? 1 : 0;
+  if (v instanceof PHPArray || v instanceof PHPObject || v instanceof PHPResource) throwError('TypeError', `exit(): Argument #1 ($status) must be of type string|int, ${typeOf(v)} given`);
+  throw new ExitSig(Number(I(v)));
+});
+alias('die', 'exit');
+rt.fns.get('die').name = 'exit';
+since(80400, 'fn', 'exit', 'die');
 def('forward_static_call', (callback, ...args) => callValue(callback, args));
 def('forward_static_call_array', (callback, args) => callValue(callback, A(args).values()));
 def('get_class', (object = undefined) => {
@@ -156,8 +169,9 @@ def('define', (constant_name, value, case_insensitive = false) => {
   const n = S(constant_name);
   if (n.includes('::')) throwError('ValueError', 'define(): Argument #1 ($constant_name) cannot be a class constant');
   // true/false/null (any case) and __COMPILER_HALT_OFFSET__ can't be defined
-  if (rt.consts.has(n) || /^(true|false|null)$/i.test(n) || n === '__COMPILER_HALT_OFFSET__') { warn(`Constant ${n} already defined`); return false; }
+  if (rt.consts.has(n) || /^(true|false|null)$/i.test(n) || n === '__COMPILER_HALT_OFFSET__') { warn(`Constant ${n} already defined${rt.phpVersion >= 80500 ? ', this will be an error in PHP 9' : ''}`); return false; }
   rt.consts.set(n, cp(value));
+  rt.userConsts.set(n, { file: rt.file, attrs: null });
   if (value !== null && typeof value === 'object') rt.constRoots.push(value);
   return true;
 });

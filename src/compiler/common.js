@@ -2,7 +2,7 @@
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
 import { Flt, fmtRepr, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
-import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
+import { floatToInt, oobWarn, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callMethodName } from '../runtime/classes.js';
@@ -147,7 +147,7 @@ export function strOffsetKey(key, isset) {
   }
   if (key === null || key === undefined || typeof key === 'boolean' || key instanceof Flt) {
     if (!isset) warn('String offset cast occurred');
-    else if (key instanceof Flt && Number(floatToInt(key.v)) !== key.v) deprecated(`Implicit conversion from float ${fmtRepr(key.v)} to int loses precision`);
+    else if (key instanceof Flt && Number(floatToInt(key.v)) !== key.v && !oobWarn(key.v)) deprecated(`Implicit conversion from float ${fmtRepr(key.v)} to int loses precision`);
     return key instanceof Flt ? floatToInt(key.v) : key ? 1 : 0;
   }
   if (isset) return undefined;
