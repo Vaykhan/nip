@@ -4,7 +4,7 @@ import { PHPResource } from '../values.js';
 import { Frame } from '../compiler/common.js';
 import { lvVarCache } from '../compiler/lvalue.js';
 import { E_ALL, E_DEPRECATED, E_STRICT, rt } from './state.js';
-import { declareClass } from './classes.js';
+import { declareClass, installRefChecks } from './classes.js';
 import { resetObjHandles } from './gc.js';
 import { compileSource, hoistDecls, runProgram } from './program.js';
 import { resetJsonState } from '../lib/json.js';
@@ -33,6 +33,7 @@ export function lazyFn(ln) { if (rt.disabledFns && rt.disabledFns.has(ln)) retur
 export function boot() {
   if (booted) return;
   booted = true;
+  installRefChecks();
   // interfaces needed by native classes are in the prelude; declare Traversable/Iterator first
   for (const name of PRELUDE_LAZY) {
     const src = readPrelude(name);

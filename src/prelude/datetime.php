@@ -28,9 +28,11 @@ trait __DateTimeImpl {
   public function __construct(string $datetime = "now", ?DateTimeZone $timezone = null) {
     $this->__tz = $timezone ? $timezone->getName() : date_default_timezone_get();
     if (preg_match('/(?:^|\s)(Z|UTC|GMT|[+-]\d{2}:?\d{2})$/i', $datetime, $zm) && !$timezone) { $z = strtoupper($zm[1]); $this->__tz = ($z === 'Z' || $z === 'GMT') ? 'UTC' : (strlen($z) === 5 ? substr($z, 0, 3) . ':' . substr($z, 3) : $z); }
+    // (the time and its microseconds come from one reading of the clock)
+    $m = microtime(true); $now = (int)floor($m);
     if (preg_match('/\.(\d{1,6})/', $datetime, $um)) $this->__us = (int)str_pad($um[1], 6, '0');
-    elseif ($datetime === 'now') { $this->__us = (int)(fmod(microtime(true), 1) * 1000000); }
-    $ts = __strtotime_tz(preg_replace('/\.\d+/', '', $datetime), time(), $this->__tz);
+    elseif ($datetime === 'now') { $this->__us = (int)(($m - $now) * 1000000); }
+    $ts = __strtotime_tz(preg_replace('/\.\d+/', '', $datetime), $now, $this->__tz);
     if ($ts === false) throw new DateMalformedStringException("Failed to parse time string ($datetime) at position 0 (" . substr($datetime, 0, 1) . "): The timezone could not be found in the database");
     $this->__ts = $ts;
   }

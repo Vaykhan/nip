@@ -8,11 +8,11 @@ import { toStr, typeOf } from '../convert.js';
 import { Frame } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
 import { rt } from '../runtime/state.js';
-import { deprecated, PRELUDE_FILE, throwError } from '../runtime/errors.js';
+import { captureTrace, deprecated, PRELUDE_FILE, throwError } from '../runtime/errors.js';
 import { callFunction, coercePropType, typeParts, typeStr } from '../runtime/functions.js';
 import { makeClosure } from '../runtime/callables.js';
 import {
-  classConst, initProps, instantiate, isInternalName, lookupClass, lookupStaticProp, propDefault, readProp,
+  classConst, hasHookedProps, initProps, instantiate, isInternalName, lookupClass, lookupStaticProp, propDefault, readProp,
   trackDestructible, writeProp,
 } from '../runtime/classes.js';
 import { LAZY_SKIP_DESTRUCTOR, LAZY_SKIP_SERIALIZE, lazyInit, lazyRealize, lazyRunning, makeLazy } from '../runtime/lazy.js';
@@ -24,6 +24,9 @@ import { internalMethodSig } from '../runtime/inheritance.js';
 import { CLASS_ARGINFO } from '../runtime/arginfo.js';
 import { parsePHP } from '../parser.js';
 import { dropRef, gcCheck } from '../runtime/gc.js';
+import { depMessage } from '../runtime/version.js';
+import { fiberCallable, fiberInfo } from '../runtime/fibers.js';
+import { axExp } from '../compiler/ast-export.js';
 
 const IS_STATIC = 16, IS_PUBLIC = 1, IS_PROTECTED = 2, IS_PRIVATE = 4, IS_ABSTRACT = 64, IS_FINAL = 32;
 const IS_READONLY = 128, IS_READONLY_CLASS = 65536, IS_EXPLICIT_ABSTRACT = 64;
@@ -165,25 +168,49 @@ const ATTR_OPS = {
     return instantiate(cls, () => callArgs(attrArgs(r)), null);
   },
   __toString(r) {
-    const args = attrArgs(r);
+    const nodes = Array.isArray(r.a.args) ? r.a.args : [];
     let s = `Attribute [ ${r.a.name} ]`;
-    if (args.size) {
-      s += ` {\n  - Arguments [${args.size}] {\n`;
-      let i = 0;
-      for (const [k, v] of args.entries()) s += `    Argument #${i++} [ ${typeof k === 'string' ? k + ' = ' : ''}${exportValue(v)} ]\n`;
+    if (nodes.length) {
+      s += ` {\n  - Arguments [${nodes.length}] {\n`;
+      // (arguments PHP folded to a value show it; other constant expressions are shown as code)
+      nodes.forEach((a, i) => {
+        const n = a.e !== undefined ? a.e : a;
+        const shown = foldable(n) ? fmtDefault(cExpr(n)(scopeFrame(r.scope))) : axExp(resolvedNews(n));
+        s += `    Argument #${i} [ ${a.name ? a.name + ' = ' : ''}${shown} ]\n`;
+      });
       s += '  }\n}';
     }
     return s + '\n';
   },
 };
 
+// a compiled constant expression's `new` names its class fully qualified (new \Foo())
+function resolvedNews(n) {
+  if (n === null || typeof n !== 'object') return n;
+  if (Array.isArray(n)) return n.map(resolvedNews);
+  const c = { ...n };
+  for (const k in c) if (k !== 'l' && c[k] && typeof c[k] === 'object') c[k] = resolvedNews(c[k]);
+  if (c.k === 'New' && typeof c.cls === 'string' && !/^(self|static|parent)$/i.test(c.cls)) c.rawCls = '\\' + c.cls;
+  return c;
+}
+// whether the compiler folds an expression to a value (literals, and arrays and operators of them)
+function foldable(n) {
+  switch (n.k) {
+    case 'Lit': return true;
+    case 'Arr': return n.items.every((it) => it && !it.byRef && !it.spread && (!it.key || foldable(it.key)) && foldable(it.v));
+    case 'Bin': return foldable(n.a) && foldable(n.b);
+    case 'Unary': case 'Neg': case 'Not': case 'BitNot': return foldable(n.e);
+    case 'Const': return /^\\?(true|false|null)$/i.test(n.name);
+  }
+  return false;
+}
 // ---------------------------------------------------------------- functions and methods
 // PHP's arginfo for methods of internal classes (NIP's implementations of them may declare
 // other parameter names and types), or null
 function internalArgs(fr) {
   if (!fr || fr.k !== 'method' || !isInternalFn(fr.fn)) return null;
   const m = fr.m;
-  if (m.reflSig === undefined) m.reflSig = internalMethodSig(m.cls, lc(m.name));
+  if (m.reflSig === undefined) m.reflSig = internalMethodSig(m.fn.enumIface ? rt.classes.get(m.fn.enumIface) : m.cls, lc(m.name));
   const sig = m.reflSig;
   if (sig && !sig.reflParams) {
     sig.reflParams = sig.params.map((p) => ({ name: p.name, byRef: p.byRef, variadic: p.variadic, type: p.type, promote: null, native: true, optional: p.optional, rawDef: p.def }));
@@ -281,7 +308,7 @@ function reflInvoke(r, thisObj, args) {
 const FN_OPS = {
   inNamespace: (r) => r.k !== 'method' && !r.closure && r.fn.name.includes('\\'),
   isClosure: (r) => !!r.closure && r.closure.fn.isClosure,
-  isDeprecated: () => false,
+  isDeprecated: (r) => !!r.fn.deprecated || (r.fn.idep !== undefined && rt.phpVersion >= r.fn.idep[0]),
   isInternal: (r) => isInternalFn(r.fn),
   isUserDefined: (r) => !isInternalFn(r.fn),
   isGenerator: (r) => !!r.fn.isGen,
@@ -318,7 +345,7 @@ const FN_OPS = {
 };
 const FUNCTION_OPS = Object.assign(Object.create(FN_OPS), {
   isAnonymous: (r) => !!r.closure && r.closure.fn.isClosure,
-  isDisabled: () => { deprecated('Method ReflectionFunction::isDisabled() is deprecated'); return false; },
+  isDisabled: () => { deprecated(depMessage('Method ReflectionFunction::isDisabled()', '8.0', 'as ReflectionFunction can no longer be constructed for disabled functions')); return false; },
   invoke: (r, args) => reflInvoke(r, null, callArgs(args)),
   invokeArgs: (r, args) => reflInvoke(r, null, callArgs(args)),
   getClosure: (r) => r.closure || makeClosure(r.fn, null, null, null, null),
@@ -370,7 +397,7 @@ const PARAM_OPS = {
   getDeclaringFunction: (r) => (r.fr.k === 'method' ? methodObj(r.fr.cls, r.fr.m) : fnObj(r.fr.fn, r.fr.closure)),
   getDeclaringClass: (r) => { const c = fnScope(r.fr); return c ? classObj(c) : null; },
   getClass(r) {
-    deprecated('Method ReflectionParameter::getClass() is deprecated');
+    deprecated(depMessage('Method ReflectionParameter::getClass()', '8.0', 'use ReflectionParameter::getType() instead'));
     const t = reflParam(r).type;
     if (!t || t.alts.length !== 1 || typeof t.alts[0] !== 'string' || BUILTIN.has(t.alts[0])) return null;
     let n = t.alts[0];
@@ -383,8 +410,8 @@ const PARAM_OPS = {
   },
   hasType: (r) => !!reflParam(r).type,
   getType: (r) => typeObj(reflParam(r).type),
-  isArray: (r) => { deprecated('Method ReflectionParameter::isArray() is deprecated'); const t = reflParam(r).type; return !!t && t.alts.length === 1 && t.alts[0] === 'array'; },
-  isCallable: (r) => { deprecated('Method ReflectionParameter::isCallable() is deprecated'); const t = reflParam(r).type; return !!t && t.alts.length === 1 && t.alts[0] === 'callable'; },
+  isArray: (r) => { deprecated(depMessage('Method ReflectionParameter::isArray()', '8.0', 'use ReflectionParameter::getType() instead')); const t = reflParam(r).type; return !!t && t.alts.length === 1 && t.alts[0] === 'array'; },
+  isCallable: (r) => { deprecated(depMessage('Method ReflectionParameter::isCallable()', '8.0', 'use ReflectionParameter::getType() instead')); const t = reflParam(r).type; return !!t && t.alts.length === 1 && t.alts[0] === 'callable'; },
   allowsNull: (r) => { const t = reflParam(r).type; return !t || t.nullable || t.alts.includes('mixed'); },
   getPosition: (r) => r.i,
   isOptional: (r) => r.i >= requiredCount(r.fr.fn, r.fr),
@@ -558,7 +585,11 @@ const CLASS_OPS = {
   hasConstant: (r, name) => constOrder(r.cls).some(([n]) => n === name),
   getConstants: (r, filter) => assoc(constOrder(r.cls).filter(([, e]) => filter === null || (constModifiers(e) & filter)).map(([n]) => [n, classConst(r.cls, n)])),
   getReflectionConstants: (r, filter) => list(constOrder(r.cls).filter(([, e]) => filter === null || (constModifiers(e) & filter)).map(([n, e]) => constObj(r.cls, n, e))),
-  getConstant: (r, name) => (constOrder(r.cls).some(([n]) => n === name) ? classConst(r.cls, name) : false),
+  getConstant(r, name) {
+    if (constOrder(r.cls).some(([n]) => n === name)) return classConst(r.cls, name);
+    if (rt.phpVersion >= 80500) deprecated('ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists');
+    return false;
+  },
   getReflectionConstant(r, name) {
     const e = constOrder(r.cls).find(([n]) => n === name);
     return e ? constObj(r.cls, name, e[1]) : false;
@@ -870,7 +901,7 @@ const PROP_OPS = {
   isPrivateSet: (r) => !r.dyn && r.info.setVis === 'private',
   isProtectedSet: (r) => !r.dyn && r.info.setVis === 'protected',
   isDynamic: (r) => !!r.dyn,
-  isAbstract: (r) => !r.dyn && !!(r.info.decl && r.info.decl.abstract) || (!r.dyn && !!r.info.hooks && ['get', 'set'].some((k) => r.info.hooks[k] && r.info.hooks[k].abstractHook)),
+  isAbstract: (r) => !r.dyn && (!!(r.info.decl && r.info.decl.abstract) || (!!r.info.hooks && (r.info.cls.isInterface || ['get', 'set'].some((k) => r.info.hooks[k] && r.info.hooks[k].abstractHook)))),
   isVirtual: (r) => !r.dyn && !!r.info.virtual,
   isFinal: (r) => !r.dyn && !!r.info.final,
   getSettableType(r) {
@@ -902,7 +933,11 @@ const PROP_OPS = {
   getType: (r) => (r.dyn ? null : typeObj(r.info.type)),
   hasType: (r) => !r.dyn && !!r.info.type,
   hasDefaultValue: (r) => propHasDefault(r),
-  getDefaultValue: (r) => (propHasDefault(r) ? propDefaultValue(r.info, r.isStatic) : null),
+  getDefaultValue(r) {
+    if (propHasDefault(r)) return propDefaultValue(r.info, r.isStatic);
+    if (rt.phpVersion >= 80500) deprecated('ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists');
+    return null;
+  },
   getAttributes: (r, name, flags) => attrList(!r.dyn && r.info.decl && r.info.decl.attrs, ATTR_TARGET.property, r.cls, name, flags, 'ReflectionProperty'),
   __toString: (r) => propToString(r),
 };
@@ -916,6 +951,7 @@ const CONST_OPS = {
   isPrivate: (r) => r.entry.vis === 'private',
   isProtected: (r) => r.entry.vis === 'protected',
   isFinal: (r) => !!r.entry.final,
+  isDeprecated: (r) => rt.phpVersion >= 80400 && !!r.entry.decl && hasAttribute(r.entry.decl.attrs, 'deprecated'),
   getModifiers: (r) => constModifiers(r.entry),
   getDeclaringClass: (r) => classObj(r.cls),
   getDocComment: (r) => (r.entry.decl && r.entry.decl.doc) || false,
@@ -974,7 +1010,16 @@ function paramToString(r) {
 function fnToString(r) {
   const fn = r.fn, internal = isInternalFn(fn);
   const kind = r.k === 'method' ? 'Method' : r.closure && fn.isClosure ? 'Closure' : 'Function';
-  let s = `${kind} [ <${internal ? (r.k === 'method' ? 'internal:' + classExtension(r.m.cls) : 'internal') : 'user'}${r.k === 'method' && r.m.cls !== r.via ? `, inherits ${r.m.cls.name}` : ''}${r.k === 'method' && lc(r.m.name) === '__construct' ? ', ctor' : ''}> `;
+  // (_function_string: <user|internal[, deprecated][:module][, inherits X | overwrites X][, prototype X][, ctor]>)
+  let s = `${kind} [ <${internal ? 'internal' : 'user'}${FN_OPS.isDeprecated(r) && rt.phpVersion >= 80400 ? ', deprecated' : ''}`;
+  if (internal && r.k === 'method' && !fn.enumIface) s += ':' + classExtension(r.m.cls);
+  if (r.k === 'method') {
+    if (r.m.cls !== r.via) s += `, inherits ${r.m.cls.name}`;
+    else if (r.m.cls.parent) { const o = r.m.cls.parent.methods.get(lc(r.m.name)); if (o && o.cls !== r.m.cls && o.vis !== 'private') s += `, overwrites ${o.cls.name}`; }
+    if (r.m.proto) s += `, prototype ${r.m.proto.name}`;
+    if (lc(r.m.name) === '__construct') s += ', ctor';
+  }
+  s += '> ';
   if (r.k === 'method') s += [r.m.abstract ? 'abstract' : '', r.m.final ? 'final' : '', r.m.static ? 'static' : '', r.m.vis].filter(Boolean).join(' ') + ' method ';
   else s += 'function ';
   s += FN_OPS.getName(r) + ' ] {\n';
@@ -992,7 +1037,7 @@ function fnToString(r) {
 function propToString(r) {
   if (r.dyn) return `Property [ <dynamic> public $${r.name} ]\n`;
   const i = r.info, d = i.decl || {};
-  const mods = [d.abstract ? 'abstract' : '', i.final ? 'final' : '', i.vis, i.setVis ? i.setVis + '(set)' : '', r.isStatic ? 'static' : '', i.readonly ? 'readonly' : '', i.virtual ? 'virtual' : ''];
+  const mods = [PROP_OPS.isAbstract(r) ? 'abstract' : '', i.final ? 'final' : '', i.vis, i.setVis ? i.setVis + '(set)' : '', r.isStatic ? 'static' : '', i.readonly ? 'readonly' : '', i.virtual ? 'virtual' : ''];
   let s = `Property [ ${mods.filter(Boolean).join(' ')} ${i.type ? typeStr(i.type, null, true) + ' ' : ''}$${r.name}`;
   if (i.hasDef) s += ' = ' + (!r.isStatic && i.evaluated ? fmtDefault(i.val) : d.def ? exprSource(d.def, i.cls) : 'NULL');
   else if (!i.type && !i.virtual) s += ' = NULL';
@@ -1021,15 +1066,29 @@ function typeName(v) {
 }
 function classToString(r) {
   const c = r.cls;
-  const kind = c.isInterface ? 'Interface' : c.isTrait ? 'Trait' : c.isEnum ? 'Enum' : 'Class';
-  const mods = [c.abstract ? 'abstract' : '', c.final || c.isEnum ? 'final' : '', c.readonly ? 'readonly' : ''].filter(Boolean).join(' ');
-  let s = `${r.obj ? 'Object of class' : kind === 'Enum' ? 'Class' : kind} [ <${isUserClass(c) ? 'user' : 'internal:' + classExtension(c)}> ${mods}${mods ? ' ' : ''}${c.isInterface ? 'interface' : c.isTrait ? 'trait' : 'class'} ${c.name}`;
+  const enum85 = c.isEnum && rt.phpVersion >= 80500; // (PHP 8.5 shows enums as enums)
+  const kind = c.isInterface ? 'Interface' : c.isTrait ? 'Trait' : enum85 ? 'Enum' : 'Class';
+  const mods = enum85 ? '' : [c.abstract ? 'abstract' : '', c.final || c.isEnum ? 'final' : '', c.readonly ? 'readonly' : ''].filter(Boolean).join(' ');
+  // (<iterateable>: classes with a get_iterator handler: Traversable ones, and ones with hooked
+  // properties in PHP 8.4)
+  const iter = (!c.isInterface && c.ancestors.has('traversable')) || (rt.phpVersion >= 80400 && hasHookedProps(c));
+  let s = `${r.obj ? 'Object of class' : kind} [ <${isUserClass(c) ? 'user' : 'internal:' + classExtension(c)}> ${iter ? '<iterateable> ' : ''}${mods}${mods ? ' ' : ''}${c.isInterface ? 'interface' : c.isTrait ? 'trait' : enum85 ? 'enum' : 'class'} ${c.name}`;
   if (c.parent) s += ` extends ${c.parent.name}`;
+  if (enum85 && c.enumBacked) s += `: ${c.enumBacked}`;
   const ifs = interfaceOrder(c);
   if (ifs.length) s += ` ${c.isInterface ? 'extends' : 'implements'} ${ifs.map((i) => i.name).join(', ')}`;
   s += ' ] {\n';
   if (isUserClass(c)) s += `  @@ ${c.decl.file} ${c.decl.startLine || c.decl.l}-${c.decl.endLine}\n`;
-  const consts = constOrder(c);
+  let consts = constOrder(c);
+  if (enum85) {
+    const cases = consts.filter(([, e]) => e.case);
+    consts = consts.filter(([, e]) => !e.case);
+    if (cases.length) {
+      s += `\n  - Enum cases [${cases.length}] {\n`;
+      for (const [n] of cases) { const v = classConst(c, n); s += `    Case ${n}${c.enumBacked ? ' = ' + toStr(v.props.get('value')) : ''}\n`; }
+      s += '  }\n';
+    }
+  }
   s += `\n  - Constants [${consts.length}] {\n`;
   for (const [n, e] of consts) s += '    ' + constToString({ cls: e.cls, name: n, entry: e });
   s += '  }\n';
@@ -1088,7 +1147,81 @@ const RCONST_OPS = {
   },
 };
 
-const OPS = { rconst: RCONST_OPS, class: CLASS_OPS, fn: FUNCTION_OPS, method: METHOD_OPS, param: PARAM_OPS, type: TYPE_OPS, prop: PROP_OPS, const: CONST_OPS, attr: ATTR_OPS };
+// ---------------------------------------------------------------- generators
+function liveGen(r) {
+  const g = r.g;
+  if (g.done) reflErr('Cannot fetch information from a closed Generator');
+  return g;
+}
+// the generator a generator delegates to with yield from, all the way down
+const innermostGen = (g) => { while (g.delegate) g = g.delegate; return g; };
+// (an unstarted generator is at the start of its function)
+const genLine = (g) => (g.started ? g.line : g.fn.line);
+const GEN_OPS = {
+  getExecutingLine: (r) => genLine(innermostGen(liveGen(r))),
+  getExecutingFile: (r) => innermostGen(liveGen(r)).fn.file,
+  getThis: (r) => liveGen(r).f.this || null,
+  getExecutingGenerator: (r) => innermostGen(liveGen(r)).obj,
+  isClosed: (r) => r.g.done,
+  getFunction(r) {
+    const g = r.g, fn = g.fn;
+    if (g.f.closure) return fnObj(fn, g.f.closure);
+    if (fn.isMethod && fn.cls) { const m = fn.cls.methods.get(lc(fn.name)); if (m) return methodObj(fn.cls, m); }
+    return fnObj(fn, null);
+  },
+  // the calls of the generators it delegates to, innermost first (DEBUG_BACKTRACE_PROVIDE_OBJECT: 1)
+  getTrace(r, options = 1) {
+    const chain = [];
+    for (let g = liveGen(r); g; g = g.delegate) chain.push(g);
+    const tr = new PHPArray();
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const g = chain[i], f = g.f, fr = new PHPArray();
+      if (i > 0) { fr.set('file', chain[i - 1].fn.file); fr.set('line', chain[i - 1].line); }
+      fr.set('function', g.fn.name);
+      if (g.fn.isMethod && (f.cls || f.this)) {
+        fr.set('class', (g.fn.cls || f.cls || f.this.cls).name);
+        if ((options & 1) && f.this) fr.set('object', f.this);
+        fr.set('type', f.this ? '->' : '::');
+      }
+      if (!(options & 2)) fr.set('args', PHPArray.from(Array.from(f.args || [], (x) => (x instanceof Ref ? x.v : x))));
+      tr.push(fr);
+    }
+    return tr;
+  },
+};
+
+// ---------------------------------------------------------------- fibers
+function liveFiber(r) {
+  const info = fiberInfo(r.fiber);
+  if (!info) throwError('Error', 'Cannot fetch information from a fiber that has not been started or is terminated');
+  return info;
+}
+const FIBER_OPS = {
+  getFiber: (r) => r.fiber,
+  getExecutingFile: (r) => liveFiber(r).file,
+  getExecutingLine: (r) => liveFiber(r).line,
+  getCallable(r) {
+    const cb = fiberCallable(r.fiber);
+    if (cb === undefined) throwError('Error', 'Cannot fetch the callable from a fiber that has terminated');
+    return cb;
+  },
+  getTrace(r, options = 1) {
+    const info = liveFiber(r);
+    const saved = rt.stack;
+    rt.stack = info.stack === saved ? saved : [...info.stack];
+    let tr;
+    try { tr = captureTrace(!(options & 2), (options & 1) !== 0); } finally { rt.stack = saved; }
+    // (the fiber's function was called by Fiber::start(); a suspended one is in Fiber::suspend())
+    const bottom = tr.get(tr.size - 1);
+    if (bottom instanceof PHPArray) { bottom.delete('file'); bottom.delete('line'); }
+    if (!info.suspended) return tr;
+    const top = PHPArray.fromPairs([...(info.file !== null ? [['file', info.file], ['line', info.line]] : []), ['function', 'suspend'], ['class', 'Fiber'], ['type', '::']]);
+    if (!(options & 2)) top.set('args', new PHPArray());
+    return PHPArray.from([top, ...tr.values()]);
+  },
+};
+
+const OPS = { fiber: FIBER_OPS, gen: GEN_OPS, rconst: RCONST_OPS, class: CLASS_OPS, fn: FUNCTION_OPS, method: METHOD_OPS, param: PARAM_OPS, type: TYPE_OPS, prop: PROP_OPS, const: CONST_OPS, attr: ATTR_OPS };
 
 def('__refl', (self, op, ...args) => {
   const r = refl(self);
@@ -1098,7 +1231,7 @@ def('__refl', (self, op, ...args) => {
 });
 
 // constructors: set up self.refl and the public $name/$class properties
-def('__refl_init', (self, kind, a, b = null) => {
+def('__refl_init', (self, kind, a, b = null, nargs = 2) => {
   const set = (r, props) => { self.refl = r; for (const k in props) self.props.set(k, props[k]); };
   switch (kind) {
     case 'ReflectionClass': case 'ReflectionObject': case 'ReflectionEnum': {
@@ -1117,6 +1250,7 @@ def('__refl_init', (self, kind, a, b = null) => {
     }
     case 'ReflectionMethod': {
       let cls, name;
+      if (nargs === 1 && rt.phpVersion >= 80400) deprecated('Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead');
       if (b === null) {
         if (typeof a !== 'string' || !a.includes('::')) throwError('ReflectionException', 'ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name');
         const i = a.indexOf('::');
@@ -1135,6 +1269,8 @@ def('__refl_init', (self, kind, a, b = null) => {
       set(p, { name, class: p.cls.name });
       return null;
     }
+    case 'ReflectionGenerator': set({ k: 'gen', g: a.gen }, {}); return null;
+    case 'ReflectionFiber': set({ k: 'fiber', fiber: a }, {}); return null;
     case 'ReflectionConstant': {
       const name = toStr(a), key = findConst(name);
       if (key === null) reflErr(`Constant "${name}" does not exist`);

@@ -6,7 +6,7 @@ import { cmp, looseEq, numCmp, strCmp, strictEq } from '../compare.js';
 import { add, mul } from '../arith.js';
 import { iterateObject } from '../compiler/stmt.js';
 import { rt } from '../runtime/state.js';
-import { throwError, warn } from '../runtime/errors.js';
+import { deprecated, throwError, warn } from '../runtime/errors.js';
 import { callableFn, callValue, findMethod } from '../runtime/callables.js';
 import { callMethodName, magicGet, magicIsset, objVisibleProps, toArrayCast, writeProp } from '../runtime/classes.js';
 import { A, alias, def, deref, I, R1, refArr, slotCp } from './core.js';
@@ -256,6 +256,7 @@ def('in_array', (needle, haystack, strict = false) => {
 });
 def('array_key_exists', (key, array) => {
   if (array instanceof PHPObject) return array.props.has(toStr(key));
+  if (key === null && rt.phpVersion >= 80500) deprecated('Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead');
   return A(array).has(normKey(key === null ? '' : key));
 });
 alias('key_exists', 'array_key_exists');

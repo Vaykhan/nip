@@ -48,6 +48,8 @@ def('clone', (f, object, withProperties = null) => {
   return c;
 }, { frame: true });
 since(80500, 'fn', 'clone');
+// for the prelude: a deprecation from version `since` (a PHP_VERSION_ID) on
+def('__nip_deprecated', (since, message) => { if (rt.phpVersion >= since) deprecated(S(message)); return null; });
 // exit() and die() as functions (PHP 8.4): exit(string|int $status = 0): never
 def('exit', (status = 0) => {
   let v = status;

@@ -6,6 +6,7 @@ import {
 } from './values.js';
 import { floatToInt, oobWarn, toDbl, toStr, typeOf, valueName } from './convert.js';
 import { deprecated, throwError, warn } from './runtime/errors.js';
+import { rt } from './runtime/state.js';
 
 function arithOperand(v, op, a, b) {
   switch (typeof v) {
@@ -153,11 +154,13 @@ export function concat(a, b) {
 }
 
 export function strInc(s) {
-  if (s === '') { deprecated('Increment on non-alphanumeric string is deprecated'); return '1'; }
-  const n = numericStr(s);
+  const n = s === '' ? null : numericStr(s);
   if (n !== null) return n instanceof Flt ? mkf(n.v + 1) : intAdd(n, 1);
+  // (PHP 8.5 deprecates incrementing any non-numeric string)
+  if (rt.phpVersion >= 80500) deprecated('Increment on non-numeric string is deprecated, use str_increment() instead');
+  if (s === '') { if (rt.phpVersion < 80500) deprecated('Increment on non-alphanumeric string is deprecated'); return '1'; }
   // perl-style increment
-  if (!/^[a-zA-Z0-9]+$/.test(s)) deprecated('Increment on non-alphanumeric string is deprecated');
+  if (rt.phpVersion < 80500 && !/^[a-zA-Z0-9]+$/.test(s)) deprecated('Increment on non-alphanumeric string is deprecated');
   const chars = s.split('');
   let i = chars.length - 1;
   while (i >= 0) {

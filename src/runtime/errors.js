@@ -1,6 +1,6 @@
 // Raising warnings/notices/deprecations, throwing PHP exceptions, stack traces.
 
-import { FatalSig, Flt, fmtRepr, isInt, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
+import { FatalSig, Flt, fmtReprZ, isInt, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
 import { toInt } from '../convert.js';
 import {
   E_COMPILE_WARNING, E_CORE_WARNING, E_DEPRECATED, E_NOTICE, E_PARSE, E_STRICT, E_USER_DEPRECATED,
@@ -103,7 +103,8 @@ export function toThrowSig(e) {
 }
 
 // trace capture
-export function captureTrace(withArgs) {
+// (withObject: DEBUG_BACKTRACE_PROVIDE_OBJECT)
+export function captureTrace(withArgs, withObject) {
   const tr = new PHPArray();
   const st = rt.stack;
   for (let i = st.length - 1; i >= 0; i--) {
@@ -116,7 +117,11 @@ export function captureTrace(withArgs) {
     if (!calledFromNative) { fr.set('file', s.callFile); fr.set('line', s.callLine); }
     fr.set('function', s.fn.name);
     // (an anonymous class's name is printed up to its NUL byte)
-    if (s.fn.isMethod && (s.cls || s.this)) { fr.set('class', (s.fn.cls || s.cls || s.this.cls).name.split('\0')[0]); fr.set('type', s.this ? '->' : '::'); }
+    if (s.fn.isMethod && (s.cls || s.this)) {
+      fr.set('class', (s.fn.cls || s.cls || s.this.cls).name.split('\0')[0]);
+      if (withObject && s.this) fr.set('object', s.this);
+      fr.set('type', s.this ? '->' : '::');
+    }
     if (withArgs !== false) {
       const a = s.args || [];
       const vals = Array.from(a, (x) => (x instanceof Ref ? x.v : x));
@@ -181,7 +186,7 @@ function traceArgStr(v) {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (isInt(v)) return String(v);
-  if (v instanceof Flt) return fmtRepr(v.v);
+  if (v instanceof Flt) return fmtReprZ(v.v); // (with .0 for integral values)
   if (typeof v === 'string') { const max = toInt(rt.ini.get('zend.exception_string_param_max_len') ?? '0'); return "'" + (v.length > max ? v.slice(0, max) + '...' : v) + "'"; }
   if (v instanceof PHPArray) return 'Array';
   if (v instanceof PHPObject) return 'Object(' + v.cls.name + ')';

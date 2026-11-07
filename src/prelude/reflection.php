@@ -10,9 +10,12 @@ class Reflection {
     $names = [];
     if ($modifiers & 64) $names[] = 'abstract';
     if ($modifiers & 32) $names[] = 'final';
+    if ($modifiers & 512) $names[] = 'virtual';
     if ($modifiers & 1) $names[] = 'public';
     elseif ($modifiers & 4) $names[] = 'private';
     elseif ($modifiers & 2) $names[] = 'protected';
+    if ($modifiers & 2048) $names[] = 'protected(set)';
+    elseif ($modifiers & 4096) $names[] = 'private(set)';
     if ($modifiers & 16) $names[] = 'static';
     if ($modifiers & (128 | 65536)) $names[] = 'readonly';
     return $names;
@@ -71,8 +74,8 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
   const IS_ABSTRACT = 64;
   const IS_FINAL = 32;
   public string $class;
-  public function __construct(object|string $objectOrMethod, ?string $method = NULL) { __refl_init($this, 'ReflectionMethod', $objectOrMethod, $method); }
-  public static function createFromMethodName(string $method): static { return new static($method); }
+  public function __construct(object|string $objectOrMethod, ?string $method = NULL) { __refl_init($this, 'ReflectionMethod', $objectOrMethod, $method, func_num_args()); }
+  public static function createFromMethodName(string $method): static { return new static($method, NULL); }
   public function __toString(): string { return __refl($this, '__toString'); }
   public function isPublic(): bool { return __refl($this, 'isPublic'); }
   public function isPrivate(): bool { return __refl($this, 'isPrivate'); }
@@ -261,6 +264,24 @@ class ReflectionProperty implements Reflector {
   public function getHook(PropertyHookType $type): ?ReflectionMethod { return __refl($this, 'getHook', $type); }
   public function isFinal(): bool { return __refl($this, 'isFinal'); }
 }
+final class ReflectionFiber {
+  public function __construct(Fiber $fiber) { __refl_init($this, 'ReflectionFiber', $fiber); }
+  public function getFiber(): Fiber { return __refl($this, 'getFiber'); }
+  public function getExecutingFile(): string { return __refl($this, 'getExecutingFile'); }
+  public function getExecutingLine(): int { return __refl($this, 'getExecutingLine'); }
+  public function getCallable(): callable { return __refl($this, 'getCallable'); }
+  public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array { return __refl($this, 'getTrace', $options); }
+}
+final class ReflectionGenerator {
+  public function __construct(Generator $generator) { __refl_init($this, 'ReflectionGenerator', $generator); }
+  public function getExecutingLine(): int { return __refl($this, 'getExecutingLine'); }
+  public function getExecutingFile(): string { return __refl($this, 'getExecutingFile'); }
+  public function getTrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT): array { return __refl($this, 'getTrace', $options); }
+  public function getFunction(): ReflectionFunctionAbstract { return __refl($this, 'getFunction'); }
+  public function getThis(): ?object { return __refl($this, 'getThis'); }
+  public function getExecutingGenerator(): Generator { return __refl($this, 'getExecutingGenerator'); }
+  public function isClosed(): bool { return __refl($this, 'isClosed'); }
+}
 final class ReflectionConstant implements Reflector {
   public string $name;
   public function __construct(string $name) { __refl_init($this, 'ReflectionConstant', $name); }
@@ -300,6 +321,7 @@ class ReflectionClassConstant implements Reflector {
   public function getDocComment(): string|false { return __refl($this, 'getDocComment'); }
   public function getAttributes(?string $name = NULL, int $flags = 0): array { return __refl($this, 'getAttributes', $name, $flags); }
   public function isEnumCase(): bool { return __refl($this, 'isEnumCase'); }
+  public function isDeprecated(): bool { return __refl($this, 'isDeprecated'); }
   public function hasType(): bool { return __refl($this, 'hasType'); }
   public function getType(): ?ReflectionType { return __refl($this, 'getType'); }
 }

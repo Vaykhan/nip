@@ -48,7 +48,7 @@ class GenState {
     let r;
     try { r = this.it.next(val); }
     catch (e) { this.done = true; this.failed = true; this.cur = null; this.key = null; this.untrack(); throw e; }
-    finally { this.running = false; rt.stack.pop(); rt.frame = prevFrame; rt.file = prevFile; rt.line = prevLine; }
+    finally { this.running = false; this.line = rt.line; rt.stack.pop(); rt.frame = prevFrame; rt.file = prevFile; rt.line = prevLine; } // (line: where it's suspended)
     if (r.done) { this.done = true; this.ret = r.value === undefined ? null : r.value; this.cur = null; this.key = null; this.curRef = null; this.untrack(); }
     else {
       const y = r.value;

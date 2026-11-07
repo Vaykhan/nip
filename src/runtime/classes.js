@@ -1,6 +1,6 @@
 // Classes and objects: declaration, inheritance, traits, enums, property and method access.
 
-import { cp, FatalSig, isInt, NOREF, normKey, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
+import { cp, FatalSig, Flt, isInt, NOREF, normKey, PHPArray, PHPObject, Ref, refOp, ThrowSig, TypedRef, typeRef, untypeRef } from '../values.js';
 import { toBool, toStr, typeOf, valueName } from '../convert.js';
 import { isNum, looseEq, strictEq } from '../compare.js';
 import { Frame, writableArrIn } from '../compiler/common.js';
@@ -95,7 +95,7 @@ export function lookupClass(name, quiet, kind) {
     } finally { rt.autoloading.delete(ln); }
   }
   if (quiet) return null;
-  if (kind === 'Trait') throw new FatalSig(`Trait "${n}" not found`, rt.line, rt.file);
+  if (kind === 'Trait' && rt.phpVersion < 80500) throw new FatalSig(`Trait "${n}" not found`, rt.line, rt.file); // (an Error in PHP 8.5)
   throwError('Error', `${kind || 'Class'} "${n}" not found`);
 }
 // class lookup for inheritance checks: no autoloading until the class is registered
@@ -217,7 +217,7 @@ export function declareClass(decl, f) {
         const what = cls.isEnum ? 'Enum' : 'Class';
         throw new FatalSig(!cls.abstract && !cls.isEnum
           ? `${what} ${cls.name} contains ${n} abstract method${s} and must therefore be declared abstract or implement the remaining method${rt.phpVersion >= 80400 ? s : 's'} (${list})`
-          : `${what} ${cls.name} must implement ${n} abstract private method${s} (${list})`, decl.l, decl.file);
+          : `${what} ${cls.name} must implement ${n} abstract ${rt.phpVersion >= 80500 ? '' : 'private '}method${s} (${list})`, decl.l, decl.file);
       }
     }
     if (cls.parent || decl.traits.length) {
@@ -234,6 +234,18 @@ export function declareClass(decl, f) {
       const fromTrait = () => decl.traits.some((tu) => tu.names.some((tn) => { const t = lookupClass(tn, true); const tm = t && t.methods.get(m.name.toLowerCase()); return !!tm && tm.abstract; }));
       if (m.cls === cls && !cls.isTrait && m.fn.decl && hasAttr(m.fn.decl.attrs, 'override') && !m.proto && !fromTrait()) {
         throw new FatalSig(`${displayName(cls)}::${m.name}() has #[\\Override] attribute, but no matching parent method exists`, m.fn.decl.l, decl.file);
+      }
+    }
+    // #[\Override] on a property hook (PHP 8.4): the parent's property has that hook, or is backed
+    if (!cls.isTrait) {
+      for (const info of cls.props.values()) {
+        if (info.cls !== cls || !info.hooks) continue;
+        for (const kind of ['get', 'set']) {
+          const h = info.hooks[kind];
+          if (!h || h.cls !== cls || !h.decl || !hasAttr(h.decl.attrs || h.attrs, 'override')) continue;
+          const protos = [cls.parent && cls.parent.props.get(info.name), ...cls.ifaceList.map((ic) => ic.props.get(info.name))].filter(Boolean);
+          if (!protos.some((p) => (p.hooks && p.hooks[kind]) || !p.virtual)) throw new FatalSig(`${displayName(cls)}::$${info.name}::${kind}() has #[\\Override] attribute, but no matching parent method exists`, h.decl.l, decl.file);
+        }
       }
     }
     if (!cls.isInterface && cls.ancestors.has('serializable') && decl.file !== PRELUDE_FILE) {
@@ -394,7 +406,7 @@ function addProp(cls, p, owner) {
   if (p.hooks || p.abstract || (rt.phpVersion >= 80400 && !p.static && cls.props.has(p.name) && cls.props.get(p.name).hooks)) setupHooks(cls, info, p, owner); // (a plain redeclaration keeps the parent's hooks)
   if (info.type && info.hasDef && p.def && p.def.k === 'Lit' && p.def.v === null && !info.type.nullable && !info.type.alts.includes('mixed')) { /* PHP: compile error; be lenient */ info.type = { alts: info.type.alts, nullable: true }; }
   if (p.static) {
-    const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
+    const si = { name: p.name, cls: owner, vis: p.vis, setVis: info.setVis, final: info.final, type: info.type, readonly: info.readonly, ref: new Ref(null), pending: info.hasDef, defE: info.defE, decl: p, hasDef: info.hasDef, internal: info.internal };
     if (!info.hasDef && info.type && !info.type.nullable) si.uninit = true;
     cls.sprops.set(p.name, si);
     return;
@@ -442,7 +454,7 @@ function bindTraits(cls, decl) {
   for (const tu of decl.traits) {
     for (const n of tu.names) {
       const t = lookupClass(n, false, 'Trait');
-      if (!t.isTrait) throw at(`${cls.name} cannot use ${t.name} - it is not a trait`);
+      if (!t.isTrait) { if (rt.phpVersion >= 80500) throwError('Error', `${cls.name} cannot use ${t.name} - it is not a trait`); throw at(`${cls.name} cannot use ${t.name} - it is not a trait`); }
       // #[\Deprecated] traits (PHP 8.5)
       const dep = rt.phpVersion >= 80500 && t.decl ? attrNamed(t.decl.attrs, 'deprecated') : null;
       if (dep) raise(E_USER_DEPRECATED, `Trait ${t.name} used by ${cls.name} is deprecated${deprecationSuffix(dep, t)}`);
@@ -555,6 +567,7 @@ function bindTraits(cls, decl) {
       }
       if (ex) {
         const first = exCls === cls ? (traits.slice(0, i).find((pt) => hasTraitProp(pt, name)) || cls) : exCls;
+        if (pd.hooks || ex.hooks) throw at(`${first.name} and ${t.name} define the same hooked property ($${name}) in the composition of ${cls.name}. Conflict resolution between hooked properties is currently not supported. Class was composed`);
         const same = (ex.vis || 'public') === (pd.vis || 'public') && !!ex.static === tStatic && !!ex.readonly === !!pd.readonly &&
           sameType(ex.type, pd.type) && sameValue(() => declaredDefault(ex, exCls), () => declaredDefault(pd, cls));
         if (!same) throw at(`${first.name} and ${t.name} define the same property ($${name}) in the composition of ${cls.name}. However, the definition differs and is considered incompatible. Class was composed`);
@@ -586,7 +599,11 @@ function sameValue(fa, fb) {
 }
 
 function addEnumMethods(cls) {
-  const mk = (name, native, isStatic = true) => cls.methods.set(name.toLowerCase(), { name, cls, vis: 'public', static: isStatic, abstract: false, final: false, fn: { native, isMethod: true, name, refs: null, cls } });
+  // (internal methods without a module, whose prototypes are UnitEnum's and BackedEnum's)
+  const mk = (name, native, isStatic = true) => {
+    const iface = name === 'cases' ? 'unitenum' : 'backedenum';
+    cls.methods.set(name.toLowerCase(), { name, cls, vis: 'public', static: isStatic, abstract: false, final: false, proto: rt.classes.get(iface) || null, fn: { native, isMethod: true, name, refs: null, cls, enumIface: iface } });
+  };
   mk('cases', () => PHPArray.from(cls.cases.map((n) => classConst(cls, n))));
   if (cls.enumBacked) {
     const find = (v) => {
@@ -842,7 +859,8 @@ export function writeProp(obj, name, v, f) {
       if (!obj.props.has(key) && wasUnset(obj, key) && magicSet(obj, name, v)) return;
       asymError(info, 'modify', f);
     }
-    if (info.type !== null) v = coercePropType(info, v, obj.cls.name, name);
+    // (++/-- of a referenced property fails with the reference's error)
+    if (info.type !== null && !(refOp.incdec !== 0 && obj.props.get(key) instanceof TypedRef)) v = coercePropType(info, v, obj.cls.name, name);
   } else if (!obj.props.has(name)) {
     if (obj.lazy !== undefined && lazyMiss(obj, name, undefined, 's', '__set', name)) return lazyFwd(obj, 's', name, (t) => writeProp(t, name, v, f));
     if (obj.cls.nipHooks && nipHook(obj, '__nipset', [name, v]) !== undefined) return;
@@ -950,6 +968,14 @@ export function bindProp(obj, name, ref, f) {
     }
     newDynamicProp(obj, name);
   }
+  const old = obj.props.get(key);
+  if (info && info.type) {
+    // (the referenced value must fit the property's type; the reference keeps it so)
+    const v = coercePropType(info, ref.v, obj.cls.name, name);
+    if (v !== ref.v) ref.v = v;
+    if (old instanceof Ref && old !== ref) untypeRef(old, info);
+    typeRef(ref, info);
+  }
   obj.props.set(key, ref);
 }
 // PHP 8.2: creating an undeclared property is deprecated unless the class (or a parent) has
@@ -976,9 +1002,30 @@ export function propRef(obj, name, f) {
     if (r !== undefined) { if (rr !== null && rr !== NOREF) return rr; notice(`Indirect modification of overloaded property ${obj.cls.name}::$${name} has no effect`); return new Ref(r); }
   }
   if (slot === undefined && !info) newDynamicProp(obj, name);
+  if (slot === undefined && info && info.type && !info.type.nullable && !info.type.alts.some((a) => a === 'mixed' || a === 'null')) throwError('Error', `Cannot access uninitialized non-nullable property ${obj.cls.name}::$${name} by reference`);
   const r = new Ref(slot === undefined ? null : slot);
+  if (info && info.type) typeRef(r, info);
   obj.props.set(key, r);
   return r;
+}
+// assignments through a reference bound to typed properties (TypedRef)
+const refName = (info) => `${info.cls.anon ? 'class@anonymous' : info.cls.name}::$${info.name}`;
+export function installRefChecks() { TypedRef.check = checkTypedRef; } // (called at boot: values.js loads after this module)
+function checkTypedRef(r, x) {
+  const strict = rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict;
+  for (const info of r.sources) {
+    // (++/-- of an int at its limit gives a float)
+    if (x instanceof Flt && refOp.incdec !== 0 && !info.type.alts.some((a) => a === 'float' || a === 'mixed')) {
+      const up = refOp.incdec > 0;
+      throwError('TypeError', `Cannot ${up ? 'increment' : 'decrement'} a reference held by property ${refName(info)} of type ${typeStr(info.type, null)} past its ${up ? 'maximal' : 'minimal'} value`);
+    }
+    const c = coerceType(info.type, x, strict, { cls: info.cls, sc: info.cls });
+    if (c === FAIL) {
+      throwError('TypeError', `Cannot assign ${valueName(x)} to reference held by property ${refName(info)} of type ${typeStr(info.type, null)}`);
+    }
+    x = c;
+  }
+  return x;
 }
 export function propArr(obj, name, f) {
   if (name.charCodeAt(0) === 0 && name.length) badPropName();
@@ -1049,7 +1096,7 @@ export function unsetProp(obj, name, f) {
     if (!obj.props.has(key) && !wasUnset(obj, key)) { (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key); return; } // (an uninitialized one: no __unset())
     (obj.unsetKeys || (obj.unsetKeys = new Set())).add(key);
   } else if (obj.lazy !== undefined && !obj.props.has(key) && lazyMiss(obj, key, info, 'u', '__unset', name)) return lazyFwd(obj, 'u', name, (t) => unsetProp(t, name, f));
-  if (obj.props.has(key)) { const old = obj.props.get(key); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
+  if (obj.props.has(key)) { const old = obj.props.get(key); if (info !== undefined && old instanceof Ref) untypeRef(old, info); obj.props.delete(key); dropRef(old instanceof Ref ? old.v : old); gcCheck(old instanceof Ref ? old.v : old); return; }
   if (obj.cls.nipHooks && info === undefined && nipHook(obj, '__nipunset', [name]) !== undefined) return;
   const m = obj.cls.methods.get('__unset');
   if (m && guardEnter(obj, 'u', name)) { try { callFunction(m.fn, [name], obj, m.cls, obj.cls, null); } finally { guardLeave(obj, 'u', name); } return; }

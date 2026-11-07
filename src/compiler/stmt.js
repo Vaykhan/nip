@@ -1,6 +1,6 @@
 // Compilation of statements (control flow, declarations, foreach, try/catch, ...).
 
-import { cp, FatalSig, NOREF, normKey, objHandles, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, FatalSig, NOREF, normKey, objHandles, PHPArray, PHPObject, Ref, typeRef } from '../values.js';
 import { toBool, toStr, valueName } from '../convert.js';
 import { looseEq } from '../compare.js';
 import { CALL_KINDS, isLvalNode, mkBreak, mkCont, RETURN, SUPERGLOBALS } from './common.js';
@@ -542,6 +542,7 @@ function foreachObject(f, obj, K, V, B, byRef, isList) {
       const info = obj.cls.slots.get(k);
       if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
       if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
+      if (info && info.type) typeRef(slot, info);
       V.bind(f, slot);
     } else { const s = obj.props.get(k); assignV(s instanceof Ref ? s.v : s); }
     if (K) K.set(f, normKey(name));
@@ -559,6 +560,7 @@ function foreachHooked(f, obj, K, V, byRef, assignV, run, handle) {
     if (info && info.readonly) throwError('Error', `Cannot acquire reference to readonly property ${info.cls.name}::$${name}`);
     let slot = obj.props.get(k);
     if (!(slot instanceof Ref)) { slot = new Ref(slot); obj.props.set(k, slot); }
+    if (info && info.type) typeRef(slot, info);
     return slot;
   };
   const visit = (name) => { if (K) K.set(f, normKey(name)); return handle(run()); };

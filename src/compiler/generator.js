@@ -88,12 +88,17 @@ function cExprG(n) {
           const g = src.gen;
           if (g.done) return g.ret;
           g.ensure(true);
-          while (!g.done) {
-            let sent;
-            // destroying this generator destroys the one it delegates to first
-            try { sent = yield [g.key, g.cur, true]; } catch (e) { if (e instanceof FiberExit) g.destroy(); throw e; }
-            if (sent instanceof GenThrow) g.throwIn(sent.obj); else g.send(sent === undefined ? null : sent);
-          }
+          // (the generator it delegates to, for ReflectionGenerator)
+          const outer = f.gen ? f.gen.gen : null;
+          if (outer) outer.delegate = g;
+          try {
+            while (!g.done) {
+              let sent;
+              // destroying this generator destroys the one it delegates to first
+              try { sent = yield [g.key, g.cur, true]; } catch (e) { if (e instanceof FiberExit) g.destroy(); throw e; }
+              if (sent instanceof GenThrow) g.throwIn(sent.obj); else g.send(sent === undefined ? null : sent);
+            }
+          } finally { if (outer) outer.delegate = null; }
           return g.ret;
         }
         if (src instanceof PHPObject && src.cls.ancestors.has('traversable')) {

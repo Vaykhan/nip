@@ -108,6 +108,9 @@ function disableFunctions(list) {
 export function runScript(code, file, argv, opts = {}) {
   boot();
   resetRuntime();
+  // (the version first: settings like error_reporting=E_ALL use its constants)
+  if (opts.ini && opts.ini['nip.php_version'] !== undefined) rt.ini.set('nip.php_version', iniValue(opts.ini['nip.php_version']));
+  applyVersion();
   if (opts.ini) for (const [k, raw] of Object.entries(opts.ini)) { const v = iniValue(raw); if (!(k in INI_DEFAULTS)) rt.ini.set(k, v); callNative(rt.fns.get('ini_set'), [k, v]); }
   applyVersion();
   disableFunctions(rt.ini.get('disable_functions'));

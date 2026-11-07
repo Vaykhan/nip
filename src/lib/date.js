@@ -136,7 +136,8 @@ function phpDate(format, ts, tz, micro) {
   }
   return out;
 }
-const nowTs = () => Math.floor(Date.now() / 1000);
+// (the same clock as microtime())
+const nowTs = () => Math.floor((performance.timeOrigin + performance.now()) / 1000);
 def('time', () => nowTs());
 def('microtime', (as_float = false) => {
   const t = performance.timeOrigin + performance.now();

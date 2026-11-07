@@ -5,7 +5,7 @@
 
 import { Ref } from '../values.js';
 import { rt } from './state.js';
-import { throwError } from './errors.js';
+import { PRELUDE_FILE, throwError } from './errors.js';
 import { callFunctionG } from './functions.js';
 import { resolveCallable } from './callables.js';
 import { GenThrow } from './generators.js';
@@ -27,6 +27,7 @@ function drive(self, step) {
   rt.depth += st.depth;
   if (st.frame) { rt.frame = st.frame; rt.file = st.file; rt.line = st.line; }
   st.stack = [];
+  st.base = outer.len; st.prev = outer.fiber; // (its frames start there while it runs, above the fiber that started or resumed it)
   st.status = 'running';
   rt.currentFiber = self;
   rt.suspendedFibers.delete(st);
@@ -63,6 +64,23 @@ function forceClose(st) {
   drive(st.self, (g) => g.throw(new FiberExit()));
 }
 
+// ReflectionFiber: the fiber's frames, file and line (null when it isn't started or has finished)
+export function fiberInfo(fiber) {
+  const st = state(fiber);
+  if (st.status === 'running') {
+    // (a fiber that started or resumed the current one ends at that call)
+    let end = rt.stack.length;
+    for (let c = rt.currentFiber; c && c !== fiber; c = state(c).prev) if (state(c).prev === fiber) { end = state(c).base; break; }
+    // (where the user's code is: the call into the prelude or a builtin)
+    let file = rt.file, line = rt.line;
+    for (let i = end - 1; i >= st.base; i--) { const s = rt.stack[i]; if (s.callFile !== PRELUDE_FILE) { file = s.callFile; line = s.callLine; break; } }
+    return { stack: rt.stack.slice(st.base, end), file, line, suspended: false };
+  }
+  // (a fiber suspended outside of any PHP function has no location)
+  if (st.status === 'suspended') return { stack: st.stack, file: st.stack.length ? st.file : null, line: st.stack.length ? st.line : null, suspended: true };
+  return null;
+}
+export const fiberCallable = (fiber) => { const st = state(fiber); return st.status === 'terminated' ? undefined : st.cb; };
 export function bootFibers() {
   const cls = nativeClass('Fiber', {
     final: true,

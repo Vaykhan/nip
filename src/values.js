@@ -10,6 +10,25 @@ import { deprecated, throwError, warn } from './runtime/errors.js';
 export class Flt { constructor(v) { this.v = v; } }
 export const mkf = (v) => new Flt(v);
 export class Ref { constructor(v) { this.v = v === undefined ? null : v; } }
+// A reference bound to typed properties: a value assigned through it must fit their types.
+// TypedRef.check (set by runtime/classes.js) coerces the value or throws.
+export class TypedRef extends Ref {
+  get v() { return this._v; }
+  set v(x) { this._v = this.sources !== undefined && this.sources.length ? TypedRef.check(this, x) : x; }
+}
+TypedRef.check = null;
+// ++ (1) or -- (-1) in progress: an int that overflows to a float can't stay in an int reference
+export const refOp = { incdec: 0 };
+// binds reference r to typed property `info` (upgrading a plain Ref in place)
+export function typeRef(r, info) {
+  if (!(r instanceof TypedRef)) { const v = r.v; delete r.v; Object.setPrototypeOf(r, TypedRef.prototype); r._v = v; }
+  if (r.sources === undefined) r.sources = [];
+  if (!r.sources.includes(info)) r.sources.push(info);
+  return r;
+}
+export function untypeRef(r, info) {
+  if (r instanceof TypedRef && r.sources !== undefined) { const i = r.sources.indexOf(info); if (i >= 0) r.sources.splice(i, 1); }
+}
 
 export const MAXS = Number.MAX_SAFE_INTEGER;
 export const I64MAX = 9223372036854775807n, I64MIN = -9223372036854775808n;
@@ -221,6 +240,11 @@ function illegalOffset(k, ctx) {
   const t = k instanceof PHPObject ? k.cls.name : 'array';
   if (ctx === KEY_ISSET) throwError('TypeError', `Cannot access offset of type ${t} in isset or empty`);
   throwError('TypeError', `Cannot ${ctx === KEY_UNSET ? 'unset' : 'access'} offset of type ${t} on array`);
+}
+// an array offset in code ($a[k], [k => v], list()): PHP 8.5 deprecates null ones
+export function dimKey(k, ctx) {
+  if (k === null && rt.phpVersion >= 80500) deprecated('Using null as an array offset is deprecated, use an empty string instead');
+  return normKey(k, ctx);
 }
 export function normKey(k, ctx) {
   switch (typeof k) {

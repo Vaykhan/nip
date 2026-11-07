@@ -2,7 +2,7 @@
 class ArrayIterator implements SeekableIterator, ArrayAccess, Countable, Serializable {
   const STD_PROP_LIST = 1; const ARRAY_AS_PROPS = 2;
   private $__a; private $__k = []; private $__i = 0; private $__f = 0;
-  public function __construct($array = [], int $flags = 0) { $this->__a = is_object($array) ? get_object_vars($array) : $array; $this->__k = array_keys($this->__a); $this->__f = $flags; }
+  public function __construct($array = [], int $flags = 0) { if (is_object($array) && !($array instanceof ArrayObject) && !($array instanceof ArrayIterator)) __nip_deprecated(80500, 'ArrayIterator::__construct(): Using an object as a backing array for ArrayIterator is deprecated, as it allows violating class constraints and invariants'); $this->__a = is_object($array) ? get_object_vars($array) : $array; $this->__k = array_keys($this->__a); $this->__f = $flags; }
   // ARRAY_AS_PROPS: undefined properties are array entries
   public function __nipGet($n) { return $this->__f & 2 ? [true, $this->__a[$n]] : null; }
   public function __nipIsset($n) { return $this->__f & 2 ? [true, $this->__a[$n] ?? null] : null; }

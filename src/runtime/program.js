@@ -14,10 +14,16 @@ import { declareFunction, NativeFrame } from './functions.js';
 import { classExists, declareClass } from './classes.js';
 import { UNRESOLVED } from './inheritance.js';
 
-export function compileSource(src, file) {
+// (included: a syntax error throws a ParseError, which may be caught)
+export function compileSource(src, file, included) {
   let ast;
   try { ast = parsePHP(src, file); }
   catch (e) {
+    if (e instanceof ParseErr && included && !e.kind) {
+      const ex = makeException('ParseError', e.msg);
+      ex.props.set('file', file); ex.props.set('line', e.line);
+      throw new ThrowSig(ex);
+    }
     if (e instanceof ParseErr) throw new FatalSig(e.msg, e.line, file, e.kind || 'Parse error');
     throw e;
   }
@@ -144,7 +150,7 @@ export function doInclude(path, kind, f) {
   const st = fs.statSync(real);
   let cached = rt.progCache.get(real), prog;
   if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) prog = cached.prog;
-  else { prog = compileSource(fs.readFileSync(real, 'latin1'), real); rt.progCache.set(real, { prog, mtimeMs: st.mtimeMs, size: st.size }); }
+  else { prog = compileSource(fs.readFileSync(real, 'latin1'), real, true); rt.progCache.set(real, { prog, mtimeMs: st.mtimeMs, size: st.size }); }
   const prevFile = rt.file, prevLine = rt.line;
   const nf = new NativeFrame({ name: kind, isMethod: false }, [real]); nf.native = false;
   rt.stack.push(nf);

@@ -1,7 +1,7 @@
 // Compiler shared pieces: control signals, warnings, array/string element reads.
 // The compiler turns each AST node into a JS closure; see expr.js, lvalue.js and stmt.js.
 
-import { Flt, fmtRepr, INT_LIKE, KEY_ISSET, normKey, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
+import { dimKey, Flt, fmtRepr, INT_LIKE, KEY_ISSET, NUM_LEAD, PHPArray, PHPObject, Ref } from '../values.js';
 import { floatToInt, oobWarn, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { LVAL_KINDS } from '../parser.js';
 import { deprecated, throwError, warn } from '../runtime/errors.js';
@@ -100,7 +100,7 @@ export function keyRepr(k) { return typeof k === 'string' ? `"${k}"` : String(k)
 // ---------------------------------------------------------------- array/string reads
 export function readIndex(base, key, quiet) {
   if (base instanceof PHPArray) {
-    const k = normKey(key, quiet ? KEY_ISSET : 0);
+    const k = dimKey(key, quiet ? KEY_ISSET : 0);
     const i = base.index(k);
     if (i === undefined) { if (!quiet) warn(`Undefined array key ${keyRepr(k)}`); return quiet ? undefined : null; }
     const v = base.v[i];

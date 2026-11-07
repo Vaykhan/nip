@@ -1,6 +1,6 @@
 // Compilation of assignable expressions (variables, $a[...], properties, static props, list()).
 
-import { cp, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref } from '../values.js';
+import { cp, dimKey, KEY_UNSET, NOREF, normKey, PHPArray, PHPObject, Ref, refOp, TypedRef, typeRef, untypeRef } from '../values.js';
 import { toBool, toStr, valueName } from '../convert.js';
 import {
   isLvalNode, keyRepr, NULLSAFE_SHORT, readIndex, strOffsetChar, strSetOffset, SUPERGLOBALS, warnUndefVar,
@@ -148,7 +148,7 @@ function indexOps(P, I) {
       if (!I) noIdx();
       const key = I(f);
       if (base instanceof PHPArray) {
-        const k = typeof key === 'number' ? key : normKey(key);
+        const k = typeof key === 'number' ? key : dimKey(key);
         const i = base.index(k);
         if (i === undefined) { warn(`Undefined array key ${keyRepr(k)}`); return null; }
         const v = base.v[i];
@@ -178,7 +178,7 @@ function indexOps(P, I) {
       const c = P.arr(f);
       if (!(c instanceof PHPArray)) return lv.get(f);
       if (!I) { c.push(null); return null; }
-      const k = normKey(I(f));
+      const k = dimKey(I(f));
       if (!c.has(k)) { c.set(k, null); return null; }
       return c.get(k);
     },
@@ -199,7 +199,7 @@ function indexOps(P, I) {
       }
       const c = P.arr(f);
       if (c instanceof PHPArray) {
-        if (I) { const k = normKey(I(f)); const old = c.get(k); c.set(k, v); if (old !== v && old !== null && typeof old === 'object') dropRef(old); } else c.push(v);
+        if (I) { const k = dimKey(I(f)); const old = c.get(k); c.set(k, v); if (old !== v && old !== null && typeof old === 'object') dropRef(old); } else c.push(v);
         return;
       }
       if (c instanceof PHPObject) { arrayAccessSet(c, I ? I(f) : null, v); return; }
@@ -207,7 +207,7 @@ function indexOps(P, I) {
     bind(f, ref) {
       const c = P.arr(f);
       if (c instanceof PHPArray) {
-        if (I) { const k = normKey(I(f)); const old = c.getRaw(k); c.setRaw(k, ref); if (old !== undefined && old !== ref) dropRef(old instanceof Ref ? old.v : old); } else c.push(ref);
+        if (I) { const k = dimKey(I(f)); const old = c.getRaw(k); c.setRaw(k, ref); if (old !== undefined && old !== ref) dropRef(old instanceof Ref ? old.v : old); } else c.push(ref);
         return;
       }
       throwError('Error', 'Cannot assign by reference to overloaded object');
@@ -216,7 +216,7 @@ function indexOps(P, I) {
       const c = P.arr(f);
       if (c instanceof PHPArray) {
         let k;
-        if (I) k = normKey(I(f)); else { k = c.nextKey(); c.push(null); }
+        if (I) k = dimKey(I(f)); else { k = c.nextKey(); c.push(null); }
         const slot = c.getRaw(k);
         if (slot instanceof Ref) return slot;
         const r = new Ref(slot === undefined ? null : slot);
@@ -237,7 +237,7 @@ function indexOps(P, I) {
       const c = P.arr(f);
       if (c instanceof PHPArray) {
         if (!I) { const na = new PHPArray(); c.push(na); return na; }
-        const k = normKey(I(f));
+        const k = dimKey(I(f));
         const slot = c.getRaw(k);
         let v = slot instanceof Ref ? slot.v : slot;
         if (v instanceof PHPArray) {
@@ -263,7 +263,7 @@ function indexOps(P, I) {
     unset(f) {
       const cur = P.getq(f);
       if (cur === undefined || cur === null) return;
-      if (cur instanceof PHPArray) { const c = P.arr(f); const k = normKey(I(f), KEY_UNSET); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
+      if (cur instanceof PHPArray) { const c = P.arr(f); const k = dimKey(I(f), KEY_UNSET); const old = c.get(k); c.delete(k); dropRef(old); gcCheck(old); return; }
       if (cur instanceof PHPObject) { if (cur.cls.ancestors.has('arrayaccess')) callMethodName(cur, 'offsetUnset', [I(f)]); else throwError('Error', `Cannot use object of type ${cur.cls.name} as array`); return; }
       if (typeof cur === 'string') throwError('Error', 'Cannot unset string offsets');
     },
@@ -280,7 +280,7 @@ function indexOps(P, I) {
       const c = P.arr(f);
       if (c instanceof PHPArray) {
         let k;
-        if (I) k = normKey(I(f));
+        if (I) k = dimKey(I(f));
         else { const nv = fn(null); c.push(nv); return nv; }
         const i = c.index(k);
         let cur;
@@ -343,6 +343,14 @@ function propOps(O, N, sname, nullsafe) {
       if (o instanceof PHPObject) return readPropQuiet(o, nm(f), f);
       return undefined;
     },
+    // (the container check of $o->p[..] = v: a hooked property's get hook runs only once, when
+    // fetched for writing)
+    peek(f) {
+      const o = O.getq(f);
+      if (!(o instanceof PHPObject)) return undefined;
+      const info = o.cls.props.get(nm(f));
+      return info !== undefined && info.hooks ? undefined : readPropQuiet(o, nm(f), f);
+    },
     isset(f) {
       const o = O.getq(f);
       if (o instanceof PHPObject) return readPropQuiet(o, nm(f), f, true);
@@ -401,11 +409,15 @@ function spropOps(C, N, sname) {
     get: (f) => info(f).ref.v,
     getq: (f) => { const cls = C(f); const i = lookupStaticProp(cls, nm(f)); return i ? i.ref.v : undefined; },
     set: (f, v) => { const i = winfo(f, 'modify'); i.ref.v = i.type ? coercePropType(i, v, i.cls.name, nm(f)) : v; },
-    bind: (f, r) => { winfo(f, 'indirectly modify').ref = r; },
-    ref: (f) => winfo(f, 'indirectly modify').ref,
+    bind: (f, r) => {
+      const i = winfo(f, 'indirectly modify');
+      if (i.type) { const v = coercePropType(i, r.v, i.cls.name, nm(f)); if (v !== r.v) r.v = v; untypeRef(i.ref, i); typeRef(r, i); }
+      i.ref = r;
+    },
+    ref: (f) => { const i = winfo(f, 'indirectly modify'); if (i.type) typeRef(i.ref, i); return i.ref; },
     arr: (f) => writableArrIn(winfo(f, 'indirectly modify').ref),
     unset: () => throwError('Error', 'Attempt to unset static property'),
-    modify: (f, fn) => { const i = winfo(f, 'indirectly modify'); const nv = fn(i.ref.v); i.ref.v = i.type ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return nv; },
+    modify: (f, fn) => { const i = winfo(f, 'indirectly modify'); const nv = fn(i.ref.v); i.ref.v = i.type && !(refOp.incdec !== 0 && i.ref instanceof TypedRef) ? coercePropType(i, nv, i.cls.name, nm(f)) : nv; return i.ref.v; },
   };
 }
 
@@ -434,7 +446,7 @@ function lvList(n) {
           it.L.bind(f, new Ref(cp(val)));
           continue;
         }
-        const k = normKey(key);
+        const k = dimKey(key);
         let slot = c.getRaw(k);
         if (!(slot instanceof Ref)) { slot = new Ref(slot === undefined ? null : slot); c.setRaw(k, slot); }
         it.L.bind(f, slot);
@@ -442,7 +454,7 @@ function lvList(n) {
       }
       let val;
       if (v instanceof PHPArray) {
-        const k = normKey(key);
+        const k = dimKey(key);
         if (!v.has(k)) { warn(`Undefined array key ${keyRepr(k)}`); val = null; }
         else val = v.get(k);
       } else if (v instanceof PHPObject && v.cls.ancestors.has('arrayaccess')) val = callMethodName(v, 'offsetGet', [key]);

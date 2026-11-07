@@ -111,7 +111,7 @@ def('assert', (assertion, description = null) => {
   if (description instanceof PHPObject) throw new ThrowSig(description);
   throwError('AssertionError', description === null ? '' : toStr(description)); // (calls compiled as assert() get their source as the description)
 });
-def('debug_backtrace', (options = 1, limit = 0) => { const t = captureTrace(!(I(options) & 2)); t.delete(0); t.reindex(); const l = I(limit); return l > 0 ? PHPArray.from(t.values().slice(0, l)) : t; });
+def('debug_backtrace', (options = 1, limit = 0) => { const t = captureTrace(!(I(options) & 2), (I(options) & 1) !== 0); t.delete(0); t.reindex(); const l = I(limit); return l > 0 ? PHPArray.from(t.values().slice(0, l)) : t; });
 def('debug_print_backtrace', (options = 0, limit = 0) => { const t = captureTrace(!(I(options) & 2)); t.delete(0); t.reindex(); const s = traceAsString(t); rt.echo(s.slice(0, s.lastIndexOf('#')) ); });
 def('gc_collect_cycles', () => 0);
 def('gc_enable', () => null); def('gc_disable', () => null); def('gc_enabled', () => true); def('gc_mem_caches', () => 0);
