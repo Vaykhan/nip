@@ -175,7 +175,7 @@ const ATTR_OPS = {
       // (arguments PHP folded to a value show it; other constant expressions are shown as code)
       nodes.forEach((a, i) => {
         const n = a.e !== undefined ? a.e : a;
-        const shown = foldable(n) ? fmtDefault(cExpr(n)(scopeFrame(r.scope))) : axExp(resolvedNews(n));
+        const shown = attrArgFoldable(n) ? fmtDefault(cExpr(n)(scopeFrame(r.scope))) : axExp(resolvedNews(n));
         s += `    Argument #${i} [ ${a.name ? a.name + ' = ' : ''}${shown} ]\n`;
       });
       s += '  }\n}';
@@ -194,12 +194,12 @@ function resolvedNews(n) {
   return c;
 }
 // whether the compiler folds an expression to a value (literals, and arrays and operators of them)
-function foldable(n) {
+function attrArgFoldable(n) {
   switch (n.k) {
     case 'Lit': return true;
-    case 'Arr': return n.items.every((it) => it && !it.byRef && !it.spread && (!it.key || foldable(it.key)) && foldable(it.v));
-    case 'Bin': return foldable(n.a) && foldable(n.b);
-    case 'Unary': case 'Neg': case 'Not': case 'BitNot': return foldable(n.e);
+    case 'Arr': return n.items.every((it) => it && !it.byRef && !it.spread && (!it.key || attrArgFoldable(it.key)) && attrArgFoldable(it.v));
+    case 'Bin': return attrArgFoldable(n.a) && attrArgFoldable(n.b);
+    case 'Unary': case 'Neg': case 'Not': case 'BitNot': return attrArgFoldable(n.e);
     case 'Const': return /^\\?(true|false|null)$/i.test(n.name);
   }
   return false;

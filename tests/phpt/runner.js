@@ -151,7 +151,19 @@ let next = 0;
 await Promise.all(Array.from({ length: jobs }, async () => {
   while (next < filtered.length) { const f = filtered[next++]; try { await one(f); } catch (e) { results.fail.push(f); } }
 }));
-fs.rmSync(work, { recursive: true, force: true });
+// (tests may leave directories without permissions, which a non-root user can't delete)
+function removeTree(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); return; } catch (e) { /* fix permissions below */ }
+  const walk = (d) => {
+    try { fs.chmodSync(d, 0o700); } catch (e) { /* not ours */ }
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const en of entries) if (en.isDirectory()) walk(path.join(d, en.name));
+  };
+  walk(dir);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { console.error(`warning: could not remove ${dir}: ${e.message}`); }
+}
+removeTree(work);
 for (const k of Object.keys(results)) results[k] = results[k].map(testName).sort();
 console.log(`pass=${results.pass.length} fail=${results.fail.length} timeout=${results.timeout.length} skip=${results.skip.length}`);
 if (outFile) fs.writeFileSync(outFile, JSON.stringify(results, null, 1));
