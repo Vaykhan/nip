@@ -471,7 +471,11 @@ def('stripcslashes', (string) => S(string).replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1
 }));
 def('quotemeta', (string) => S(string).replace(/([.\\+*?[^\]$()])/g, '\\$1'));
 def('chr', (codepoint) => String.fromCharCode(((I(codepoint) % 256) + 256) % 256));
-def('ord', (character) => { const s = S(character); return s.length ? s.charCodeAt(0) : 0; });
+def('ord', (character) => {
+  const s = S(character);
+  if (rt.phpVersion >= 80500 && s.length !== 1) { if (s.length === 0) deprecated('ord(): Providing an empty string is deprecated'); else deprecated('ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead'); }
+  return s.length ? s.charCodeAt(0) : 0;
+});
 def('bin2hex', (string) => bytes(S(string)).toString('hex'));
 def('hex2bin', (string) => { const s = S(string); if (s.length % 2) { warn('hex2bin(): Hexadecimal input string must have an even length'); return false; } if (!/^[0-9a-fA-F]*$/.test(s)) { warn('hex2bin(): Input string must be hexadecimal string'); return false; } return fromBytes(Buffer.from(s, 'hex')); });
 def('dechex', (num) => { let v = I(num); if (v < 0) v = BigInt.asUintN(64, BigInt(v)); return v.toString(16); });

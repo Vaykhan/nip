@@ -346,7 +346,7 @@ export function checkProgram(ast, file) {
   function ensureWritable(t) {
     if (!t || typeof t !== 'object') return;
     if (t.k === 'Call' || t.k === 'Pipe') fail("Can't use function return value in write context", t);
-    if (t.k === 'MCall' || t.k === 'NullsafeMCall' || t.k === 'SCall') fail("Can't use method return value in write context", t);
+    if (t.k === 'MCall' || t.k === 'NullsafeMCall' || t.k === 'SCall' || t.k === 'ParentHook') fail("Can't use method return value in write context", t);
   }
   // builtins zend_try_compile_special_func compiles to an instruction (with these argument counts)
   function tmpBuiltin(n) {
@@ -520,7 +520,12 @@ export function checkProgram(ast, file) {
         if (BUILTIN_TYPES.has(lm) || lm === 'self' || lm === 'parent' || lm === 'static') fail(`Type ${lm === 'iterable' ? 'Traversable|array' : lm} cannot be part of an intersection type`, n);
       }
     }
-    const names = raw.filter((a) => typeof a === 'string');
+    let names = raw.filter((a) => typeof a === 'string');
+    // (PHP 8.5 resolves self and parent first: Foo|self in Foo is redundant)
+    if (rt.phpVersion >= 80500 && curClass && curClass.kind !== 'trait') {
+      const rel = { self: curClass.anon ? null : curClass.name, parent: curClass.parent || null };
+      names = names.map((a) => rel[a.toLowerCase()] || a.replace(/^\\/, ''));
+    }
     const ls = names.map((a) => a.toLowerCase());
     if (t.q) {
       const x = ls[0];
@@ -542,7 +547,7 @@ export function checkProgram(ast, file) {
       if (seen.has('iterable') && seen.has('traversable')) fail('Duplicate type Traversable is redundant', n);
       if (seen.has('bool') && seen.has('false')) fail('Duplicate type false is redundant', n);
       if (seen.has('bool') && seen.has('true')) fail('Duplicate type true is redundant', n);
-      if (seen.has('true') && seen.has('false')) fail('Type contains both true and false, bool should be used instead', n);
+      if (seen.has('true') && seen.has('false')) fail(`Type contains both true and false, bool ${rt.phpVersion >= 80400 ? 'must' : 'should'} be used instead`, n);
       if (seen.has('object') && (ls.some((k) => !BUILTIN_TYPES.has(k) || k === 'static') || raw.some((a) => typeof a === 'object'))) fail(`Type ${typeStr(t, null)} contains both object and a class type, which is redundant`, n);
     }
     // DNF types: duplicates within an intersection, and intersections implied by another member
@@ -708,6 +713,10 @@ export function checkProgram(ast, file) {
     // an optional parameter before a required one is required (except PHP 5 style `T $x = null`)
     let lastRequired = -1;
     fn.params.forEach((p, i) => { if (!p.def && !p.variadic) lastRequired = i; });
+    // PHP 8.5: function &f(): void
+    if (rt.phpVersion >= 80500 && fn.byRef && fn.ret && !fn.ret.nullable && fn.ret.alts.length === 1 && fn.ret.alts[0] === 'void') {
+      compileDeprecated(`${methods.has(fn) && curClass ? `${curClass.anon ? 'class@anonymous' : curClass.name}::${fn.name}` : fn.name}(): Returning by reference from a void function is deprecated`, fn);
+    }
     // (PHP 8.4 names the function, and deprecates `T $x = null` without ?T)
     const v84 = rt.phpVersion >= 80400;
     const fpre = !v84 ? '' : (methods.has(fn) && curClass ? `${curClass.anon ? 'class@anonymous' : curClass.name}::${fn.name}` : fn.name) + '(): ';

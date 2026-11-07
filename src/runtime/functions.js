@@ -1,7 +1,7 @@
 // User function calls: frames, parameter binding, type checks and coercion, returns.
 
 import {
-  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, objHandles, PHPArray, PHPObject, Ref, ThrowSig } from '../values.js';
+  cp, FatalSig, Flt, fmtRepr, isInt, mkf, NOREF, normKey, numericStr, objHandles, PHPArray, PHPObject, Ref, refOp, ThrowSig } from '../values.js';
 import { floatToInt, toBool, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { Frame, hasSuspend, RETURN } from '../compiler/common.js';
 import { cExpr } from '../compiler/expr.js';
@@ -9,6 +9,7 @@ import { cStmts } from '../compiler/stmt.js';
 import { cStmtsG, fiberBody } from '../compiler/generator.js';
 import { E_USER_DEPRECATED, E_USER_WARNING, rt } from './state.js';
 import { deprecated, PRELUDE_FILE, raise, throwError, warn } from './errors.js';
+import { internalDeprecation } from './version.js';
 import { findMethod, isCallable } from './callables.js';
 import { frameExit, gcAfterCall } from './gc.js';
 import { makeGenerator } from './generators.js';
@@ -101,7 +102,7 @@ export function declareFunction(decl) {
   if (rt.fns.has(lname)) {
     const ex = rt.fns.get(lname);
     if (ex.decl === decl) return;
-    throw new FatalSig(`Cannot redeclare ${ex.native ? '' : ''}${decl.name}()${ex.native ? '' : ` (previously declared in ${ex.file}:${ex.line})`}`, decl.l, decl.file);
+    throw new FatalSig(`Cannot redeclare ${rt.phpVersion >= 80400 ? 'function ' : ''}${decl.name}()${ex.native ? '' : ` (previously declared in ${ex.file}:${ex.line})`}`, decl.l, decl.file);
   }
   const fn = compileFunction(decl);
   rt.fns.set(lname, fn);
@@ -209,7 +210,12 @@ function bindParams(fn, f, args) {
       continue;
     }
     if (v instanceof Ref) v = v.v;
-    if (p.type !== null && p.type !== undefined) v = coerceParam(fn, p, i, v, strict, f);
+    if (p.type !== null && p.type !== undefined) {
+      const c = coerceParam(fn, p, i, v, strict, f);
+      // (traces and func_get_args() see the coerced value)
+      if (c !== v && i < args.length && !(args[i] instanceof Ref)) args[i] = c;
+      v = c;
+    }
     if (v instanceof PHPArray) v.cow = true;
     f.vars[p.name] = new Ref(v);
     if (p.promote) promoteParam(f, p, v);
@@ -324,7 +330,7 @@ export function coerceType(type, v, strict, ctx) {
     if (num !== null) {
       if (hasInt && !(num instanceof Flt)) return num;
       if (hasFloat) return num instanceof Flt ? num : mkf(Number(num));
-      if (hasInt && num instanceof Flt && isFinite(num.v)) {
+      if (hasInt && num instanceof Flt && isFinite(num.v) && num.v >= -9223372036854775808 && num.v < 9223372036854775808) {
         if (Number.isInteger(num.v)) return floatToInt(num.v);
         deprecated(`Implicit conversion from float-string "${v}" to int loses precision`);
         return floatToInt(num.v);
@@ -388,6 +394,12 @@ function checkReturn(fn, v, f, none) {
   return r;
 }
 export function coercePropType(info, v, clsName, name) {
+  if (clsName.includes('\0')) clsName = clsName.slice(0, clsName.indexOf('\0')); // (an anonymous class's name is printed up to its NUL)
+  // (++/-- of an int property at its limit gives a float)
+  if (refOp.incdec !== 0 && v instanceof Flt && !info.type.alts.some((a) => a === 'float' || a === 'mixed')) {
+    const up = refOp.incdec > 0;
+    throwError('TypeError', `Cannot ${up ? 'increment' : 'decrement'} property ${clsName}::$${name} of type ${typeStr(info.type, null)} past its ${up ? 'maximal' : 'minimal'} value`);
+  }
   const r = coerceType(info.type, v, rt.frame && rt.frame.fn ? rt.frame.fn.strict : rt.mainStrict, { cls: info.cls, sc: info.cls });
   // (self and parent are printed as declared)
   if (r === FAIL) throwError('TypeError', `Cannot assign ${valueName(v)} to property ${clsName}::$${name} of type ${typeStr(info.type, null)}`);
@@ -396,6 +408,7 @@ export function coercePropType(info, v, clsName, name) {
 
 const MAX_DEPTH = 1000000;
 export function callFunction(fn, args, thisObj, cls, sc, closure) {
+  if (fn.idep !== undefined && fn.native === undefined) idepWarn(fn);
   if (fn.deprecated !== undefined) { if (rt.deprecatedShown === fn) rt.deprecatedShown = null; else deprecatedFn(fn, cls, args); }
   if (fn.native !== undefined) {
     if (fn.isMethod) return callNativeMethod(fn, thisObj, args, sc);
@@ -474,7 +487,13 @@ export function* callFunctionG(fn, args, thisObj, cls, sc, closure) {
   if (fn.ret !== null && fn.ret !== undefined) return checkReturn(fn, ret, f, r !== RETURN);
   return ret;
 }
+// a deprecated internal function or method (see INTERNAL_DEPRECATIONS in version.js)
+function idepWarn(fn) {
+  if (rt.phpVersion < fn.idep[0]) return;
+  deprecated(internalDeprecation(fn.isMethod && fn.cls ? `Method ${fn.cls.name}::${fn.name}()` : `Function ${fn.name}()`, fn.idep));
+}
 export function callNative(fn, args) {
+  if (fn.idep !== undefined) idepWarn(fn);
   if (args.length < fn.min) {
     if (args.named) args = mapNamedNative(fn, args);
     if (args.length < fn.min) throwError('ArgumentCountError', `${fn.name}() expects ${fn.max === fn.min ? 'exactly' : 'at least'} ${fn.min} argument${fn.min === 1 ? '' : 's'}, ${args.length} given`);

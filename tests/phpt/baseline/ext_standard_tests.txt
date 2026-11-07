@@ -485,6 +485,7 @@ ext/standard/tests/array/end_basic.phpt
 ext/standard/tests/array/end_variation2.phpt
 ext/standard/tests/array/end_variation3.phpt
 ext/standard/tests/array/extract_safety.phpt
+ext/standard/tests/array/extract_typed_ref.phpt
 ext/standard/tests/array/extract_variation10.phpt
 ext/standard/tests/array/extract_variation8.phpt
 ext/standard/tests/array/extract_variation9.phpt
@@ -758,6 +759,7 @@ ext/standard/tests/file/fgets_variation4.phpt
 ext/standard/tests/file/fgets_variation5.phpt
 ext/standard/tests/file/fgets_variation6.phpt
 ext/standard/tests/file/file_basic.phpt
+ext/standard/tests/file/file_binary_text_deprecated.phpt
 ext/standard/tests/file/file_exists_variation1.phpt
 ext/standard/tests/file/file_get_contents_basic.phpt
 ext/standard/tests/file/file_get_contents_basic001.phpt
@@ -1113,6 +1115,7 @@ ext/standard/tests/general_functions/print_r.phpt
 ext/standard/tests/general_functions/print_r_64bit.phpt
 ext/standard/tests/general_functions/proc_nice_variation2.phpt
 ext/standard/tests/general_functions/register_tick_function_error.phpt
+ext/standard/tests/general_functions/settype_typed_property.phpt
 ext/standard/tests/general_functions/strval.phpt
 ext/standard/tests/general_functions/unregister_tick_function_error.phpt
 ext/standard/tests/general_functions/var_dump_64bit.phpt
@@ -1438,11 +1441,13 @@ ext/standard/tests/strings/bug40704.phpt
 ext/standard/tests/strings/bug40915.phpt
 ext/standard/tests/strings/bug42208.phpt
 ext/standard/tests/strings/bug43927.phpt
+ext/standard/tests/strings/bug43957.phpt
 ext/standard/tests/strings/bug45166.phpt
 ext/standard/tests/strings/bug45485.phpt
 ext/standard/tests/strings/bug46578.phpt
 ext/standard/tests/strings/bug47168.phpt
 ext/standard/tests/strings/bug47481.phpt
+ext/standard/tests/strings/bug49687.phpt
 ext/standard/tests/strings/bug50052.phpt
 ext/standard/tests/strings/bug50847.phpt
 ext/standard/tests/strings/bug51059.phpt
@@ -1782,6 +1787,7 @@ ext/standard/tests/strings/ucwords_variation2.phpt
 ext/standard/tests/strings/ucwords_variation3.phpt
 ext/standard/tests/strings/ucwords_variation4.phpt
 ext/standard/tests/strings/ucwords_variation5.phpt
+ext/standard/tests/strings/utf8.phpt
 ext/standard/tests/strings/vfprintf_basic.phpt
 ext/standard/tests/strings/vfprintf_basic1.phpt
 ext/standard/tests/strings/vfprintf_basic2.phpt

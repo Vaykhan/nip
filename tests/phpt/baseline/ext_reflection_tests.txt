@@ -4,6 +4,7 @@ ext/reflection/tests/004.phpt
 ext/reflection/tests/005.phpt
 ext/reflection/tests/006.phpt
 ext/reflection/tests/007.phpt
+ext/reflection/tests/010.phpt
 ext/reflection/tests/012.phpt
 ext/reflection/tests/017.phpt
 ext/reflection/tests/018.phpt
@@ -12,6 +13,7 @@ ext/reflection/tests/020.phpt
 ext/reflection/tests/021.phpt
 ext/reflection/tests/022.phpt
 ext/reflection/tests/023.phpt
+ext/reflection/tests/ReflectionAttribute_toString.phpt
 ext/reflection/tests/ReflectionClassConstant_getValue.phpt
 ext/reflection/tests/ReflectionClassConstant_getValue_typed.phpt
 ext/reflection/tests/ReflectionClassConstant_isEnumCase.phpt
@@ -101,6 +103,9 @@ ext/reflection/tests/ReflectionExtension_getName_basic.phpt
 ext/reflection/tests/ReflectionExtension_getVersion_basic.phpt
 ext/reflection/tests/ReflectionExtension_isPersistant.phpt
 ext/reflection/tests/ReflectionExtension_isTemporary.phpt
+ext/reflection/tests/ReflectionFiber_backtrace.phpt
+ext/reflection/tests/ReflectionFiber_basic.phpt
+ext/reflection/tests/ReflectionFiber_errors.phpt
 ext/reflection/tests/ReflectionFunction_construct.001.phpt
 ext/reflection/tests/ReflectionFunction_getClosureScopeClass.phpt
 ext/reflection/tests/ReflectionFunction_getClosureThis.phpt
@@ -114,6 +119,7 @@ ext/reflection/tests/ReflectionFunction_isDeprecated_basic.phpt
 ext/reflection/tests/ReflectionFunction_isDisabled_basic.phpt
 ext/reflection/tests/ReflectionFunction_isGenerator_basic.phpt
 ext/reflection/tests/ReflectionFunction_isVariadic_basic.phpt
+ext/reflection/tests/ReflectionGenerator_getTrace.phpt
 ext/reflection/tests/ReflectionMethod_006.phpt
 ext/reflection/tests/ReflectionMethod_basic1.phpt
 ext/reflection/tests/ReflectionMethod_basic2.phpt

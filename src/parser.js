@@ -771,6 +771,8 @@ export class Parser {
     // property (abstract and final ones are PHP 8.4's)
     if (mods.abstract && rt.phpVersion < 80400) this.fatal('Cannot use the abstract modifier on a property');
     if (mods.final && rt.phpVersion < 80400) this.fatal('Cannot use the final modifier on a property');
+    // (a property needs a modifier; a keyword can't start a member)
+    if (!mods.vis && !mods.static && !mods.abstract && !mods.final && !mods.readonlyKw && !mods.var && !mods.setVis && this.tok.t === 'id' && PHP_KEYWORDS.has(this.tok.v.toLowerCase())) this.unexpected(this.tok, '"function"');
     let type = null;
     if (this.tok.t !== 'var') type = this.parseType();
     const group = (cd.seq || 0) + 1; // (props declared together, for zend_ast_export)
@@ -1116,7 +1118,10 @@ export class Parser {
       case 'float': this.p++; return { k: 'Lit', v: mkf(t.v), l };
       case 'str': this.p++; return { k: 'Lit', v: t.v, l };
       case 'tpl': this.p++; return { k: 'Interp', parts: this.interpParts(t.v), l };
-      case 'shell': this.p++; return { k: 'Shell', parts: this.interpParts(t.v), l };
+      case 'shell':
+        this.p++;
+        if (rt.phpVersion >= 80500) (this.st.compileWarnings || (this.st.compileWarnings = [])).push({ msg: 'The backtick (`) operator is deprecated, use shell_exec() instead', l, deprecated: true });
+        return { k: 'Shell', parts: this.interpParts(t.v), l };
       case 'op':
         if (t.v === '#[') { // attributes on a closure or arrow function
           const attrs = this.parseAttributes();

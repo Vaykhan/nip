@@ -2,8 +2,8 @@
 
 import cpMod from 'node:child_process';
 import {
-  cp, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, normKey, PHPArray, PHPObject, Ref,
-  ThrowSig
+  cp, dimKey, ExitSig, FatalSig, Flt, fmtReprZ, isInt, MAXS, mkf, NOREF, PHPArray, PHPObject, Ref,
+  refOp, ThrowSig
 } from '../values.js';
 import { castInt, nanWarn, toBool, toDbl, toInt, toStr, typeOf, valueName } from '../convert.js';
 import { cmp, isNum, looseEq, strictEq } from '../compare.js';
@@ -60,6 +60,12 @@ export function cExpr(n) {
   const fn = EXPR[n.k];
   if (!fn) throw new FatalSig(`Unsupported expression type ${n.k}`, n.l);
   return n.chainTop ? nullsafeChain(fn(n)) : fn(n);
+}
+// runs an increment (1) or decrement (-1), for the error of a typed reference it overflows
+function incDec(d, fn) {
+  const prev = refOp.incdec;
+  refOp.incdec = d;
+  try { return fn(); } finally { refOp.incdec = prev; }
 }
 function deprecatedConst(name) {
   const a = rt.deprecatedConsts.get(name);
@@ -137,7 +143,7 @@ const EXPR = {
     // constant array folding
     if (n.items.every((it) => !it.spread && !it.byRef && (!it.key || it.key.k === 'Lit') && (it.v.k === 'Lit'))) {
       const a = new PHPArray();
-      for (const it of n.items) { if (it.key) a.set(normKey(it.key.v), it.v.v); else a.push(it.v.v); }
+      for (const it of n.items) { if (it.key) a.set(dimKey(it.key.v), it.v.v); else a.push(it.v.v); }
       if (a.size === 0) return () => new PHPArray();
       return () => { a.cow = true; return a; };
     }
@@ -146,8 +152,8 @@ const EXPR = {
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
         if (it.spread) { spreadInto(a, it.V(f)); continue; }
-        if (it.L) { const r = it.L.ref(f); if (it.K) a.setRaw(normKey(it.K(f)), r); else a.push(r); continue; }
-        if (it.K) { const k = it.K(f); a.set(normKey(k), it.V(f)); }
+        if (it.L) { const r = it.L.ref(f); if (it.K) a.setRaw(dimKey(it.K(f)), r); else a.push(r); continue; }
+        if (it.K) { const k = it.K(f); a.set(dimKey(k), it.V(f)); }
         else if (!a.push(it.V(f))) { /* overflow warning issued */ }
       }
       return a;
@@ -310,23 +316,23 @@ const EXPR = {
     }
     return (f) => { const v = E(f); return T.modify(f, (cur) => fnop(cur, v)); };
   },
-  PreInc(n) { const T = cLval(n.e); return (f) => T.modify(f, inc); },
-  PreDec(n) { const T = cLval(n.e); return (f) => T.modify(f, dec); },
+  PreInc(n) { const T = cLval(n.e); return (f) => incDec(1, () => T.modify(f, inc)); },
+  PreDec(n) { const T = cLval(n.e); return (f) => incDec(-1, () => T.modify(f, dec)); },
   PostInc(n) {
     if (n.e.k === 'Var' && typeof n.e.name === 'string' && n.e.name !== 'this' && !SUPERGLOBALS.has(n.e.name)) {
       const name = n.e.name;
       return (f) => {
         const r = f.vars[name];
-        if (r !== undefined) { const v = r.v; if (typeof v === 'number' && v < MAXS) { r.v = v + 1; return v; } r.v = inc(v); return v; }
+        if (r !== undefined) { const v = r.v; if (typeof v === 'number' && v < MAXS) { r.v = v + 1; return v; } incDec(1, () => { r.v = inc(v); }); return v; }
         warnUndefVar(name); f.vars[name] = new Ref(1); return null;
       };
     }
     const T = cLval(n.e);
-    return (f) => { let old; T.modify(f, (c) => { old = c; return inc(c); }); return old; };
+    return (f) => { let old; incDec(1, () => T.modify(f, (c) => { old = c; return inc(c); })); return old; };
   },
   PostDec(n) {
     const T = cLval(n.e);
-    return (f) => { let old; T.modify(f, (c) => { old = c; return dec(c); }); return old; };
+    return (f) => { let old; incDec(-1, () => T.modify(f, (c) => { old = c; return dec(c); })); return old; };
   },
   Bin(n) {
     const op = n.op;
@@ -729,8 +735,10 @@ function spreadInto(a, v) {
     }
     return;
   }
-  throwError('Error', 'Only arrays and Traversables can be unpacked');
+  throwError('Error', 'Only arrays and Traversables can be unpacked' + unpackGiven(v));
 }
+// (PHP 8.4 names the type)
+const unpackGiven = (v) => (rt.phpVersion >= 80400 ? `, ${valueName(v)} given` : '');
 
 // ---------------------------------------------------------------- arguments
 export function isRefParam(fn, i) {
@@ -802,7 +810,7 @@ function compileArgs(argNodes) {
             else if (isInt(k)) { if (named) throwError('Error', 'Cannot use positional argument after named argument during unpacking'); out.push(x); }
             else throwError('Error', 'Keys must be of type int|string during argument unpacking');
           });
-        } else throwError('Error', 'Only arrays and Traversables can be unpacked');
+        } else throwError('TypeError', 'Only arrays and Traversables can be unpacked' + unpackGiven(v));
         continue;
       }
       if (it.name) {
@@ -832,7 +840,8 @@ function compileNamedCall(n, plain) {
   // assert(): unless zend.assertions=1 the call (and its arguments) is skipped
   if ((lfb || lname) === 'assert' && n.args !== 'fcc' && !plain) {
     // (without a description, the message is the assertion's source, zend_compile_assert)
-    if (n.args.length === 1 && !n.args[0].spread && !n.args[0].name && !n.fromPipe) n = { ...n, args: [n.args[0], { e: { k: 'Lit', v: assertMessage(n.args) } }] };
+    // (a named argument gets a named description: named and positional ones can't be mixed)
+    if (n.args.length === 1 && !n.args[0].spread && !n.fromPipe) n = { ...n, args: [n.args[0], { e: { k: 'Lit', v: assertMessage(n.args) }, name: n.args[0].name ? 'description' : undefined }] };
     const inner = compileNamedCall(n, true);
     return (f) => (rt.ini.get('zend.assertions') === '1' ? inner(f) : true);
   }

@@ -122,7 +122,8 @@ async function one(file) {
   fs.writeFileSync(path.join(dir, name), s.FILE, 'latin1');
   // (expect mode: helper files next to the test, which it includes relative to __DIR__)
   if (expectMode) for (const f of siblings(path.dirname(file))) fs.copyFileSync(path.join(path.dirname(file), f), path.join(dir, f));
-  const ini = ['-d', 'display_errors=1', '-d', 'log_errors=0', '-d', 'error_reporting=32767', '-d', 'html_errors=0'];
+  // (expect mode: E_ALL of the emulated version, as run-tests.php sets it)
+  const ini = ['-d', 'display_errors=1', '-d', 'log_errors=0', '-d', expectMode ? 'error_reporting=E_ALL' : 'error_reporting=32767', '-d', 'html_errors=0'];
   // (run-tests.php's defaults; differential runs get the local php.ini's, like NIP)
   if (expectMode) ini.push('-d', 'zend.exception_ignore_args=0', '-d', 'zend.exception_string_param_max_len=15', '-d', 'zend.assertions=1', '-d', 'precision=14', '-d', 'serialize_precision=-1', '-d', 'short_open_tag=0', '-d', 'output_buffering=0', '-d', 'memory_limit=128M');
   if (s.INI) for (const l of s.INI.split('\n')) { const t = l.trim(); if (t && !t.startsWith(';')) ini.push('-d', t); }

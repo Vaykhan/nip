@@ -2,7 +2,7 @@
 class ArrayObject implements IteratorAggregate, ArrayAccess, Countable, Serializable {
   const STD_PROP_LIST = 1; const ARRAY_AS_PROPS = 2;
   private $__a; private $__f = 0;
-  public function __construct($array = [], int $flags = 0, string $iteratorClass = "ArrayIterator") { $this->__a = is_object($array) ? get_object_vars($array) : $array; $this->__f = $flags; }
+  public function __construct($array = [], int $flags = 0, string $iteratorClass = "ArrayIterator") { if (is_object($array) && !($array instanceof ArrayObject) && !($array instanceof ArrayIterator)) __nip_deprecated(80500, 'ArrayObject::__construct(): Using an object as a backing array for ArrayObject is deprecated, as it allows violating class constraints and invariants'); $this->__a = is_object($array) ? get_object_vars($array) : $array; $this->__f = $flags; }
   public function getIterator(): Iterator { return new ArrayIterator($this->__a); }
   public function getFlags() { return $this->__f; }
   public function setFlags($flags) { $this->__f = $flags; }

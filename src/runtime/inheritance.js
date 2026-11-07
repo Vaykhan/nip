@@ -255,7 +255,7 @@ function checkProps(cls, decl, resolve) {
       const getOnly = pi.virtual && pi.hooks && !pi.hooks.set, setOnly = pi.virtual && pi.hooks && !pi.hooks.get;
       if (ct && ((getOnly && a !== false) || (setOnly && b !== false))) continue;
       if (a === false || b === false || !ct) throw at(`Type of ${cn} must be ${typeStr(pt, null)} (as in class ${inhClsName(pi.cls)})`);
-    } else if (ct) throw at(`Type of ${cn} must not be defined (as in class ${inhClsName(pi.cls)})`);
+    } else if (ct) throw at(rt.phpVersion >= 80500 ? `Type of ${cn} must be omitted to match the parent definition in class ${inhClsName(pi.cls)}` : `Type of ${cn} must not be defined (as in class ${inhClsName(pi.cls)})`);
   }
   // an interface's hooked properties (PHP 8.4): a set hook needs a public set visibility
   for (const iname of decl.interfaces || []) {

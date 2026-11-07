@@ -140,6 +140,7 @@ ext/date/tests/bug62500.phpt
 ext/date/tests/bug63391.phpt
 ext/date/tests/bug64653.phpt
 ext/date/tests/bug64992.phpt
+ext/date/tests/bug65371.phpt
 ext/date/tests/bug65672.phpt
 ext/date/tests/bug66836.phpt
 ext/date/tests/bug67109.phpt
@@ -210,6 +211,8 @@ ext/date/tests/gmdate_variation9.phpt
 ext/date/tests/gmmktime_basic.phpt
 ext/date/tests/gmmktime_variation7.phpt
 ext/date/tests/gmmktime_variation8.phpt
+ext/date/tests/gmstrftime_basic.phpt
+ext/date/tests/gmstrftime_variation4.phpt
 ext/date/tests/localtime_basic.phpt
 ext/date/tests/localtime_variation4.phpt
 ext/date/tests/localtime_variation5.phpt

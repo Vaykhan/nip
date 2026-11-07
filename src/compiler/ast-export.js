@@ -261,7 +261,7 @@ export function axExp(n, priority = 0, ind = 0) {
     case 'Call': {
       let f;
       if (typeof n.f === 'string') f = n.raw ?? n.fb ?? n.f;
-      else if (n.f.k === 'Closure' && axV85()) f = '(' + axExp(n.f, 0, ind) + ')';
+      else if (n.f.k === 'Closure' && axV85() && !(n.f.fn.arrow && n.f.inParens)) f = '(' + axExp(n.f, 0, ind) + ')'; // (a parenthesized arrow function prints its own)
       else f = axExp(n.f, 0, ind);
       return f + '(' + axArgs(n.args, ind) + ')';
     }

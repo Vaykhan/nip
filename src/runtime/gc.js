@@ -1,7 +1,7 @@
 // Destructor support: targeted reachability checks emulate PHP's refcount-based
 // destruction timing for objects that define __destruct().
 
-import { Flt, objHandles, PHPArray, PHPObject, Ref } from '../values.js';
+import { Flt, objHandles, PHPArray, PHPObject, Ref, TypedRef } from '../values.js';
 import { Frame } from '../compiler/common.js';
 import { rt } from './state.js';
 import { callFunction, NativeFrame } from './functions.js';
@@ -351,6 +351,8 @@ function sweep(cands, ret, self) {
   for (const o of order) {
     o.idFreed = true;
     objHandles.free.push(o.id);
+    // references into its typed properties lose their types
+    for (const x of o.props.values()) if (x instanceof TypedRef && x.sources !== undefined) x.sources = x.sources.filter((i) => o.props.get(i.key) !== x);
   }
   return true;
 }
